@@ -1,0 +1,33 @@
+name: Public GitHub
+description: Medium-strictness profile for pushing to public repositories.
+extends: default
+actions:
+  - tags: ["private-key"]
+    action: block
+
+  - tags: ["jwt"]
+    action: block
+
+  - tags: ["credentials"]
+    action: block
+    min_severity: critical
+
+  - tags: ["credentials"]
+    action: redact
+    min_severity: high
+
+  - tags: ["credentials"]
+    action: redact
+    min_severity: medium
+
+  - tags: ["cloud"]
+    action: redact
+
+  - tags: ["env"]
+    action: redact
+
+  - tags: ["api-key"]
+    action: redact
+
+  - tags: ["vcs"]
+    action: redact

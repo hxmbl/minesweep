@@ -1,0 +1,48 @@
+rules:
+  - id: aws-access-key-id
+    type: regex
+    name: AWS Access Key ID
+    description: Amazon Web Services access key ID (AKIA/ASIA format)
+    severity: critical
+    tags: [aws, cloud, credentials]
+    patterns:
+      - regex: \b(AKIA[0-9A-Z]{16})\b
+        confidence: 0.95
+      - regex: \b(ASIA[0-9A-Z]{16})\b
+        confidence: 0.90
+
+  - id: aws-secret-key
+    type: regex
+    name: AWS Secret Access Key
+    description: Amazon Web Services secret access key
+    severity: critical
+    tags: [aws, cloud, credentials]
+    patterns:
+      - regex: (?i)aws_secret_access_key\s*[:=]\s*["']?([A-Za-z0-9/+=]{40})["']?
+        confidence: 0.95
+        capture_group: 1
+
+  - id: aws-session-token
+    type: regex
+    name: AWS Session Token
+    description: Amazon Web Services temporary session token
+    severity: critical
+    tags: [aws, cloud, credentials]
+    patterns:
+      - regex: (?i)aws_session_token\s*[:=]\s*["']?([A-Za-z0-9/+=]{100,})["']?
+        confidence: 0.90
+        capture_group: 1
+
+  - id: aws-account-id
+    type: regex
+    name: AWS Account ID
+    description: Amazon Web Services account ID (12-digit number)
+    severity: medium
+    tags: [aws, cloud]
+    patterns:
+      - regex: \b(\d{12})\b
+        confidence: 0.30
+    file_filter:
+      exclude:
+        - "*.md"
+        - "*.txt"

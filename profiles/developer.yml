@@ -1,0 +1,10 @@
+name: Developer
+description: Relaxed profile for local development. Allows most secrets with warnings.
+extends: default
+actions:
+  - tags: ["*"]
+    action: warn
+    min_severity: high
+
+  - tags: ["env"]
+    action: allow

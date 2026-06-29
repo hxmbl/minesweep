@@ -1,0 +1,6 @@
+/minesweep
+*.test
+*.out
+*.testbin
+.DS_Store
+audit.txt

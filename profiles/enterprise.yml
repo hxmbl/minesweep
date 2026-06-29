@@ -1,0 +1,31 @@
+name: Enterprise
+description: Strictest profile. Blocks or redacts all credential types.
+extends: default
+actions:
+  - tags: ["*"]
+    action: block
+    min_severity: medium
+
+  - tags: ["cloud"]
+    action: block
+
+  - tags: ["api-key"]
+    action: block
+
+  - tags: ["env"]
+    action: block
+
+  - tags: ["vcs"]
+    action: block
+
+  - tags: ["credentials"]
+    action: block
+
+  - tags: ["private-key"]
+    action: block
+
+  - tags: ["jwt"]
+    action: block
+
+  - tags: ["certificate"]
+    action: redact

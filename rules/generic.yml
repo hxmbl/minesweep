@@ -1,0 +1,122 @@
+rules:
+  - id: generic-api-key
+    type: regex
+    name: Generic API Key
+    description: Common API key formats (hex, alphanumeric)
+    severity: medium
+    tags: [credentials, api-key]
+    patterns:
+      - regex: \b([A-Za-z0-9\-_]{32,45})\b
+        confidence: 0.30
+      - regex: \b([0-9a-fA-F]{32})\b
+        confidence: 0.35
+    file_filter:
+      exclude:
+        - "*.md"
+        - "*.txt"
+        - "*.json"
+        - "*.lock"
+
+  - id: generic-slack-token
+    type: regex
+    name: Slack Token
+    description: Slack API token (xoxb, xoxa, xoxp prefixes)
+    severity: high
+    tags: [credentials, api-key, slack]
+    patterns:
+      - regex: \b(xox[baprs]-[0-9A-Za-z\-_]{10,})\b
+        confidence: 0.85
+
+  - id: generic-slack-webhook
+    type: regex
+    name: Slack Webhook URL
+    description: Slack incoming webhook URL
+    severity: high
+    tags: [credentials, slack]
+    patterns:
+      - regex: https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+
+        confidence: 0.85
+
+  - id: generic-stripe-key
+    type: regex
+    name: Stripe API Key
+    description: Stripe secret or publishable key
+    severity: high
+    tags: [credentials, api-key, stripe]
+    patterns:
+      - regex: \b(sk_live_[0-9A-Za-z]{24,}|pk_live_[0-9A-Za-z]{24,})\b
+        confidence: 0.90
+      - regex: \b(sk_test_[0-9A-Za-z]{24,}|pk_test_[0-9A-Za-z]{24,})\b
+        confidence: 0.85
+
+  - id: generic-twilio-key
+    type: regex
+    name: Twilio API Key
+    description: Twilio account SID or auth token
+    severity: high
+    tags: [credentials, api-key, twilio]
+    patterns:
+      - regex: \b(AC[A-Za-z0-9]{32})\b
+        confidence: 0.85
+      - regex: \b(SK[A-Za-z0-9]{32})\b
+        confidence: 0.80
+
+  - id: generic-heroku-api
+    type: regex
+    name: Heroku API Key
+    description: Heroku API token
+    severity: high
+    tags: [credentials, api-key, heroku]
+    patterns:
+      - regex: \b([hH][eE][rR][oO][kK][uU]\s*[:=]\s*[A-Za-z0-9\-_]{20,})\b
+        confidence: 0.70
+
+  - id: generic-npm-token
+    type: regex
+    name: npm Access Token
+    description: npm registry authentication token
+    severity: high
+    tags: [credentials, npm, registry]
+    patterns:
+      - regex: \b(npm_[A-Za-z0-9]{36,})\b
+        confidence: 0.85
+
+  - id: generic-docker-config
+    type: regex
+    name: Docker Config Credentials
+    description: Docker registry credentials (config.json)
+    severity: high
+    tags: [credentials, docker]
+    patterns:
+      - regex: ("auth"\s*:\s*"[A-Za-z0-9+/=]{20,}")
+        confidence: 0.75
+
+  - id: generic-pem-certificate
+    type: regex
+    name: PEM Certificate
+    description: PEM-encoded certificate or key
+    severity: medium
+    tags: [credentials, certificate]
+    patterns:
+      - regex: -----BEGIN (CERTIFICATE|RSA PRIVATE KEY|DSA PRIVATE KEY|EC PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----
+        confidence: 0.95
+
+  - id: generic-rsa-private-key
+    type: regex
+    name: RSA Private Key
+    description: RSA private key content
+    severity: critical
+    tags: [credentials, private-key]
+    patterns:
+      - regex: -----BEGIN RSA PRIVATE KEY-----\\s[A-Za-z0-9+/=\\s]+-----END RSA PRIVATE KEY-----
+        confidence: 0.95
+
+  - id: generic-pkcs8-key
+    type: regex
+    name: PKCS#8 Private Key
+    description: PKCS#8 format private key
+    severity: critical
+    tags: [credentials, private-key]
+    patterns:
+      - regex: -----BEGIN PRIVATE KEY-----
+        confidence: 0.90

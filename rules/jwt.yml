@@ -1,0 +1,40 @@
+rules:
+  - id: jwt-bearer
+    type: regex
+    name: JWT Token (Bearer)
+    description: JSON Web Token with Bearer prefix
+    severity: high
+    tags: [jwt, credentials, auth]
+    patterns:
+      - regex: \b(Bearer\s+eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)\b
+        confidence: 0.95
+
+  - id: jwt-standalone
+    type: regex
+    name: JWT Token
+    description: JSON Web Token (standalone)
+    severity: high
+    tags: [jwt, credentials, auth]
+    patterns:
+      - regex: \b(eyJ[A-Za-z0-9\-_]{10,}\.eyJ[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_]{10,})\b
+        confidence: 0.85
+
+  - id: jose-token
+    type: regex
+    name: JOSE Token
+    description: JSON Object Signing and Encryption token
+    severity: medium
+    tags: [jwt, credentials]
+    patterns:
+      - regex: \b(eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_\-_]+)\b
+        confidence: 0.70
+
+  - id: jwt-encoded
+    type: regex
+    name: URL-Encoded JWT Token
+    description: JWT token in URL-encoded form
+    severity: high
+    tags: [jwt, credentials, auth]
+    patterns:
+      - regex: (access_token|id_token|refresh_token)=eyJ[A-Za-z0-9\-_%]+\.eyJ[A-Za-z0-9\-_%]+
+        confidence: 0.80

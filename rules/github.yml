@@ -1,0 +1,52 @@
+rules:
+  - id: github-pat
+    type: regex
+    name: GitHub Personal Access Token
+    description: GitHub personal access token (ghp_ prefix)
+    severity: critical
+    tags: [github, credentials, vcs]
+    patterns:
+      - regex: \b(ghp_[0-9A-Za-z]{36,251})\b
+        confidence: 0.95
+      - regex: \b(gho_[0-9A-Za-z]{36,251})\b
+        confidence: 0.95
+      - regex: \b(ghu_[0-9A-Za-z]{36,251})\b
+        confidence: 0.95
+      - regex: \b(ghs_[0-9A-Za-z]{36,251})\b
+        confidence: 0.95
+      - regex: \b(GH[0-9A-Za-z\-_]{36,251})\b
+        confidence: 0.90
+
+  - id: github-app-token
+    type: regex
+    name: GitHub App Token
+    description: GitHub application installation token
+    severity: critical
+    tags: [github, credentials, vcs]
+    patterns:
+      - regex: \b(ghx_[0-9A-Za-z]{36,251})\b
+        confidence: 0.90
+
+  - id: github-refresh-token
+    type: regex
+    name: GitHub Refresh Token
+    description: GitHub refresh token (ghr_ prefix)
+    severity: critical
+    tags: [github, credentials, vcs]
+    patterns:
+      - regex: \b(ghr_[0-9A-Za-z]{36,251})\b
+        confidence: 0.90
+
+  - id: github-oauth-token
+    type: regex
+    name: GitHub OAuth Token
+    description: GitHub OAuth access token
+    severity: high
+    tags: [github, credentials, vcs]
+    patterns:
+      - regex: \b([0-9a-fA-F]{40})\b
+        confidence: 0.40
+    file_filter:
+      exclude:
+        - "*.md"
+        - "*.txt"

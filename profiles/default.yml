@@ -1,0 +1,34 @@
+name: Default
+description: Base policy profile with sensible defaults
+actions:
+  - tags: ["private-key"]
+    action: block
+    reason: Private keys should never be shared or transmitted
+
+  - tags: ["credentials"]
+    action: block
+    min_severity: critical
+
+  - tags: ["credentials"]
+    action: redact
+    min_severity: high
+
+  - tags: ["credentials"]
+    action: warn
+    min_severity: medium
+
+  - tags: ["jwt"]
+    action: block
+    reason: JWT tokens can provide unauthorized access
+
+  - tags: ["env"]
+    action: warn
+
+  - tags: ["cloud"]
+    action: redact
+    min_severity: high
+    reason: Cloud credentials should be redacted outside secure environments
+
+  - tags: ["api-key"]
+    action: redact
+    reason: API keys should be redacted when shared

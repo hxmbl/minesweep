@@ -1,0 +1,30 @@
+rules:
+  - id: ssh-private-key
+    type: regex
+    name: SSH Private Key
+    description: SSH private key (RSA, DSA, ECDSA, Ed25519, OpenSSH)
+    severity: critical
+    tags: [ssh, credentials, private-key]
+    patterns:
+      - regex: -----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY-----
+        confidence: 0.95
+
+  - id: ssh-authorized-keys
+    type: regex
+    name: SSH Authorized Keys
+    description: SSH authorized_keys file content
+    severity: high
+    tags: [ssh, credentials]
+    patterns:
+      - regex: (ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-nistp\d{3})\s+AAAA[0-9A-Za-z+/]+[=]{0,3}\s
+        confidence: 0.90
+
+  - id: pgp-private-key
+    type: regex
+    name: PGP Private Key Block
+    description: PGP private key block
+    severity: critical
+    tags: [pgp, credentials, private-key]
+    patterns:
+      - regex: -----BEGIN PGP PRIVATE KEY BLOCK-----
+        confidence: 0.95

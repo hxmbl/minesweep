@@ -1,0 +1,40 @@
+rules:
+  - id: google-api-key
+    type: regex
+    name: Google API Key
+    description: Google API key (AIza prefix)
+    severity: high
+    tags: [google, cloud, credentials, api-key]
+    patterns:
+      - regex: \b(AIza[0-9A-Za-z\-_]{35})\b
+        confidence: 0.90
+
+  - id: google-oauth-client-id
+    type: regex
+    name: Google OAuth Client ID
+    description: Google OAuth client identifier
+    severity: high
+    tags: [google, cloud, credentials]
+    patterns:
+      - regex: \b(\d{12,20}-[A-Za-z0-9_]{20,40}\.apps\.googleusercontent\.com)\b
+        confidence: 0.85
+
+  - id: google-oauth-private-key
+    type: regex
+    name: Google Service Account Private Key
+    description: Google service account private key (PEM block)
+    severity: critical
+    tags: [google, cloud, credentials, private-key]
+    patterns:
+      - regex: -----BEGIN PRIVATE KEY-----\\n[A-Za-z0-9+/=\\n]+-----END PRIVATE KEY-----
+        confidence: 0.95
+
+  - id: google-firebase-url
+    type: regex
+    name: Firebase Database URL
+    description: Google Firebase realtime database URL
+    severity: medium
+    tags: [google, cloud]
+    patterns:
+      - regex: https://[A-Za-z0-9_-]+\.firebaseio\.com
+        confidence: 0.60

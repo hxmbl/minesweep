@@ -1,0 +1,42 @@
+rules:
+  - id: azure-subscription-key
+    type: regex
+    name: Azure Subscription Key
+    description: Microsoft Azure subscription key
+    severity: high
+    tags: [azure, cloud, credentials]
+    patterns:
+      - regex: (?i)subscription_key\s*[:=]\s*["']?([A-Za-z0-9]{32})["']?
+        confidence: 0.85
+        capture_group: 1
+
+  - id: azure-client-secret
+    type: regex
+    name: Azure Client Secret
+    description: Microsoft Azure application client secret
+    severity: critical
+    tags: [azure, cloud, credentials]
+    patterns:
+      - regex: (?i)(azure_client_secret|client_secret)\s*[:=]\s*["']?([A-Za-z0-9\-_~.]+)["']?
+        confidence: 0.85
+        capture_group: 2
+
+  - id: azure-connection-string
+    type: regex
+    name: Azure Connection String
+    description: Microsoft Azure storage or SQL connection string
+    severity: high
+    tags: [azure, cloud, credentials]
+    patterns:
+      - regex: (DefaultEndpointsProtocol=https;|Server=tcp:).*AccountKey=[A-Za-z0-9+/=]{40,}
+        confidence: 0.90
+
+  - id: azure-tenant-id
+    type: regex
+    name: Azure Tenant ID
+    description: Microsoft Azure tenant/directory ID
+    severity: low
+    tags: [azure, cloud]
+    patterns:
+      - regex: \b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b
+        confidence: 0.40
