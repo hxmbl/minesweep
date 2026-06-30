@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 
 	"minesweep/findings"
 )
@@ -27,12 +26,7 @@ func WriteText(w io.Writer, report *findings.RiskReport, verbose bool) {
 	fmt.Fprintln(w)
 
 	for _, f := range report.Findings {
-		action := "?"
-		if len(f.Reason) >= 4 {
-			parts := strings.SplitN(f.Reason, ": ", 2)
-			action = parts[0]
-		}
-		fmt.Fprintf(w, "  [%s] %s\n", action, f.Type)
+		fmt.Fprintf(w, "  [%s] %s\n", f.Action, f.Type)
 		fmt.Fprintf(w, "        File: %s:%d\n", f.File, f.Line)
 		if verbose {
 			val := f.Value

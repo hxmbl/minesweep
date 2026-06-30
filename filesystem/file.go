@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 
@@ -37,12 +38,17 @@ func NewFile(path string) (*File, error) {
 			f.SymlinkTarget = "(unreadable)"
 			return f, nil
 		}
-		f.SymlinkTarget = target
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(path), target)
 		}
-		if _, err := os.Stat(target); os.IsNotExist(err) {
-			f.SymlinkTarget = target + " (broken)"
+		absTarget, err := filepath.Abs(target)
+		if err != nil {
+			f.SymlinkTarget = target
+		} else {
+			f.SymlinkTarget = absTarget
+		}
+		if _, err := os.Stat(f.SymlinkTarget); os.IsNotExist(err) {
+			f.SymlinkTarget = f.SymlinkTarget + " (broken)"
 			return f, nil
 		}
 	}
@@ -55,7 +61,7 @@ func NewFile(path string) (*File, error) {
 
 	hasher := blake3.New()
 	hasher.Write(data)
-	f.Hash = string(hasher.Sum(nil))
+	f.Hash = hex.EncodeToString(hasher.Sum(nil))
 
 	f.IsBinary = IsBinary(data)
 

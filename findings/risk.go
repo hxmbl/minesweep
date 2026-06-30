@@ -1,6 +1,9 @@
 package findings
 
-import "sort"
+import (
+	"sort"
+	"strconv"
+)
 
 type RiskReport struct {
 	RiskScore   RiskScore         `yaml:"risk_score" json:"risk_score"`
@@ -102,7 +105,7 @@ func computeSafeToShare(score RiskScore) map[string]bool {
 	if score <= RiskScoreLow {
 		m["public_github"] = true
 		m["ai_context"] = true
-		m["email"] = true
+		m["ci_pipeline"] = true
 	}
 	if score <= RiskScoreMedium {
 		m["email"] = true
@@ -150,13 +153,5 @@ func formatCount(n int, noun string) string {
 }
 
 func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	s := ""
-	for n > 0 {
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
-	return s
+	return strconv.Itoa(n)
 }

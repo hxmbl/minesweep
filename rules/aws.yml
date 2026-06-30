@@ -41,8 +41,13 @@ rules:
     tags: [aws, cloud]
     patterns:
       - regex: \b(\d{12})\b
-        confidence: 0.30
+        confidence: 0.10
     file_filter:
       exclude:
         - "*.md"
         - "*.txt"
+        - "*.json"
+        - "*.yaml"
+        - "*.yml"
+        - "*.csv"
+        - "*.log"

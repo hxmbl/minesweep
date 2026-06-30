@@ -238,7 +238,7 @@ func TestEngineProfileDifferences(t *testing.T) {
 	}
 }
 
-func TestEngineWithIgnoreFile(t *testing.T) {
+func TestEngineWithMinesweepIgnore(t *testing.T) {
 	wd, _ := os.Getwd()
 	rulesDir := filepath.Join(wd, "../rules")
 	profilesDir := filepath.Join(wd, "../profiles")

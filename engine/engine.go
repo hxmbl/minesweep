@@ -13,6 +13,7 @@ import (
 type Config struct {
 	RulesDir    string
 	ProfilesDir string
+	PolicyDir   string
 	Profile     string
 	PolicyFile  string
 	Verbose     bool
@@ -29,11 +30,11 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.RulesDir == "" {
 		cfg.RulesDir = "rules"
 	}
-	if cfg.PolicyFile == "" && cfg.Profile == "" {
-		cfg.Profile = "default"
-	}
 	if cfg.ProfilesDir == "" {
 		cfg.ProfilesDir = "profiles"
+	}
+	if cfg.PolicyDir == "" {
+		cfg.PolicyDir = "policy"
 	}
 
 	regexDetector, err := detectors.NewRegexDetector(cfg.RulesDir)
@@ -48,18 +49,26 @@ func New(cfg Config) (*Engine, error) {
 	}
 
 	var policies []policy.PolicyRule
-	if cfg.Profile != "" {
+	switch {
+	case cfg.Profile != "":
+		if cfg.PolicyFile != "" {
+			fmt.Fprintf(os.Stderr, "warning: both --profile and --policy set; --profile (%q) takes precedence\n", cfg.Profile)
+		}
 		policies, err = policy.ResolveProfile(cfg.ProfilesDir, cfg.Profile)
 		if err != nil {
 			return nil, fmt.Errorf("resolve profile %q: %w", cfg.Profile, err)
 		}
-	} else if cfg.PolicyFile != "" {
+	case cfg.PolicyFile != "":
 		policies, err = policy.LoadPolicyFile(cfg.PolicyFile)
 		if err != nil {
 			return nil, fmt.Errorf("load policy file: %w", err)
 		}
-	} else {
-		policies = defaultPolicies()
+	default:
+		defaultPath := cfg.PolicyDir + "/default.yml"
+		policies, err = policy.LoadPolicyFile(defaultPath)
+		if err != nil {
+			return nil, fmt.Errorf("load default policy: %w", err)
+		}
 	}
 
 	return &Engine{
@@ -122,7 +131,11 @@ func (e *Engine) evaluate(fs []findings.Finding) []findings.Finding {
 	var evaluated []findings.Finding
 	for _, f := range fs {
 		action := policy.Evaluate(f, e.policies)
+		f.Action = action
 		f.Reason = string(action) + ": " + f.Reason
+		if action == findings.ActionRedact {
+			f.Value = findings.RedactValue(f.Value, f.Type)
+		}
 		evaluated = append(evaluated, f)
 	}
 	return evaluated
@@ -134,17 +147,4 @@ func (e *Engine) Detectors() []detectors.Detector {
 
 func (e *Engine) Policies() []policy.PolicyRule {
 	return e.policies
-}
-
-func defaultPolicies() []policy.PolicyRule {
-	return []policy.PolicyRule{
-		{Tags: []string{"private-key"}, Action: findings.ActionBlock, Reason: "Private keys should never be shared"},
-		{Tags: []string{"credentials"}, Action: findings.ActionBlock, MinSeverity: "critical"},
-		{Tags: []string{"credentials"}, Action: findings.ActionRedact, MinSeverity: "high"},
-		{Tags: []string{"credentials"}, Action: findings.ActionWarn, MinSeverity: "medium"},
-		{Tags: []string{"jwt"}, Action: findings.ActionBlock, Reason: "JWT tokens can provide unauthorized access"},
-		{Tags: []string{"env"}, Action: findings.ActionWarn},
-		{Tags: []string{"cloud"}, Action: findings.ActionRedact, MinSeverity: "high"},
-		{Tags: []string{"api-key"}, Action: findings.ActionRedact},
-	}
 }

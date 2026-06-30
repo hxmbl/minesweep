@@ -1,0 +1,27 @@
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - revive
+    - gosec
+    - goconst
+    - gofmt
+    - misspell
+    - prealloc
+
+run:
+  deadline: 5m
+  tests: true
+  build-tags:
+    - all
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec

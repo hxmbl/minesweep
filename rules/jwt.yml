@@ -26,7 +26,7 @@ rules:
     severity: medium
     tags: [jwt, credentials]
     patterns:
-      - regex: \b(eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_\-_]+)\b
+      - regex: \b(eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)\b
         confidence: 0.70
 
   - id: jwt-encoded

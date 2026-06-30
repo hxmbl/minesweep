@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"minesweep/engine"
+	"minesweep/findings"
 	"minesweep/report"
 )
 
@@ -27,10 +28,11 @@ evaluates them against policies, and produces a risk report.`,
 	}
 
 	root.Flags().StringVarP(&cfg.RulesDir, "rules", "r", "rules", "Directory containing rule YAML files")
-	root.Flags().StringVarP(&cfg.PolicyFile, "policy", "p", "", "Policy file to evaluate against")
-	root.Flags().StringVarP(&cfg.Profile, "profile", "", "", "Profile name (developer, enterprise, public-github)")
+	root.Flags().StringVarP(&cfg.PolicyFile, "policy", "", "", "Policy file to evaluate against")
+	root.Flags().StringVarP(&cfg.Profile, "profile", "p", "", "Profile name (developer, enterprise, public-github)")
 	root.Flags().StringVarP(&cfg.ProfilesDir, "profiles", "", "profiles", "Directory containing profile YAML files")
-	root.Flags().BoolVarP(&outputJSON, "json", "j", false, "Output as JSON")
+	root.Flags().BoolVarP(&outputJSON, "json", "", false, "Output as JSON")
+	root.Flags().StringVarP(&cfg.PolicyDir, "policy-dir", "", "policy", "Directory containing policy YAML files")
 	root.Flags().BoolVarP(&cfg.Verbose, "verbose", "v", false, "Verbose output")
 
 	if err := root.Execute(); err != nil {
@@ -81,8 +83,12 @@ func runScan(cmd *cobra.Command, args []string) error {
 		report.WriteText(os.Stdout, reportData, cfg.Verbose)
 	}
 
-	if reportData != nil && len(reportData.Findings) > 0 {
-		os.Exit(1)
+	if reportData != nil {
+		for _, f := range reportData.Findings {
+			if f.Severity >= findings.SeverityLow && f.Action != findings.ActionAllow {
+				os.Exit(1)
+			}
+		}
 	}
 	return nil
 }

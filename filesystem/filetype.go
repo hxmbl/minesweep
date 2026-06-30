@@ -1,5 +1,7 @@
 package filesystem
 
+import "strings"
+
 var textExtensions = map[string]bool{
 	".txt": true, ".md": true, ".rst": true, ".adoc": true,
 	".go": true, ".rs": true, ".py": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
@@ -27,11 +29,17 @@ var binaryExtensions = map[string]bool{
 }
 
 func IsTextFile(ext string) bool {
-	return textExtensions[ext]
+	if textExtensions[ext] {
+		return true
+	}
+	return textExtensions[strings.TrimPrefix(ext, ".")]
 }
 
 func IsBinaryFile(ext string) bool {
-	return binaryExtensions[ext]
+	if binaryExtensions[ext] {
+		return true
+	}
+	return binaryExtensions[strings.TrimPrefix(ext, ".")]
 }
 
 var binaryMagics = [][]byte{

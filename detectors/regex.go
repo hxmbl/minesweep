@@ -93,6 +93,9 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 }
 
 func (p *Pattern) compile() error {
+	if p.CaptureGroup < 0 {
+		return fmt.Errorf("negative capture_group (%d) is not allowed", p.CaptureGroup)
+	}
 	re, err := regexp.Compile(p.Regex)
 	if err != nil {
 		return fmt.Errorf("compile pattern %q: %w", p.Regex, err)

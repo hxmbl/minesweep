@@ -83,5 +83,5 @@ func (r RiskScore) Label() string {
 }
 
 func RedactValue(value string, ruleName string) string {
-	return "<REDACTED: " + ruleName + ">"
+	return "<REDACTED>"
 }

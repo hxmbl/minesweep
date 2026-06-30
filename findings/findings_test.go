@@ -76,7 +76,7 @@ func TestGenerateRiskReport(t *testing.T) {
 
 func TestRedactValue(t *testing.T) {
 	got := RedactValue("sk-abc123", "OpenAI API Key")
-	want := "<REDACTED: OpenAI API Key>"
+	want := "<REDACTED>"
 	if got != want {
 		t.Fatalf("RedactValue() = %q, want %q", got, want)
 	}

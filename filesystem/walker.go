@@ -136,6 +136,7 @@ type WalkOption struct {
 	Ignore          *IgnorePattern
 	IgnoreFilePath  string
 	MaxFileSize     int64
+	OnError         func(path string, err error)
 }
 
 func Walk(root string, ignore *IgnorePattern, ignoreFilePath string) ([]*File, error) {
@@ -157,24 +158,28 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 	ip := opts.Ignore
 	if ip == nil {
 		ip = NewIgnorePattern(nil)
-	}
-
-	ignoreFilePath := opts.IgnoreFilePath
-	if ignoreFilePath == "" {
-		ignoreFilePath = filepath.Join(root, ".minesweepignore")
-	}
-	if fileIgnore, err := LoadMinesweepIgnore(ignoreFilePath); err == nil {
-		ip = mergeIgnorePatterns(ip, fileIgnore)
+		ignoreFilePath := opts.IgnoreFilePath
+		if ignoreFilePath == "" {
+			ignoreFilePath = filepath.Join(root, ".minesweepignore")
+		}
+		if fileIgnore, err := LoadMinesweepIgnore(ignoreFilePath); err == nil {
+			ip = mergeIgnorePatterns(ip, fileIgnore)
+		}
 	}
 
 	var files []*File
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			if opts.OnError != nil {
+				opts.OnError(path, err)
+			}
 			return nil
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".git" || name == "node_modules" || name == ".svn" || name == "__pycache__" {
+			if name == ".git" || name == "node_modules" || name == ".svn" || name == "__pycache__" ||
+				name == ".venv" || name == "venv" || name == "vendor" || name == "dist" ||
+				name == "build" || name == "target" || name == ".idea" || name == ".vscode" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -200,6 +205,9 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 
 		f, err := NewFile(path)
 		if err != nil {
+			if opts.OnError != nil {
+				opts.OnError(path, err)
+			}
 			return nil
 		}
 		files = append(files, f)
@@ -212,26 +220,8 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 }
 
 func mergeIgnorePatterns(a, b *IgnorePattern) *IgnorePattern {
-	combined := make([]string, 0)
-	for _, p := range a.patterns {
-		line := p.pattern
-		if p.negate {
-			line = "!" + line
-		}
-		if p.dirMatch {
-			line = line + "/"
-		}
-		combined = append(combined, line)
-	}
-	for _, p := range b.patterns {
-		line := p.pattern
-		if p.negate {
-			line = "!" + line
-		}
-		if p.dirMatch {
-			line = line + "/"
-		}
-		combined = append(combined, line)
-	}
-	return NewIgnorePattern(combined)
+	combined := make([]ignoreRule, 0, len(a.patterns)+len(b.patterns))
+	combined = append(combined, a.patterns...)
+	combined = append(combined, b.patterns...)
+	return &IgnorePattern{patterns: combined}
 }
