@@ -1,7 +1,16 @@
 name: Developer
-description: Relaxed profile for local development. Allows most secrets with warnings.
+description: >-
+  Relaxed profile for local development. High-severity findings are demoted to
+  warnings; low/medium findings fall through to the default profile (may still
+  be blocked or redacted). Use the default profile if you want strict enforcement.
 extends: default
 actions:
+  # CAUTION: The '*' rule only catches findings at min_severity: high or above.
+  # Low and medium severity findings fall through to the parent profile's rules
+  # (default), which may still block or redact them. This is by design — the
+  # developer profile relaxes the most urgent findings while keeping moderate
+  # ones visible. To fully disable enforcement for all severities, add a second
+  # '*' rule without min_severity.
   - tags: ["*"]
     action: warn
     min_severity: high

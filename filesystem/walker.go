@@ -130,6 +130,12 @@ func matchGlobParts(pattern, path []string) bool {
 	return matchGlobParts(pattern[1:], path[1:])
 }
 
+var DefaultSkipExtensions = []string{
+	".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp",
+	".mp4", ".avi", ".mov",
+	".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".lib", ".class", ".pyc",
+}
+
 const DefaultMaxFileSize int64 = 50 * 1024 * 1024 // 50MB
 
 type WalkOption struct {
@@ -137,6 +143,7 @@ type WalkOption struct {
 	IgnoreFilePath  string
 	MaxFileSize     int64
 	OnError         func(path string, err error)
+	SkipExtensions  []string
 }
 
 func Walk(root string, ignore *IgnorePattern, ignoreFilePath string) ([]*File, error) {
@@ -190,12 +197,15 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 			return nil
 		}
 
+		skipExts := opts.SkipExtensions
+		if skipExts == nil {
+			skipExts = DefaultSkipExtensions
+		}
 		ext := filepath.Ext(path)
-		switch ext {
-		case ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp", ".mp4", ".avi", ".mov":
-			return nil
-		case ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".lib", ".class", ".pyc":
-			return nil
+		for _, e := range skipExts {
+			if ext == e {
+				return nil
+			}
 		}
 
 		info, err := d.Info()

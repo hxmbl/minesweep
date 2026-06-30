@@ -11,13 +11,14 @@ import (
 )
 
 type Config struct {
-	RulesDir    string
-	ProfilesDir string
-	PolicyDir   string
-	Profile     string
-	PolicyFile  string
-	Verbose     bool
-	Boundaries  []string
+	RulesDir       string
+	ProfilesDir    string
+	PolicyDir      string
+	Profile        string
+	PolicyFile     string
+	Verbose        bool
+	Boundaries     []string
+	SkipExtensions []string
 }
 
 type Engine struct {
@@ -102,7 +103,10 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 }
 
 func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
-	files, err := filesystem.Walk(root, nil, "")
+	files, err := filesystem.WalkWithOptions(root, filesystem.WalkOption{
+		MaxFileSize:    filesystem.DefaultMaxFileSize,
+		SkipExtensions: e.config.SkipExtensions,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("walk directory: %w", err)
 	}
