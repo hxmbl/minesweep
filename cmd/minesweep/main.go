@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	cfg engine.Config
+	cfg        engine.Config
 	outputJSON bool
 )
 
@@ -34,6 +34,7 @@ evaluates them against policies, and produces a risk report.`,
 	root.Flags().BoolVarP(&outputJSON, "json", "", false, "Output as JSON")
 	root.Flags().StringVarP(&cfg.PolicyDir, "policy-dir", "", "policy", "Directory containing policy YAML files")
 	root.Flags().BoolVarP(&cfg.Verbose, "verbose", "v", false, "Verbose output")
+	root.Flags().StringVarP(&cfg.FailOn, "fail-on", "", "low", "Minimum severity that exits non-zero (info, low, medium, high, critical)")
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -84,8 +85,9 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if reportData != nil {
+		minSev := findings.ParseSeverity(cfg.FailOn)
 		for _, f := range reportData.Findings {
-			if f.Severity >= findings.SeverityLow && f.Action != findings.ActionAllow {
+			if f.Severity >= minSev && f.Action != findings.ActionAllow {
 				os.Exit(1)
 			}
 		}

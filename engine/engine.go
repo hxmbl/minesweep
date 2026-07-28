@@ -19,6 +19,7 @@ type Config struct {
 	Verbose        bool
 	Boundaries     []string
 	SkipExtensions []string
+	FailOn         string
 }
 
 type Engine struct {
