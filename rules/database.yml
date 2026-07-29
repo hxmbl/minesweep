@@ -1,0 +1,63 @@
+rules:
+  - id: postgres-connection-string
+    type: regex
+    name: PostgreSQL Connection String
+    description: PostgreSQL database connection string with credentials
+    severity: critical
+    tags: [database, postgres, credentials]
+    patterns:
+      - regex: 'postgres://[^:]+:[^@]+@[^/\s]+/\S+'
+        confidence: 0.90
+      - regex: 'postgresql://[^:]+:[^@]+@[^/\s]+/\S+'
+        confidence: 0.90
+
+  - id: mysql-connection-string
+    type: regex
+    name: MySQL Connection String
+    description: MySQL database connection string with credentials
+    severity: critical
+    tags: [database, mysql, credentials]
+    patterns:
+      - regex: 'mysql://[^:]+:[^@]+@[^/\s]+/\S+'
+        confidence: 0.90
+
+  - id: mongodb-connection-string
+    type: regex
+    name: MongoDB Connection String
+    description: MongoDB database connection string with credentials
+    severity: critical
+    tags: [database, mongodb, credentials]
+    patterns:
+      - regex: 'mongodb(\+srv)?://[^:]+:[^@]+@[^/\s]+/\S+'
+        confidence: 0.90
+
+  - id: redis-connection-string
+    type: regex
+    name: Redis Connection String
+    description: Redis database connection string with credentials
+    severity: high
+    tags: [database, redis, credentials]
+    patterns:
+      - regex: 'redis://[^:]+:[^@]+@[^/\s]+(/\S*)?'
+        confidence: 0.85
+
+  - id: database-password
+    type: regex
+    name: Database Password
+    description: Database password in configuration files
+    severity: high
+    tags: [database, password]
+    patterns:
+      - regex: '(?i)(?:db_password|database_password|mysql_password|postgres_password|redis_password)\s*[:=]\s*["\x27]?([^\s"\x27]{8,})["\x27]?'
+        confidence: 0.80
+        capture_group: 1
+
+  - id: database-url
+    type: regex
+    name: Database URL
+    description: Database URL with embedded credentials
+    severity: high
+    tags: [database, url]
+    patterns:
+      - regex: '(?i)(?:database_url|db_url|database_uri|db_uri)\s*[:=]\s*["\x27]?(postgres(ql)?|mysql|mongodb(\+srv)?|redis)://[^\s"\x27]+["\x27]?'
+        confidence: 0.85

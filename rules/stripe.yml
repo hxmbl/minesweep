@@ -1,0 +1,46 @@
+rules:
+  - id: stripe-secret-key
+    type: regex
+    name: Stripe Secret Key
+    description: Stripe payment processor secret API key
+    severity: critical
+    tags: [stripe, payments, credentials]
+    patterns:
+      - regex: '\b(sk_live_[0-9a-zA-Z]{24,})\b'
+        confidence: 0.95
+      - regex: '\b(sk_test_[0-9a-zA-Z]{24,})\b'
+        confidence: 0.80
+
+  - id: stripe-publishable-key
+    type: regex
+    name: Stripe Publishable Key
+    description: Stripe payment processor publishable key
+    severity: medium
+    tags: [stripe, payments, api-key]
+    patterns:
+      - regex: '\b(pk_live_[0-9a-zA-Z]{24,})\b'
+        confidence: 0.70
+      - regex: '\b(pk_test_[0-9a-zA-Z]{24,})\b'
+        confidence: 0.50
+
+  - id: stripe-restricted-key
+    type: regex
+    name: Stripe Restricted Key
+    description: Stripe payment processor restricted API key
+    severity: high
+    tags: [stripe, payments, credentials]
+    patterns:
+      - regex: '\b(rk_live_[0-9a-zA-Z]{24,})\b'
+        confidence: 0.85
+      - regex: '\b(rk_test_[0-9a-zA-Z]{24,})\b'
+        confidence: 0.70
+
+  - id: stripe-webhook-secret
+    type: regex
+    name: Stripe Webhook Secret
+    description: Stripe webhook endpoint secret
+    severity: high
+    tags: [stripe, payments, credentials]
+    patterns:
+      - regex: '\b(whsec_[0-9a-zA-Z]{32,})\b'
+        confidence: 0.90

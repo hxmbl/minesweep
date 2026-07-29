@@ -28,7 +28,6 @@ func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {
 
 	maxSeverity := SeverityInfo
 	hasPrivateKey := false
-	hasProductionCreds := false
 	reasons := make(map[string]bool)
 	typeCounts := make(map[string]int)
 	criticalTypes := make(map[string]bool)
@@ -48,13 +47,10 @@ func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {
 			if t == "private-key" {
 				hasPrivateKey = true
 			}
-			if t == "credentials" || t == "cloud" || t == "api-key" {
-				hasProductionCreds = true
-			}
 		}
 	}
 
-	riskScore := computeRiskScore(maxSeverity, hasPrivateKey, hasProductionCreds)
+	riskScore := computeRiskScore(maxSeverity, hasPrivateKey)
 
 	safeToShare := computeSafeToShare(riskScore)
 
@@ -76,12 +72,10 @@ func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {
 	}
 }
 
-func computeRiskScore(maxSev Severity, hasPrivateKey, hasProductionCreds bool) RiskScore {
+func computeRiskScore(maxSev Severity, hasPrivateKey bool) RiskScore {
 	switch {
 	case maxSev >= SeverityCritical && hasPrivateKey:
 		return RiskScoreCritical
-	case maxSev >= SeverityCritical && hasProductionCreds:
-		return RiskScoreHigh
 	case maxSev >= SeverityCritical:
 		return RiskScoreHigh
 	case maxSev >= SeverityHigh:

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -64,7 +65,12 @@ func (d *RegexDetector) Name() string {
 }
 
 func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
+	if file.IsBinary {
+		return nil
+	}
+
 	var fResults []findings.Finding
+	lines := strings.Split(string(file.Content), "\n")
 	for _, rule := range d.rules {
 		if !matchesFileFilter(rule.FileFilter, file.Path) {
 			continue
@@ -74,6 +80,11 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 			for _, m := range matches {
 				tags := make([]string, len(rule.Tags))
 				copy(tags, rule.Tags)
+				context := extractContext(lines, m.Line-1, 2)
+				sourceLine := ""
+				if m.Line-1 >= 0 && m.Line-1 < len(lines) {
+					sourceLine = strings.TrimSpace(lines[m.Line-1])
+				}
 				fResults = append(fResults, findings.Finding{
 					Type:       rule.Name,
 					Severity:   findings.ParseSeverity(rule.Severity),
@@ -85,11 +96,35 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 					Reason:     rule.Description,
 					RuleID:     rule.ID,
 					Tags:       tags,
+					Context:    context,
+					SourceLine: sourceLine,
 				})
 			}
 		}
 	}
 	return fResults
+}
+
+func extractContext(lines []string, center, radius int) string {
+	start := center - radius
+	if start < 0 {
+		start = 0
+	}
+	end := center + radius + 1
+	if end > len(lines) {
+		end = len(lines)
+	}
+	var sb strings.Builder
+	for i := start; i < end; i++ {
+		prefix := "  "
+		if i == center {
+			prefix = "> "
+		}
+		sb.WriteString(prefix)
+		sb.WriteString(strings.TrimSpace(lines[i]))
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 func (p *Pattern) compile() error {

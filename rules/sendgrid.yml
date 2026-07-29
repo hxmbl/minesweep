@@ -1,0 +1,40 @@
+rules:
+  - id: sendgrid-api-key
+    type: regex
+    name: SendGrid API Key
+    description: SendGrid email service API key
+    severity: high
+    tags: [sendgrid, email, api-key]
+    patterns:
+      - regex: '\b(SG\.[A-Za-z0-9\-_]{22}\.[A-Za-z0-9\-_]{43})\b'
+        confidence: 0.90
+
+  - id: mailgun-api-key
+    type: regex
+    name: Mailgun API Key
+    description: Mailgun email service API key
+    severity: high
+    tags: [mailgun, email, api-key]
+    patterns:
+      - regex: '\b(key-[0-9a-zA-Z]{32})\b'
+        confidence: 0.70
+
+  - id: twilio-api-key
+    type: regex
+    name: Twilio API Key
+    description: Twilio communication service API key
+    severity: high
+    tags: [twilio, communication, api-key]
+    patterns:
+      - regex: '\b(SK[0-9a-fA-F]{32})\b'
+        confidence: 0.75
+
+  - id: twilio-account-sid
+    type: regex
+    name: Twilio Account SID
+    description: Twilio account SID
+    severity: medium
+    tags: [twilio, communication]
+    patterns:
+      - regex: '\b(AC[0-9a-fA-F]{32})\b'
+        confidence: 0.60

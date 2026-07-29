@@ -3,6 +3,10 @@ package engine
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
 
 	"minesweep/detectors"
 	"minesweep/filesystem"
@@ -20,6 +24,16 @@ type Config struct {
 	Boundaries     []string
 	SkipExtensions []string
 	FailOn         string
+	MinConfidence  float64
+	DiffMode       bool
+	DiffBase       string
+	StagedOnly     bool
+	BaselineFile   string
+	UpdateBaseline bool
+	MinSeverity    string
+	Tags           []string
+	Workers        int
+	SuppressFile   string
 }
 
 type Engine struct {
@@ -48,6 +62,7 @@ func New(cfg Config) (*Engine, error) {
 		regexDetector,
 		detectors.NewFileTypeDetector(),
 		detectors.NewSymlinkDetector(),
+		detectors.NewEntropyDetector(),
 	}
 
 	var policies []policy.PolicyRule
@@ -66,7 +81,7 @@ func New(cfg Config) (*Engine, error) {
 			return nil, fmt.Errorf("load policy file: %w", err)
 		}
 	default:
-		defaultPath := cfg.PolicyDir + "/default.yml"
+		defaultPath := filepath.Join(cfg.PolicyDir, "default.yml")
 		policies, err = policy.LoadPolicyFile(defaultPath)
 		if err != nil {
 			return nil, fmt.Errorf("load default policy: %w", err)
@@ -89,7 +104,98 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	if !info.IsDir() {
 		return e.runSingleFile(path)
 	}
-	return e.runDirectory(path)
+
+	if e.config.DiffMode || e.config.StagedOnly {
+		return e.runDiff(path)
+	}
+
+	report, err := e.runDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if e.config.BaselineFile != "" {
+		baseline, err := findings.LoadBaseline(e.config.BaselineFile)
+		if err != nil {
+			return nil, fmt.Errorf("load baseline: %w", err)
+		}
+
+		newFindings := findings.FilterNewFindings(report.Findings, baseline)
+		report.Findings = newFindings
+		newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
+		report = &newReport
+
+		if e.config.UpdateBaseline {
+			findings.UpdateBaseline(baseline, newFindings)
+			if err := findings.SaveBaseline(e.config.BaselineFile, baseline); err != nil {
+				return nil, fmt.Errorf("save baseline: %w", err)
+			}
+		}
+	}
+
+	if e.config.SuppressFile != "" {
+		suppressions, err := findings.LoadSuppressions(e.config.SuppressFile)
+		if err != nil {
+			return nil, fmt.Errorf("load suppressions: %w", err)
+		}
+
+		filtered := findings.FilterSuppressed(report.Findings, suppressions)
+		report.Findings = filtered
+		newReport := findings.GenerateRiskReport(filtered, e.config.Boundaries)
+		report = &newReport
+	}
+
+	return report, nil
+}
+
+func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
+	var diffFiles []string
+	var err error
+	if e.config.StagedOnly {
+		diffFiles, err = filesystem.GetStagedFiles(root)
+	} else {
+		diffFiles, err = filesystem.GetDiffFiles(root, e.config.DiffBase)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get diff files: %w", err)
+	}
+
+	var files []*filesystem.File
+	for _, relPath := range diffFiles {
+		absPath := filepath.Join(root, relPath)
+		file, err := filesystem.NewFile(absPath)
+		if err != nil {
+			continue
+		}
+		files = append(files, file)
+	}
+
+	allFindings := e.detectParallel(files)
+
+	evaluated := e.evaluate(allFindings)
+	reportVal := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
+	report := &reportVal
+
+	if e.config.BaselineFile != "" {
+		baseline, err := findings.LoadBaseline(e.config.BaselineFile)
+		if err != nil {
+			return nil, fmt.Errorf("load baseline: %w", err)
+		}
+
+		newFindings := findings.FilterNewFindings(report.Findings, baseline)
+		report.Findings = newFindings
+		newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
+		report = &newReport
+
+		if e.config.UpdateBaseline {
+			findings.UpdateBaseline(baseline, newFindings)
+			if err := findings.SaveBaseline(e.config.BaselineFile, baseline); err != nil {
+				return nil, fmt.Errorf("save baseline: %w", err)
+			}
+		}
+	}
+
+	return report, nil
 }
 
 func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
@@ -99,8 +205,29 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 	}
 	allFindings := e.detect(file)
 	evaluated := e.evaluate(allFindings)
-	report := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
-	return &report, nil
+	singleReport := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
+	report := &singleReport
+
+	if e.config.BaselineFile != "" {
+		baseline, err := findings.LoadBaseline(e.config.BaselineFile)
+		if err != nil {
+			return nil, fmt.Errorf("load baseline: %w", err)
+		}
+
+		newFindings := findings.FilterNewFindings(report.Findings, baseline)
+		report.Findings = newFindings
+		newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
+		report = &newReport
+
+		if e.config.UpdateBaseline {
+			findings.UpdateBaseline(baseline, newFindings)
+			if err := findings.SaveBaseline(e.config.BaselineFile, baseline); err != nil {
+				return nil, fmt.Errorf("save baseline: %w", err)
+			}
+		}
+	}
+
+	return report, nil
 }
 
 func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
@@ -112,11 +239,7 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 		return nil, fmt.Errorf("walk directory: %w", err)
 	}
 
-	var allFindings []findings.Finding
-	for _, file := range files {
-		fResults := e.detect(file)
-		allFindings = append(allFindings, fResults...)
-	}
+	allFindings := e.detectParallel(files)
 
 	evaluated := e.evaluate(allFindings)
 	report := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
@@ -129,7 +252,102 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 		fResults := d.Detect(file)
 		all = append(all, fResults...)
 	}
-	return all
+
+	var filtered []findings.Finding
+	for _, f := range all {
+		if e.config.MinConfidence > 0 && f.Confidence < e.config.MinConfidence {
+			continue
+		}
+
+		if e.config.MinSeverity != "" {
+			minSev := findings.ParseSeverity(e.config.MinSeverity)
+			if f.Severity < minSev {
+				continue
+			}
+		}
+
+		if len(e.config.Tags) > 0 && !hasAnyTag(f.Tags, e.config.Tags) {
+			continue
+		}
+
+		filtered = append(filtered, f)
+	}
+	return filtered
+}
+
+func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
+	workers := e.config.Workers
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	if workers > len(files) {
+		workers = len(files)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	type result struct {
+		findings []findings.Finding
+	}
+
+	fileCh := make(chan *filesystem.File, len(files))
+	resultCh := make(chan result, len(files))
+
+	var filesScanned atomic.Int64
+	var findingsFound atomic.Int64
+
+	totalFiles := int64(len(files))
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for file := range fileCh {
+				fResults := e.detect(file)
+				findingsFound.Add(int64(len(fResults)))
+				filesScanned.Add(1)
+				resultCh <- result{findings: fResults}
+
+				if e.config.Verbose && filesScanned.Load()%100 == 0 {
+					fmt.Fprintf(os.Stderr, "\rScanning: %d/%d files (%d findings)", filesScanned.Load(), totalFiles, findingsFound.Load())
+				}
+			}
+		}()
+	}
+
+	for _, file := range files {
+		fileCh <- file
+	}
+	close(fileCh)
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	var allFindings []findings.Finding
+	for r := range resultCh {
+		allFindings = append(allFindings, r.findings...)
+	}
+
+	if e.config.Verbose && totalFiles > 100 {
+		fmt.Fprintf(os.Stderr, "\rScanning complete: %d files, %d findings\n", totalFiles, len(allFindings))
+	}
+
+	return allFindings
+}
+
+func hasAnyTag(findingTags, filterTags []string) bool {
+	for _, ft := range filterTags {
+		for _, ftag := range findingTags {
+			if ftag == ft {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (e *Engine) evaluate(fs []findings.Finding) []findings.Finding {

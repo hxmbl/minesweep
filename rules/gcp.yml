@@ -1,0 +1,51 @@
+rules:
+  - id: gcp-service-account-key
+    type: regex
+    name: GCP Service Account Key
+    description: Google Cloud Platform service account key (JSON key file)
+    severity: critical
+    tags: [gcp, cloud, credentials]
+    patterns:
+      - regex: '"private_key"\s*:\s*"-----BEGIN (RSA )?PRIVATE KEY-----[^"]+"'
+        confidence: 0.95
+
+  - id: gcp-api-key
+    type: regex
+    name: GCP API Key
+    description: Google Cloud Platform API key
+    severity: high
+    tags: [gcp, cloud, api-key]
+    patterns:
+      - regex: '\b(AIza[0-9A-Za-z\-_]{35})\b'
+        confidence: 0.90
+
+  - id: gcp-oauth-token
+    type: regex
+    name: GCP OAuth Token
+    description: Google Cloud Platform OAuth access token
+    severity: high
+    tags: [gcp, cloud, token]
+    patterns:
+      - regex: '\b(ya29\.[0-9A-Za-z\-_]+)\b'
+        confidence: 0.90
+
+  - id: gcp-service-account-email
+    type: regex
+    name: GCP Service Account Email
+    description: Google Cloud Platform service account email
+    severity: medium
+    tags: [gcp, cloud]
+    patterns:
+      - regex: '\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.iam\.gserviceaccount\.com)\b'
+        confidence: 0.80
+
+  - id: gcp-project-id
+    type: regex
+    name: GCP Project ID
+    description: Google Cloud Platform project ID
+    severity: low
+    tags: [gcp, cloud]
+    patterns:
+      - regex: '(?i)(?:project|gcp_project|google_project)\s*[:=]\s*["\x27]?([a-z][a-z0-9\-]{4,28}[a-z0-9])["\x27]?'
+        confidence: 0.60
+        capture_group: 1

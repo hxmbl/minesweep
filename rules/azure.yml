@@ -1,42 +1,56 @@
 rules:
-  - id: azure-subscription-key
+  - id: azure-storage-account-key
     type: regex
-    name: Azure Subscription Key
-    description: Microsoft Azure subscription key
-    severity: high
-    tags: [azure, cloud, credentials]
-    patterns:
-      - regex: (?i)subscription_key\s*[:=]\s*["']?([A-Za-z0-9]{32})["']?
-        confidence: 0.85
-        capture_group: 1
-
-  - id: azure-client-secret
-    type: regex
-    name: Azure Client Secret
-    description: Microsoft Azure application client secret
+    name: Azure Storage Account Key
+    description: Microsoft Azure storage account access key
     severity: critical
     tags: [azure, cloud, credentials]
     patterns:
-      - regex: (?i)(azure_client_secret|client_secret)\s*[:=]\s*["']?([A-Za-z0-9\-_~.]+)["']?
-        confidence: 0.85
-        capture_group: 2
+      - regex: '(?i)(?:account_key|storage_key|azure_key)\s*[:=]\s*["\x27]?([A-Za-z0-9+/]{88}==)["\x27]?'
+        confidence: 0.90
+        capture_group: 1
 
   - id: azure-connection-string
     type: regex
     name: Azure Connection String
-    description: Microsoft Azure storage or SQL connection string
-    severity: high
+    description: Microsoft Azure service connection string
+    severity: critical
     tags: [azure, cloud, credentials]
     patterns:
-      - regex: (DefaultEndpointsProtocol=https;|Server=tcp:).*AccountKey=[A-Za-z0-9+/=]{40,}
+      - regex: '(?i)DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/]+=*;'
         confidence: 0.90
+
+  - id: azure-sas-token
+    type: regex
+    name: Azure SAS Token
+    description: Microsoft Azure shared access signature token
+    severity: high
+    tags: [azure, cloud, token]
+    patterns:
+      - regex: '\b(sv=[0-9]{4}-[0-9]{2}-[0-9]{2}&[^\s]+)\b'
+        confidence: 0.80
+
+  - id: azure-client-secret
+    type: regex
+    name: Azure Client Secret
+    description: Microsoft Azure AD client secret
+    severity: critical
+    tags: [azure, cloud, credentials]
+    patterns:
+      - regex: '(?i)(?:client_secret|azure_client_secret|aad_client_secret)\s*[:=]\s*["\x27]?([A-Za-z0-9\-_~.]{34,})["\x27]?'
+        confidence: 0.85
+        capture_group: 1
 
   - id: azure-tenant-id
     type: regex
     name: Azure Tenant ID
-    description: Microsoft Azure tenant/directory ID
+    description: Microsoft Azure AD tenant ID
     severity: low
     tags: [azure, cloud]
     patterns:
-      - regex: \b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b
-        confidence: 0.40
+      - regex: '\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b'
+        confidence: 0.30
+    file_filter:
+      exclude:
+        - "*.md"
+        - "*.txt"

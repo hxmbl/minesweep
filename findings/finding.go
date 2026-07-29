@@ -12,4 +12,6 @@ type Finding struct {
 	RuleID     string   `yaml:"rule_id" json:"rule_id"`
 	Tags       []string `yaml:"tags" json:"tags"`
 	Action     Action   `yaml:"action" json:"action"`
+	Context    string   `yaml:"context,omitempty" json:"context,omitempty"`
+	SourceLine string   `yaml:"source_line,omitempty" json:"source_line,omitempty"`
 }

@@ -26,7 +26,7 @@ rules:
     severity: critical
     tags: [google, cloud, credentials, private-key]
     patterns:
-      - regex: -----BEGIN PRIVATE KEY-----\\n[A-Za-z0-9+/=\\n]+-----END PRIVATE KEY-----
+      - regex: -----BEGIN PRIVATE KEY-----[A-Za-z0-9+/=\s]+-----END PRIVATE KEY-----
         confidence: 0.95
 
   - id: google-firebase-url

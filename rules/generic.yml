@@ -1,15 +1,34 @@
 rules:
-  - id: generic-api-key
+  - id: generic-api-key-context
     type: regex
-    name: Generic API Key
-    description: Common API key formats (hex, alphanumeric)
+    name: Generic API Key (with context)
+    description: API key in assignment context (key=, api_key:, etc.)
     severity: medium
     tags: [credentials, api-key]
     patterns:
+      - regex: (?i)(api[_-]?key|apikey|secret[_-]?key|access[_-]?key|auth[_-]?token|api[_-]?secret)\s*[:=]\s*['"]?([A-Za-z0-9\-_]{20,})['"]?
+        confidence: 0.45
+        capture_group: 2
+      - regex: (?i)(key|token|secret|password|credential)\s*[:=]\s*['"]?([A-Za-z0-9\-_]{20,})['"]?
+        confidence: 0.35
+        capture_group: 2
+    file_filter:
+      exclude:
+        - "*.md"
+        - "*.txt"
+        - "*.lock"
+
+  - id: generic-api-key
+    type: regex
+    name: Generic API Key
+    description: Common API key formats (hex, alphanumeric) - low confidence, requires context
+    severity: low
+    tags: [credentials, api-key]
+    patterns:
       - regex: \b([A-Za-z0-9\-_]{40,45})\b
-        confidence: 0.20
+        confidence: 0.10
       - regex: \b([0-9a-fA-F]{32})\b
-        confidence: 0.25
+        confidence: 0.15
     file_filter:
       exclude:
         - "*.md"
@@ -108,7 +127,7 @@ rules:
     severity: critical
     tags: [credentials, private-key]
     patterns:
-      - regex: -----BEGIN RSA PRIVATE KEY-----\\s[A-Za-z0-9+/=\\s]+-----END RSA PRIVATE KEY-----
+      - regex: -----BEGIN RSA PRIVATE KEY-----[A-Za-z0-9+/=\s]+-----END RSA PRIVATE KEY-----
         confidence: 0.95
 
   - id: generic-pkcs8-key

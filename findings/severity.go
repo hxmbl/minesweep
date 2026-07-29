@@ -10,6 +10,8 @@ const (
 	SeverityCritical Severity = 5
 )
 
+const ConfidenceScale = 100.0
+
 func (s Severity) String() string {
 	switch s {
 	case SeverityInfo:

@@ -76,7 +76,7 @@ func (ip *IgnorePattern) Ignored(path string) bool {
 			if strings.HasPrefix(path, rule.pattern+"/") || strings.Contains(path, "/"+rule.pattern+"/") {
 				matched = true
 			}
-			if strings.HasPrefix(base, rule.pattern) && base == rule.pattern {
+			if base == rule.pattern {
 				matched = true
 			}
 		}
@@ -134,6 +134,7 @@ var DefaultSkipExtensions = []string{
 	".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp",
 	".mp4", ".avi", ".mov",
 	".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".lib", ".class", ".pyc",
+	".DS_Store",
 }
 
 const DefaultMaxFileSize int64 = 50 * 1024 * 1024 // 50MB
