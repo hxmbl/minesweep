@@ -15,25 +15,27 @@ import (
 )
 
 type Config struct {
-	RulesDir       string
-	ProfilesDir    string
-	PolicyDir      string
-	Profile        string
-	PolicyFile     string
-	Verbose        bool
-	Boundaries     []string
-	SkipExtensions []string
-	FailOn         string
-	MinConfidence  float64
-	DiffMode       bool
-	DiffBase       string
-	StagedOnly     bool
-	BaselineFile   string
-	UpdateBaseline bool
-	MinSeverity    string
-	Tags           []string
-	Workers        int
-	SuppressFile   string
+	RulesDir                 string
+	ProfilesDir              string
+	PolicyDir                string
+	Profile                  string
+	PolicyFile               string
+	Verbose                  bool
+	Boundaries               []string
+	SkipExtensions           []string
+	FailOn                   string
+	MinConfidence            float64
+	DiffMode                 bool
+	DiffBase                 string
+	StagedOnly               bool
+	BaselineFile             string
+	UpdateBaseline           bool
+	MinSeverity              string
+	Tags                     []string
+	Workers                  int
+	SuppressFile             string
+	IncludeTestFiles         bool
+	DisableInlineSuppression bool
 }
 
 type Engine struct {
@@ -232,8 +234,9 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 
 func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 	files, err := filesystem.WalkWithOptions(root, filesystem.WalkOption{
-		MaxFileSize:    filesystem.DefaultMaxFileSize,
-		SkipExtensions: e.config.SkipExtensions,
+		MaxFileSize:      filesystem.DefaultMaxFileSize,
+		SkipExtensions:   e.config.SkipExtensions,
+		IncludeTestFiles: e.config.IncludeTestFiles,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("walk directory: %w", err)
@@ -272,6 +275,11 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 
 		filtered = append(filtered, f)
 	}
+
+	if !e.config.DisableInlineSuppression {
+		filtered = findings.FilterInlineSuppressions(filtered, string(file.Content))
+	}
+
 	return filtered
 }
 

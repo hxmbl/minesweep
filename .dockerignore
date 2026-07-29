@@ -1,0 +1,9 @@
+minesweep
+*.exe
+*.test
+*.out
+.git
+.github
+*.md
+LICENSE
+.minesweep.yml

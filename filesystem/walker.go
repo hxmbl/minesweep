@@ -132,9 +132,26 @@ func matchGlobParts(pattern, path []string) bool {
 
 var DefaultSkipExtensions = []string{
 	".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp",
-	".mp4", ".avi", ".mov",
+	".mp4", ".avi", ".mov", ".mkv",
 	".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".lib", ".class", ".pyc",
-	".DS_Store",
+	".DS_Store", ".DS_Store?",
+	".zip", ".tar", ".gz", ".bz2", ".rar", ".7z",
+	".woff", ".woff2", ".ttf", ".eot",
+	".min.js", ".min.css",
+	".lock", ".sum",
+}
+
+var DefaultSkipDirs = []string{
+	".git", ".svn", ".hg",
+	"node_modules", "vendor", "dist", "build", "target", "out",
+	".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache",
+	".idea", ".vscode", ".eclipse", ".project",
+	"coverage", ".nyc_output",
+	"tmp", "temp", ".tmp",
+	".gradle", ".m2",
+	"Pods", ".cocoapods",
+	".terraform", ".terraform.lock.hcl",
+	"elm-stuff", ".dart_tool",
 }
 
 const DefaultMaxFileSize int64 = 50 * 1024 * 1024 // 50MB
@@ -145,6 +162,8 @@ type WalkOption struct {
 	MaxFileSize     int64
 	OnError         func(path string, err error)
 	SkipExtensions  []string
+	SkipDirs        []string
+	IncludeTestFiles bool
 }
 
 func Walk(root string, ignore *IgnorePattern, ignoreFilePath string) ([]*File, error) {
@@ -175,6 +194,15 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 		}
 	}
 
+	skipDirs := opts.SkipDirs
+	if skipDirs == nil {
+		skipDirs = DefaultSkipDirs
+	}
+	skipDirSet := make(map[string]bool)
+	for _, d := range skipDirs {
+		skipDirSet[d] = true
+	}
+
 	var files []*File
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -185,9 +213,7 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".git" || name == "node_modules" || name == ".svn" || name == "__pycache__" ||
-				name == ".venv" || name == "venv" || name == "vendor" || name == "dist" ||
-				name == "build" || name == "target" || name == ".idea" || name == ".vscode" {
+			if skipDirSet[name] {
 				return filepath.SkipDir
 			}
 			return nil
@@ -203,10 +229,18 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 			skipExts = DefaultSkipExtensions
 		}
 		ext := filepath.Ext(path)
+		base := filepath.Base(path)
 		for _, e := range skipExts {
 			if ext == e {
 				return nil
 			}
+			if strings.HasSuffix(base, e) {
+				return nil
+			}
+		}
+
+		if !opts.IncludeTestFiles && isTestFile(path) {
+			return nil
 		}
 
 		info, err := d.Info()
@@ -228,6 +262,12 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 		return nil, err
 	}
 	return files, nil
+}
+
+func isTestFile(path string) bool {
+	base := filepath.Base(path)
+	name := strings.TrimSuffix(base, filepath.Ext(base))
+	return strings.HasSuffix(name, "_test") || strings.HasSuffix(name, ".test") || strings.HasSuffix(name, ".spec")
 }
 
 func mergeIgnorePatterns(a, b *IgnorePattern) *IgnorePattern {

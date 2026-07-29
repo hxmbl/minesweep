@@ -57,6 +57,14 @@ func NewRegexDetector(rulesDir string) (*RegexDetector, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	userRulesDir := getUserRulesDir()
+	if userRulesDir != "" {
+		if userRules, err := loadRules(userRulesDir, "regex"); err == nil {
+			rules = mergeRules(rules, userRules)
+		}
+	}
+
 	return &RegexDetector{rules: rules}, nil
 }
 
@@ -204,6 +212,40 @@ func loadRules(rulesDir, ruleType string) ([]Rule, error) {
 		}
 	}
 	return allRules, nil
+}
+
+func getUserRulesDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	configDir := os.Getenv("XDG_CONFIG_HOME")
+	if configDir == "" {
+		configDir = filepath.Join(home, ".config")
+	}
+
+	rulesDir := filepath.Join(configDir, "minesweep", "rules")
+	if _, err := os.Stat(rulesDir); os.IsNotExist(err) {
+		return ""
+	}
+	return rulesDir
+}
+
+func mergeRules(defaultRules, userRules []Rule) []Rule {
+	userIDs := make(map[string]bool)
+	for _, r := range userRules {
+		userIDs[r.ID] = true
+	}
+
+	var merged []Rule
+	for _, r := range defaultRules {
+		if !userIDs[r.ID] {
+			merged = append(merged, r)
+		}
+	}
+	merged = append(merged, userRules...)
+	return merged
 }
 
 func matchesFileFilter(f *FileFilter, path string) bool {
