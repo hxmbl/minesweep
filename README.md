@@ -1,6 +1,6 @@
 # MineSweep
 
-A secrets and sensitive data scanner for code repositories. MineSweep detects credentials, API keys, passwords, and other sensitive data, then evaluates them against configurable policies to produce risk reports.
+A policy driven secrets and sensitive data scanner for code repositories. MineSweep detects credentials, API keys, passwords, and other sensitive data, then evaluates them against configurable policies to produce risk reports.
 
 ## Installation
 
