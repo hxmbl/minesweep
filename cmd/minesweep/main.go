@@ -296,15 +296,17 @@ echo "minesweep: scanning staged files..."
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-for file in $STAGED_FILES; do
+while IFS= read -r file; do
     if [ -f "$file" ]; then
         mkdir -p "$TMPDIR/$(dirname "$file")"
         git show ":$file" > "$TMPDIR/$file" 2>/dev/null
     fi
-done
+done <<EOF
+$STAGED_FILES
+EOF
 
-# Run minesweep on staged files
-"$MINESWEEP" --staged --fail-on medium .
+# Run minesweep on extracted staged files
+"$MINESWEEP" --fail-on medium "$TMPDIR"
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then

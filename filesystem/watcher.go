@@ -27,12 +27,29 @@ type WatchOption struct {
 }
 
 func NewWatcher(dirs []string, opts *WatchOption, interval time.Duration) *Watcher {
+	// Enforce minimum interval to prevent CPU exhaustion
+	if interval < 100*time.Millisecond {
+		interval = 100 * time.Millisecond
+	}
+
 	w := &Watcher{
-		dirs:       dirs,
 		interval:   interval,
 		stopCh:     make(chan struct{}),
 		debounce:   500 * time.Millisecond,
 		fileStates: make(map[string]time.Time),
+	}
+
+	// Validate and resolve all directories to prevent path traversal
+	for _, dir := range dirs {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(abs)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		w.dirs = append(w.dirs, abs)
 	}
 
 	if opts != nil {
@@ -91,6 +108,7 @@ func (w *Watcher) checkChanges() {
 	defer w.mu.Unlock()
 
 	var changedFiles []string
+	maxFiles := 10000 // Prevent excessive memory usage
 
 	for _, dir := range w.dirs {
 		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -100,6 +118,10 @@ func (w *Watcher) checkChanges() {
 
 			if info.IsDir() {
 				return nil
+			}
+
+			if len(changedFiles) >= maxFiles {
+				return filepath.SkipDir
 			}
 
 			if w.shouldIgnore(path) {

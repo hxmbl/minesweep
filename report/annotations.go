@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	"minesweep/findings"
 )
+
+var unsafeChars = regexp.MustCompile(`[\n\r]`)
 
 type GitHubAnnotation struct {
 	Path    string
@@ -42,7 +45,10 @@ func GenerateAnnotations(findingsList []findings.Finding, minSeverity findings.S
 
 func WriteGitHubAnnotations(w io.Writer, annotations []GitHubAnnotation) error {
 	for _, a := range annotations {
-		fmt.Fprintf(w, "::%s file=%s,line=%d::%s\n", a.Level, a.Path, a.Line, a.Message)
+		// Sanitize to prevent log injection
+		safePath := unsafeChars.ReplaceAllString(a.Path, "_")
+		safeMsg := unsafeChars.ReplaceAllString(a.Message, " ")
+		fmt.Fprintf(w, "::%s file=%s,line=%d::%s\n", a.Level, safePath, a.Line, safeMsg)
 	}
 	return nil
 }
