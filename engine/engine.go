@@ -70,6 +70,8 @@ func New(cfg Config) (*Engine, error) {
 		detectors.NewSymlinkDetector(),
 		detectors.NewEntropyDetector(),
 		detectors.NewBase64Detector(cfg.RulesDir),
+		detectors.NewDatabaseDetector(),
+		detectors.NewOAuthDetector(),
 	}
 
 	var policies []policy.PolicyRule
@@ -131,7 +133,13 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 			return nil, fmt.Errorf("load baseline: %w", err)
 		}
 
-		newFindings := findings.FilterNewFindings(report.Findings, baseline)
+		if report == nil {
+		return nil, nil
+	}
+	if report.Findings == nil {
+		report.Findings = []findings.Finding{}
+	}
+	newFindings := findings.FilterNewFindings(report.Findings, baseline)
 		if newFindings == nil {
 			newFindings = []findings.Finding{}
 		}
@@ -203,7 +211,13 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 			return nil, fmt.Errorf("load baseline: %w", err)
 		}
 
-		newFindings := findings.FilterNewFindings(report.Findings, baseline)
+		if report == nil {
+		return nil, nil
+	}
+	if report.Findings == nil {
+		report.Findings = []findings.Finding{}
+	}
+	newFindings := findings.FilterNewFindings(report.Findings, baseline)
 		if newFindings == nil {
 			newFindings = []findings.Finding{}
 		}
@@ -242,7 +256,13 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 			return nil, fmt.Errorf("load baseline: %w", err)
 		}
 
-		newFindings := findings.FilterNewFindings(report.Findings, baseline)
+		if report == nil {
+		return nil, nil
+	}
+	if report.Findings == nil {
+		report.Findings = []findings.Finding{}
+	}
+	newFindings := findings.FilterNewFindings(report.Findings, baseline)
 		if newFindings == nil {
 			newFindings = []findings.Finding{}
 		}

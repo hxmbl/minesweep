@@ -161,6 +161,9 @@ func extractContext(lines []string, center, radius int) string {
 }
 
 func (p *Pattern) compile() error {
+if p.compiled != nil {
+return nil  // Already compiled
+}
 	if p.CaptureGroup < 0 {
 		return fmt.Errorf("negative capture_group (%d) is not allowed", p.CaptureGroup)
 	}

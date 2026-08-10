@@ -18,7 +18,7 @@ type Watcher struct {
 	debounce   time.Duration
 	lastNotify time.Time
 	fileStates map[string]time.Time
-	mu         sync.Mutex
+	mu         sync.RWMutex
 }
 
 type WatchOption struct {
@@ -70,7 +70,9 @@ func (w *Watcher) Start() error {
 				return nil
 			}
 			if !info.IsDir() {
+				w.mu.Lock()
 				w.fileStates[path] = info.ModTime()
+				w.mu.Unlock()
 			}
 			return nil
 		}); err != nil {
@@ -104,8 +106,8 @@ func (w *Watcher) watch() {
 }
 
 func (w *Watcher) checkChanges() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 
 	var changedFiles []string
 	maxFiles := 10000 // Prevent excessive memory usage
@@ -128,9 +130,16 @@ func (w *Watcher) checkChanges() {
 				return nil
 			}
 
+			// Use RLock for reading
+			w.mu.RLock()
 			lastMod, exists := w.fileStates[path]
+			w.mu.RUnlock()
+
 			if !exists || info.ModTime().After(lastMod) {
+				// Use Lock for writing
+				w.mu.Lock()
 				w.fileStates[path] = info.ModTime()
+				w.mu.Unlock()
 				changedFiles = append(changedFiles, path)
 			}
 			return nil

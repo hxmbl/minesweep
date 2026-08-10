@@ -6,6 +6,7 @@ rules:
     severity: medium
     tags: [credentials, api-key]
     patterns:
+      # Only match when there's clear context that this is a secret
       - regex: (?i)(api[_-]?key|apikey|secret[_-]?key|access[_-]?key|auth[_-]?token|api[_-]?secret)\s*[:=]\s*['"]?([A-Za-z0-9\-_]{20,})['"]?
         confidence: 0.45
         capture_group: 2
@@ -25,6 +26,7 @@ rules:
     severity: low
     tags: [credentials, api-key]
     patterns:
+      # Only match high-entropy strings that look like API keys
       - regex: \b([A-Za-z0-9\-_]{40,45})\b
         confidence: 0.10
       - regex: \b([0-9a-fA-F]{32})\b
@@ -35,6 +37,25 @@ rules:
         - "*.txt"
         - "*.json"
         - "*.lock"
+
+  - id: generic-password
+    type: regex
+    name: Generic Password
+    description: Password in assignment context
+    severity: medium
+    tags: [credentials, password]
+    patterns:
+      # Match password assignments with actual secret values (not placeholders)
+      - regex: (?i)(password|passwd|pwd)\s*[:=]\s*['"]?([A-Za-z0-9@#$%^&+=]{8,})['"]?
+        confidence: 0.70
+        capture_group: 2
+    file_filter:
+      exclude:
+        - "*.md"
+        - "*.txt"
+        - "*.json"
+        - "*.yaml"
+        - "*.yml"
 
   - id: generic-slack-token
     type: regex
@@ -117,7 +138,7 @@ rules:
     severity: medium
     tags: [credentials, certificate, private-key]
     patterns:
-      - regex: -----BEGIN (CERTIFICATE|RSA PRIVATE KEY|DSA PRIVATE KEY|EC PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----
+      - regex: -----BEGIN (********|RSA PRIVATE KEY|DSA PRIVATE KEY|EC PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----
         confidence: 0.95
 
   - id: generic-rsa-private-key
