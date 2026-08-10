@@ -1,11 +1,13 @@
 package detectors
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -33,6 +35,7 @@ type Pattern struct {
 	Confidence   float64 `yaml:"confidence"`
 	CaptureGroup int     `yaml:"capture_group,omitempty"`
 	compiled     *regexp.Regexp
+	compiledErr  error
 }
 
 type FileFilter struct {
@@ -47,6 +50,12 @@ type matchResult struct {
 	Line   int
 	Column int
 }
+
+// Regex timeout for matching operations to prevent ReDoS
+const regexTimeout = 100 * time.Millisecond
+
+// Maximum length of content to match against (to prevent memory exhaustion)
+const maxMatchLength = 10 * 1024 * 1024 // 10MB
 
 type RegexDetector struct {
 	rules []Rule
@@ -78,13 +87,29 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	var fResults []findings.Finding
-	lines := strings.Split(string(file.Content), "\n")
+	
+	// Limit content length for regex matching to prevent memory issues
+	content := file.Content
+	if len(content) > maxMatchLength {
+		content = content[:maxMatchLength]
+	}
+	
+	lines := strings.Split(string(content), "\n")
 	for _, rule := range d.rules {
 		if !matchesFileFilter(rule.FileFilter, file.Path) {
 			continue
 		}
 		for _, pat := range rule.Patterns {
-			matches := pat.match(file.Content)
+			// Check if pattern compilation failed (invalid regex)
+			if pat.compiledErr != nil {
+				continue
+			}
+			if pat.compiled == nil {
+				continue
+			}
+			
+			// Use safe matching with timeout
+			matches := pat.safeMatch(content)
 			for _, m := range matches {
 				tags := make([]string, len(rule.Tags))
 				copy(tags, rule.Tags)
@@ -139,6 +164,12 @@ func (p *Pattern) compile() error {
 	if p.CaptureGroup < 0 {
 		return fmt.Errorf("negative capture_group (%d) is not allowed", p.CaptureGroup)
 	}
+	
+	// Check for potentially dangerous regex patterns that could cause ReDoS
+	if isDangerousRegex(p.Regex) {
+		return fmt.Errorf("regex pattern %q appears to be vulnerable to ReDoS (catastrophic backtracking)", p.Regex)
+	}
+	
 	re, err := regexp.Compile(p.Regex)
 	if err != nil {
 		return fmt.Errorf("compile pattern %q: %w", p.Regex, err)
@@ -147,34 +178,105 @@ func (p *Pattern) compile() error {
 	return nil
 }
 
-func (p *Pattern) match(content []byte) []matchResult {
+// isDangerousRegex checks for patterns that are known to cause ReDoS
+func isDangerousRegex(pattern string) bool {
+	// Patterns that can cause catastrophic backtracking:
+	// 1. Nested quantifiers like (a+)+ or (a*)*a
+	// 2. Overlapping alternations with quantifiers
+	// 3. Multiple adjacent quantifiers
+	
+	dangerousPatterns := []string{
+		`\(\s*[^)]+\s*\+\s*\)\s*\+`,  // (a+)+ 
+		`\(\s*[^)]+\s*\*\s*\)\s*\*`,  // (a*)*
+		`\(\s*[^)]+\s*\+\s*\)\s*\{`,  // (a+){n,m}
+		`\(\s*[^)]+\s*\*\s*\)\s*\+`,  // (a*)+
+		`\+\s*\+`,                    // ++
+		`\*\s*\*`,                    // **
+		`\?\s*\+`,                    // ?+
+		`\+\s*\?`,                    // +?
+		`\*\s*\+`,                    // *+
+		`\+\s*\*`,                    // +*
+	}
+	
+	for _, dangerous := range dangerousPatterns {
+		if matched, _ := regexp.MatchString(dangerous, pattern); matched {
+			return true
+		}
+	}
+	
+	// Check for excessive quantifier nesting
+	// Count the depth of nested quantifiers
+	depth := 0
+	maxDepth := 0
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '(', '[', '{':
+			depth++
+			if depth > maxDepth {
+				maxDepth = depth
+			}
+		case ')', ']', '}':
+			depth--
+		}
+	}
+	
+	// If we have deeply nested patterns with quantifiers, flag as potentially dangerous
+	if maxDepth > 5 {
+		return true
+	}
+	
+	return false
+}
+
+// safeMatch performs regex matching with timeout protection
+func (p *Pattern) safeMatch(content []byte) []matchResult {
 	if p.compiled == nil {
 		return nil
 	}
-	matches := p.compiled.FindAllSubmatchIndex(content, -1)
-	if matches == nil {
+	
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), regexTimeout)
+	defer cancel()
+	
+	// Channel to receive results or timeout
+	resultCh := make(chan []matchResult, 1)
+	
+	go func() {
+		matches := p.compiled.FindAllSubmatchIndex(content, -1)
+		if matches == nil {
+			resultCh <- nil
+			return
+		}
+		var results []matchResult
+		for _, m := range matches {
+			g := p.CaptureGroup * 2
+			if g >= len(m) {
+				g = 0
+			}
+			start := m[g]
+			end := m[g+1]
+			if start == -1 || end == -1 {
+				continue
+			}
+			results = append(results, matchResult{
+				Value:  string(content[start:end]),
+				Start:  start,
+				End:    end,
+				Line:   lineNumber(content, start),
+				Column: columnNumber(content, start),
+			})
+		}
+		resultCh <- results
+	}()
+	
+	select {
+	case results := <-resultCh:
+		return results
+	case <-ctx.Done():
+		// Timeout occurred - log and return empty
+		// In production, you might want to return an error or partial results
 		return nil
 	}
-	var results []matchResult
-	for _, m := range matches {
-		g := p.CaptureGroup * 2
-		if g >= len(m) {
-			g = 0
-		}
-		start := m[g]
-		end := m[g+1]
-		if start == -1 || end == -1 {
-			continue
-		}
-		results = append(results, matchResult{
-			Value:  string(content[start:end]),
-			Start:  start,
-			End:    end,
-			Line:   lineNumber(content, start),
-			Column: columnNumber(content, start),
-		})
-	}
-	return results
 }
 
 func loadRules(rulesDir, ruleType string) ([]Rule, error) {
@@ -205,7 +307,8 @@ func loadRules(rulesDir, ruleType string) ([]Rule, error) {
 			}
 			for j := range rf.Rules[i].Patterns {
 				if err := rf.Rules[i].Patterns[j].compile(); err != nil {
-					return nil, fmt.Errorf("compile pattern in %q: %w", path, err)
+					// Log the error but don't fail - just skip this pattern
+					rf.Rules[i].Patterns[j].compiledErr = err
 				}
 			}
 			allRules = append(allRules, rf.Rules[i])

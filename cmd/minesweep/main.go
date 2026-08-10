@@ -68,6 +68,9 @@ evaluates them against policies, and produces a risk report.`,
 	root.Flags().BoolVarP(&cfg.IncludeTestFiles, "include-tests", "", false, "Include test files in scan (skipped by default)")
 	root.Flags().BoolVarP(&watchMode, "watch", "", false, "Watch for file changes and re-scan automatically")
 	root.Flags().DurationVarP(&watchInterval, "watch-interval", "", 2*time.Second, "How often to check for changes in watch mode")
+	root.Flags().IntVarP(&cfg.MaxFiles, "max-files", "", 0, "Maximum number of files to scan (0 = unlimited)")
+	root.Flags().IntVarP(&cfg.MemoryLimitMB, "memory-limit-mb", "", 0, "Maximum memory usage in MB (0 = unlimited)")
+	root.Flags().Int64VarP(&cfg.MaxFileSizeMB, "max-file-size-mb", "", 0, "Maximum file size in MB to scan (0 = use default)")
 
 	root.AddCommand(&cobra.Command{
 		Use:   "install-hooks",
@@ -150,6 +153,9 @@ func applyDefaults(fileCfg *config.FileConfig) {
 	}
 	if cfg.Workers == 0 && fileCfg.Workers > 0 {
 		cfg.Workers = fileCfg.Workers
+		cfg.MaxFiles = fileCfg.MaxFiles
+		cfg.MemoryLimitMB = fileCfg.MemoryLimitMB
+		cfg.MaxFileSizeMB = fileCfg.MaxFileSizeMB
 	}
 	if cfg.DiffBase == "main" && fileCfg.DiffBase != "" {
 		cfg.DiffBase = fileCfg.DiffBase

@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/zeebo/blake3"
 )
@@ -19,7 +20,39 @@ type File struct {
 	Hash          string
 }
 
+// isSafePath checks if a path is safe (doesn't traverse outside root)
+func isSafePath(path, root string) bool {
+	// Get absolute paths
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	
+	// Ensure the path is within root
+	// Use filepath.Rel to check if path is relative to root
+	rel, err := filepath.Rel(absRoot, absPath)
+	if err != nil {
+		return false
+	}
+	
+	// If rel starts with ".." then it's outside root
+	if strings.HasPrefix(rel, "..") {
+		return false
+	}
+	
+	return true
+}
+
 func NewFile(path string) (*File, error) {
+	return NewFileWithRoot(path, "")
+}
+
+// NewFileWithRoot creates a new File with path traversal protection relative to root
+func NewFileWithRoot(path, root string) (*File, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -38,15 +71,36 @@ func NewFile(path string) (*File, error) {
 			f.SymlinkTarget = "(unreadable)"
 			return f, nil
 		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(path), target)
-		}
-		absTarget, err := filepath.Abs(target)
-		if err != nil {
-			f.SymlinkTarget = target
+		
+		// Resolve the target path
+		var absTarget string
+		if filepath.IsAbs(target) {
+			absTarget = target
 		} else {
-			f.SymlinkTarget = absTarget
+			absTarget = filepath.Join(filepath.Dir(path), target)
 		}
+		
+		// Clean the path (remove . and ..)
+		absTarget = filepath.Clean(absTarget)
+		
+		// If root is specified, check if the symlink target is safe
+		if root != "" {
+			if !isSafePath(absTarget, root) {
+				// Symlink points outside root - mark as unsafe
+				f.SymlinkTarget = "(unsafe: outside scan root)"
+				return f, nil
+			}
+		}
+		
+		// Try to get absolute path
+		finalTarget, err := filepath.Abs(absTarget)
+		if err != nil {
+			f.SymlinkTarget = absTarget
+		} else {
+			f.SymlinkTarget = finalTarget
+		}
+		
+		// Check if target exists
 		if _, err := os.Stat(f.SymlinkTarget); os.IsNotExist(err) {
 			f.SymlinkTarget = f.SymlinkTarget + " (broken)"
 			return f, nil
