@@ -1,21 +1,50 @@
 package filesystem
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
+
+// sanitizeBranchName validates and sanitizes a git branch name to prevent command injection
+func sanitizeBranchName(name string) (string, error) {
+	// Git branch names can contain: a-z, A-Z, 0-9, -, _, ., /
+	// They cannot contain: spaces, ;, |, &, $, `, >, <, etc.
+	validBranchPattern := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9\-_.\/]*$`)
+	if name == "" {
+		return "main", nil
+	}
+	if !validBranchPattern.MatchString(name) {
+		return "", fmt.Errorf("branch name contains invalid characters")
+	}
+	// Additional check: ensure no shell metacharacters
+	for _, char := range name {
+		if char == ';' || char == '|' || char == '&' || char == '$' || char == '`' ||
+			char == '>' || char == '<' || char == '(' || char == ')' || char == '\n' {
+			return "", fmt.Errorf("branch name contains shell metacharacters")
+		}
+	}
+	return name, nil
+}
 
 func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 	if baseBranch == "" {
 		baseBranch = "main"
 	}
 
-	cmd := exec.Command("git", "diff", "--name-only", baseBranch+"...HEAD")
+	// Sanitize branch name to prevent command injection
+	sanitizedBranch, err := sanitizeBranchName(baseBranch)
+	if err != nil {
+		return nil, fmt.Errorf("invalid branch name: %w", err)
+	}
+
+	cmd := exec.Command("git", "diff", "--name-only", sanitizedBranch+"...HEAD")
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
-		cmd = exec.Command("git", "diff", "--name-only", baseBranch)
+		cmd = exec.Command("git", "diff", "--name-only", sanitizedBranch)
 		cmd.Dir = root
 		out, err = cmd.Output()
 		if err != nil {

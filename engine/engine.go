@@ -36,6 +36,10 @@ type Config struct {
 	SuppressFile             string
 	IncludeTestFiles         bool
 	DisableInlineSuppression bool
+	// Resource limits
+	MaxFiles       int   // Maximum number of files to scan (0 = unlimited)
+	MemoryLimitMB   int   // Maximum memory usage in MB (0 = unlimited)
+	MaxFileSizeMB   int64 // Maximum file size in MB to scan (0 = use default)
 }
 
 type Engine struct {
@@ -65,6 +69,7 @@ func New(cfg Config) (*Engine, error) {
 		detectors.NewFileTypeDetector(),
 		detectors.NewSymlinkDetector(),
 		detectors.NewEntropyDetector(),
+		detectors.NewBase64Detector(cfg.RulesDir),
 	}
 
 	var policies []policy.PolicyRule
@@ -116,6 +121,10 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 		return nil, err
 	}
 
+	if report == nil {
+		return nil, nil
+	}
+
 	if e.config.BaselineFile != "" {
 		baseline, err := findings.LoadBaseline(e.config.BaselineFile)
 		if err != nil {
@@ -123,6 +132,9 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 		}
 
 		newFindings := findings.FilterNewFindings(report.Findings, baseline)
+		if newFindings == nil {
+			newFindings = []findings.Finding{}
+		}
 		report.Findings = newFindings
 		newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
 		report = &newReport
@@ -142,6 +154,9 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 		}
 
 		filtered := findings.FilterSuppressed(report.Findings, suppressions)
+		if filtered == nil {
+			filtered = []findings.Finding{}
+		}
 		report.Findings = filtered
 		newReport := findings.GenerateRiskReport(filtered, e.config.Boundaries)
 		report = &newReport
@@ -165,7 +180,7 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 	var files []*filesystem.File
 	for _, relPath := range diffFiles {
 		absPath := filepath.Join(root, relPath)
-		file, err := filesystem.NewFile(absPath)
+		file, err := filesystem.NewFileWithRoot(absPath, root)
 		if err != nil {
 			continue
 		}
@@ -178,6 +193,10 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 	reportVal := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
 	report := &reportVal
 
+	if report == nil {
+		return nil, nil
+	}
+
 	if e.config.BaselineFile != "" {
 		baseline, err := findings.LoadBaseline(e.config.BaselineFile)
 		if err != nil {
@@ -185,6 +204,9 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 		}
 
 		newFindings := findings.FilterNewFindings(report.Findings, baseline)
+		if newFindings == nil {
+			newFindings = []findings.Finding{}
+		}
 		report.Findings = newFindings
 		newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
 		report = &newReport
@@ -201,7 +223,7 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 }
 
 func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
-	file, err := filesystem.NewFile(path)
+	file, err := filesystem.NewFileWithRoot(path, filepath.Dir(path))
 	if err != nil {
 		return nil, err
 	}
@@ -210,6 +232,10 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 	singleReport := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
 	report := &singleReport
 
+	if report == nil {
+		return nil, nil
+	}
+
 	if e.config.BaselineFile != "" {
 		baseline, err := findings.LoadBaseline(e.config.BaselineFile)
 		if err != nil {
@@ -217,6 +243,9 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 		}
 
 		newFindings := findings.FilterNewFindings(report.Findings, baseline)
+		if newFindings == nil {
+			newFindings = []findings.Finding{}
+		}
 		report.Findings = newFindings
 		newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
 		report = &newReport
@@ -233,13 +262,25 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 }
 
 func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
+	// Calculate max file size for walker
+	maxFileSize := filesystem.DefaultMaxFileSize
+	if e.config.MaxFileSizeMB > 0 {
+		maxFileSize = e.config.MaxFileSizeMB * 1024 * 1024
+	}
+
 	files, err := filesystem.WalkWithOptions(root, filesystem.WalkOption{
-		MaxFileSize:      filesystem.DefaultMaxFileSize,
+		MaxFileSize:      maxFileSize,
 		SkipExtensions:   e.config.SkipExtensions,
 		IncludeTestFiles: e.config.IncludeTestFiles,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("walk directory: %w", err)
+	}
+
+	// Apply max files limit
+	if e.config.MaxFiles > 0 && len(files) > e.config.MaxFiles {
+		files = files[:e.config.MaxFiles]
+		fmt.Fprintf(os.Stderr, "warning: reached max files limit (%d), scanning first %d files\n", e.config.MaxFiles, e.config.MaxFiles)
 	}
 
 	allFindings := e.detectParallel(files)
@@ -250,6 +291,10 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 }
 
 func (e *Engine) detect(file *filesystem.File) []findings.Finding {
+	if file == nil {
+		return nil
+	}
+
 	var all []findings.Finding
 	for _, d := range e.detectors {
 		fResults := d.Detect(file)
@@ -307,12 +352,35 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 
 	totalFiles := int64(len(files))
 
+	// Track memory usage if limit is set
+	var memStats runtime.MemStats
+	if e.config.MemoryLimitMB > 0 {
+		runtime.ReadMemStats(&memStats)
+	}
+	initialAlloc := memStats.Alloc
+
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "panic in detector goroutine: %v\n", r)
+				}
+			}()
 			defer wg.Done()
 			for file := range fileCh {
+				// Check memory limit
+				if e.config.MemoryLimitMB > 0 {
+					runtime.ReadMemStats(&memStats)
+					limit := uint64(e.config.MemoryLimitMB) * 1024 * 1024
+					if memStats.Alloc-initialAlloc > limit {
+						// Memory limit exceeded, stop processing
+						close(fileCh)
+						return
+					}
+				}
+
 				fResults := e.detect(file)
 				findingsFound.Add(int64(len(fResults)))
 				filesScanned.Add(1)
