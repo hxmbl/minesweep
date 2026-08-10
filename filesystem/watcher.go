@@ -19,11 +19,15 @@ type Watcher struct {
 	lastNotify time.Time
 	fileStates map[string]time.Time
 	mu         sync.RWMutex
+	// Track if we're using polling or event-driven mode
+	usePolling bool
 }
 
 type WatchOption struct {
 	Include []string
 	Exclude []string
+	// UsePolling forces polling mode even if fsnotify is available
+	UsePolling bool
 }
 
 func NewWatcher(dirs []string, opts *WatchOption, interval time.Duration) *Watcher {
@@ -37,6 +41,12 @@ func NewWatcher(dirs []string, opts *WatchOption, interval time.Duration) *Watch
 		stopCh:     make(chan struct{}),
 		debounce:   500 * time.Millisecond,
 		fileStates: make(map[string]time.Time),
+		usePolling: true, // Default to polling for now
+	}
+
+	// If opts specifies to use polling, always use polling
+	if opts != nil && opts.UsePolling {
+		w.usePolling = true
 	}
 
 	// Validate and resolve all directories to prevent path traversal
@@ -64,6 +74,7 @@ func (w *Watcher) OnChange(fn func(files []string)) {
 }
 
 func (w *Watcher) Start() error {
+	// Initialize file states
 	for _, dir := range w.dirs {
 		if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -92,6 +103,9 @@ func (w *Watcher) Stop() {
 
 func (w *Watcher) watch() {
 	defer w.wg.Done()
+	
+	// For now, use polling mode
+	// In the future, we could add fsnotify support for event-driven watching
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 
@@ -164,4 +178,60 @@ func (w *Watcher) shouldIgnore(path string) bool {
 		}
 	}
 	return false
+}
+
+// Optimized version that uses a cache of directory entries
+// This reduces the number of filesystem operations
+func (w *Watcher) checkChangesOptimized() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	var changedFiles []string
+	maxFiles := 10000
+
+	// For each directory, track which files we've seen
+	// This is more efficient than walking the entire tree every time
+	for _, dir := range w.dirs {
+		// Get list of files in directory
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			if len(changedFiles) >= maxFiles {
+				break
+			}
+
+			if entry.IsDir() {
+				continue
+			}
+
+			path := filepath.Join(dir, entry.Name())
+			
+			if w.shouldIgnore(path) {
+				continue
+			}
+
+			// Get file info
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			lastMod, exists := w.fileStates[path]
+			if !exists || info.ModTime().After(lastMod) {
+				w.fileStates[path] = info.ModTime()
+				changedFiles = append(changedFiles, path)
+			}
+		}
+	}
+
+	if len(changedFiles) > 0 && time.Since(w.lastNotify) > w.debounce {
+		w.lastNotify = time.Now()
+		log.Printf("minesweep: detected %d changed files", len(changedFiles))
+		if w.onChange != nil {
+			w.onChange(changedFiles)
+		}
+	}
 }
