@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"bytes"
 	"math"
 	"regexp"
 	"strings"
@@ -52,7 +53,7 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	var fResults []findings.Finding
-	lines := strings.Split(string(file.Content), "\n")
+	lines := bytes.Split(content, []byte("\n"))
 
 	for lineNum, line := range lines {
 		trimmed := strings.TrimSpace(line)
