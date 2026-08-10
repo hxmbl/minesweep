@@ -40,12 +40,16 @@ type Config struct {
 	MaxFiles       int   // Maximum number of files to scan (0 = unlimited)
 	MemoryLimitMB   int   // Maximum memory usage in MB (0 = unlimited)
 	MaxFileSizeMB   int64 // Maximum file size in MB to scan (0 = use default)
+	// Concurrency limits
+	MaxConcurrentReads int // Maximum concurrent file reads (0 = use Workers)
 }
 
 type Engine struct {
 	config    Config
 	detectors []detectors.Detector
 	policies  []policy.PolicyRule
+	// Semaphore for limiting concurrent file reads
+	readSemaphore chan struct{}
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -97,10 +101,23 @@ func New(cfg Config) (*Engine, error) {
 		}
 	}
 
+	// Initialize semaphore for concurrent reads
+	maxReads := cfg.MaxConcurrentReads
+	if maxReads <= 0 {
+		maxReads = cfg.Workers
+	}
+	if maxReads <= 0 {
+		maxReads = runtime.NumCPU()
+	}
+	if maxReads < 1 {
+		maxReads = 1
+	}
+	
 	return &Engine{
-		config:    cfg,
-		detectors: detList,
-		policies:  policies,
+		config:        cfg,
+		detectors:     detList,
+		policies:      policies,
+		readSemaphore: make(chan struct{}, maxReads),
 	}, nil
 }
 
@@ -350,6 +367,12 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	if file == nil {
 		return nil
+	}
+
+	// Acquire semaphore for file read
+	if e.readSemaphore != nil {
+		e.readSemaphore <- struct{}{}
+		defer func() { <-e.readSemaphore }()
 	}
 
 	var all []findings.Finding

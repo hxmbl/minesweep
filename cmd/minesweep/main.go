@@ -71,6 +71,7 @@ evaluates them against policies, and produces a risk report.`,
 	root.Flags().IntVarP(&cfg.MaxFiles, "max-files", "", 0, "Maximum number of files to scan (0 = unlimited)")
 	root.Flags().IntVarP(&cfg.MemoryLimitMB, "memory-limit-mb", "", 0, "Maximum memory usage in MB (0 = unlimited)")
 	root.Flags().Int64VarP(&cfg.MaxFileSizeMB, "max-file-size-mb", "", 0, "Maximum file size in MB to scan (0 = use default)")
+	root.Flags().IntVarP(&cfg.MaxConcurrentReads, "max-concurrent-reads", "", 0, "Maximum concurrent file reads (0 = use workers)")
 
 	root.AddCommand(&cobra.Command{
 		Use:   "install-hooks",
