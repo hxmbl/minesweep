@@ -104,6 +104,57 @@ func New(cfg Config) (*Engine, error) {
 	}, nil
 }
 
+
+// applyBaseline applies baseline filtering to a report
+func (e *Engine) applyBaseline(report *findings.RiskReport) (*findings.RiskReport, error) {
+	if e.config.BaselineFile == "" || report == nil {
+		return report, nil
+	}
+	baseline, err := findings.LoadBaseline(e.config.BaselineFile)
+	if err != nil {
+		return nil, fmt.Errorf("load baseline: %w", err)
+	}
+	if report.Findings == nil {
+		report.Findings = []findings.Finding{}
+	}
+	newFindings := findings.FilterNewFindings(report.Findings, baseline)
+	if newFindings == nil {
+		newFindings = []findings.Finding{}
+	}
+	report.Findings = newFindings
+	newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
+	return &newReport, nil
+}
+
+// applySuppressions applies suppression filtering to a report
+func (e *Engine) applySuppressions(report *findings.RiskReport) (*findings.RiskReport, error) {
+	if e.config.SuppressFile == "" || report == nil {
+		return report, nil
+	}
+	suppressions, err := findings.LoadSuppressions(e.config.SuppressFile)
+	if err != nil {
+		return nil, fmt.Errorf("load suppressions: %w", err)
+	}
+	if report.Findings == nil {
+		report.Findings = []findings.Finding{}
+	}
+	filtered := findings.FilterSuppressed(report.Findings, suppressions)
+	if filtered == nil {
+		filtered = []findings.Finding{}
+	}
+	report.Findings = filtered
+	newReport := findings.GenerateRiskReport(filtered, e.config.Boundaries)
+	return &newReport, nil
+}
+
+// updateBaseline updates the baseline file with new findings
+func (e *Engine) updateBaseline(baseline *findings.Baseline, newFindings []findings.Finding) error {
+	if !e.config.UpdateBaseline {
+		return nil
+	}
+	findings.UpdateBaseline(baseline, newFindings)
+	return findings.SaveBaseline(e.config.BaselineFile, baseline)
+}
 func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -127,41 +178,15 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 		return nil, nil
 	}
 
-	if e.config.BaselineFile != "" {
-		baseline, err := findings.LoadBaseline(e.config.BaselineFile)
-		if err != nil {
-			return nil, fmt.Errorf("load baseline: %w", err)
-		}
-
-		if report == nil {
-		return nil, nil
-	}
-	if report.Findings == nil {
-		report.Findings = []findings.Finding{}
-	}
-	newFindings := findings.FilterNewFindings(report.Findings, baseline)
-		if newFindings == nil {
-			newFindings = []findings.Finding{}
-		}
-		report.Findings = newFindings
-		newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
-		report = &newReport
-
-		if e.config.UpdateBaseline {
-			findings.UpdateBaseline(baseline, newFindings)
-			if err := findings.SaveBaseline(e.config.BaselineFile, baseline); err != nil {
-				return nil, fmt.Errorf("save baseline: %w", err)
-			}
-		}
+	report, err = e.applyBaseline(report)
+	if err != nil {
+		return nil, err
 	}
 
-	if e.config.SuppressFile != "" {
-		suppressions, err := findings.LoadSuppressions(e.config.SuppressFile)
-		if err != nil {
-			return nil, fmt.Errorf("load suppressions: %w", err)
-		}
-
-		filtered := findings.FilterSuppressed(report.Findings, suppressions)
+	report, err = e.applySuppressions(report)
+	if err != nil {
+		return nil, err
+	}
 		if filtered == nil {
 			filtered = []findings.Finding{}
 		}
