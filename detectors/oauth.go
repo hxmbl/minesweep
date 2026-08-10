@@ -224,7 +224,11 @@ func (d *OAuthDetector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	var fResults []findings.Finding
-	content := string(file.Content)
+	content, err := file.Content()
+	if err != nil {
+		return nil
+	}
+	content := string(content)
 	lines := strings.Split(content, "\n")
 
 	for _, pattern := range d.patterns {

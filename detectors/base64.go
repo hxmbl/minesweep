@@ -103,7 +103,11 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 	var fResults []findings.Finding
 
 	// Extract base64 strings from the file content
-	base64Strings := d.extractBase64Strings(file.Content)
+	content, err := file.Content()
+	if err != nil {
+		return nil
+	}
+	base64Strings := d.extractBase64Strings(content)
 
 	// For each base64 string, try to decode and scan
 	for _, b64Str := range base64Strings {

@@ -192,6 +192,12 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 		if err != nil {
 			continue
 		}
+		if err := file.LoadContent(); err != nil {
+			continue
+		}
+		if err != nil {
+			continue
+		}
 		files = append(files, file)
 	}
 
@@ -238,6 +244,12 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 
 func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 	file, err := filesystem.NewFileWithRoot(path, filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	if err := file.LoadContent(); err != nil {
+		return nil, err
+	}
 	if err != nil {
 		return nil, err
 	}

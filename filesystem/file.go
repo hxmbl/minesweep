@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/zeebo/blake3"
 )
@@ -18,6 +19,10 @@ type File struct {
 	SymlinkTarget string
 	IsBinary      bool
 	Hash          string
+	// Lazy loading support
+	contentLoaded bool
+	contentErr    error
+	contentMu     sync.Mutex
 }
 
 // isSafePath checks if a path is safe (doesn't traverse outside root)
@@ -31,19 +36,18 @@ func isSafePath(path, root string) bool {
 	if err != nil {
 		return false
 	}
-	
+
 	// Ensure the path is within root
-	// Use filepath.Rel to check if path is relative to root
 	rel, err := filepath.Rel(absRoot, absPath)
 	if err != nil {
 		return false
 	}
-	
+
 	// If rel starts with ".." then it's outside root
 	if strings.HasPrefix(rel, "..") {
 		return false
 	}
-	
+
 	return true
 }
 
@@ -71,7 +75,7 @@ func NewFileWithRoot(path, root string) (*File, error) {
 			f.SymlinkTarget = "(unreadable)"
 			return f, nil
 		}
-		
+
 		// Resolve the target path
 		var absTarget string
 		if filepath.IsAbs(target) {
@@ -79,10 +83,10 @@ func NewFileWithRoot(path, root string) (*File, error) {
 		} else {
 			absTarget = filepath.Join(filepath.Dir(path), target)
 		}
-		
+
 		// Clean the path (remove . and ..)
 		absTarget = filepath.Clean(absTarget)
-		
+
 		// If root is specified, check if the symlink target is safe
 		if root != "" {
 			if !isSafePath(absTarget, root) {
@@ -91,7 +95,7 @@ func NewFileWithRoot(path, root string) (*File, error) {
 				return f, nil
 			}
 		}
-		
+
 		// Try to get absolute path
 		finalTarget, err := filepath.Abs(absTarget)
 		if err != nil {
@@ -99,7 +103,7 @@ func NewFileWithRoot(path, root string) (*File, error) {
 		} else {
 			f.SymlinkTarget = finalTarget
 		}
-		
+
 		// Check if target exists
 		if _, err := os.Stat(f.SymlinkTarget); os.IsNotExist(err) {
 			f.SymlinkTarget = f.SymlinkTarget + " (broken)"
@@ -107,19 +111,50 @@ func NewFileWithRoot(path, root string) (*File, error) {
 		}
 	}
 
-	data, err := os.ReadFile(path)
+	// Don't load content by default - use lazy loading
+	// f.Content will be loaded on-demand via Content() method
+	return f, nil
+}
+
+// Content returns the file content, loading it lazily if not already loaded
+func (f *File) Content() ([]byte, error) {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+
+	if f.contentLoaded {
+		return f.Content, f.contentErr
+	}
+
+	// For symlinks, don't follow them - return empty content
+	if f.IsSymlink {
+		f.Content = []byte{}
+		f.contentLoaded = true
+		return f.Content, nil
+	}
+
+	data, err := os.ReadFile(f.Path)
 	if err != nil {
+		f.contentErr = err
 		return nil, err
 	}
 	f.Content = data
+	f.contentLoaded = true
 
+	// Calculate hash
 	hasher := blake3.New()
 	hasher.Write(data)
 	f.Hash = hex.EncodeToString(hasher.Sum(nil))
 
+	// Detect if binary
 	f.IsBinary = IsBinary(data)
 
-	return f, nil
+	return f.Content, nil
+}
+
+// LoadContent forces loading of file content (for backward compatibility)
+func (f *File) LoadContent() error {
+	_, err := f.Content()
+	return err
 }
 
 func (f *File) IsRegular() bool {

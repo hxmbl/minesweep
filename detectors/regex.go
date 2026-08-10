@@ -89,7 +89,10 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 	var fResults []findings.Finding
 	
 	// Limit content length for regex matching to prevent memory issues
-	content := file.Content
+	content, err := file.Content()
+	if err != nil {
+		return nil
+	}
 	if len(content) > maxMatchLength {
 		content = content[:maxMatchLength]
 	}
