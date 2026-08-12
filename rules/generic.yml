@@ -138,7 +138,7 @@ rules:
     severity: medium
     tags: [credentials, certificate, private-key]
     patterns:
-      - regex: -----BEGIN (********|RSA PRIVATE KEY|DSA PRIVATE KEY|EC PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----
+      - regex: -----BEGIN (CERTIFICATE|RSA PRIVATE KEY|DSA PRIVATE KEY|EC PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----
         confidence: 0.95
 
   - id: generic-rsa-private-key

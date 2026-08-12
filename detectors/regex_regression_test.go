@@ -1,9 +1,7 @@
-import (
-	"os"
-)
 package detectors
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,8 +13,8 @@ import (
 // (Issue 4.4)
 func TestRegression_ReDoS(t *testing.T) {
 	testCases := []struct {
-		name    string
-		pattern string
+		name       string
+		pattern    string
 		shouldFail bool
 	}{
 		{"safe pattern", `[a-z]+`, false},
@@ -38,9 +36,9 @@ func TestRegression_ReDoS(t *testing.T) {
 				Regex:      tc.pattern,
 				Confidence: 0.5,
 			}
-			
+
 			err := pattern.compile()
-			
+
 			if tc.shouldFail {
 				if err == nil {
 					t.Errorf("Expected error for pattern %q, but got none", tc.pattern)
@@ -93,14 +91,14 @@ func TestRegression_ReDoS_Timeout(t *testing.T) {
 func TestRegression_ResourceExhaustion(t *testing.T) {
 	// Test with a large file that exceeds max file size
 	// This should be skipped by the walker
-	
+
 	// Create a temporary large file
 	tmpFile, err := os.CreateTemp("", "minesweep-large-test")
 	if err != nil {
 		t.Skip("Skipping test, could not create temp file")
 	}
 	defer os.Remove(tmpFile.Name())
-	
+
 	// Write 100MB of data (larger than default 50MB limit)
 	largeContent := make([]byte, 100*1024*1024)
 	for i := range largeContent {
@@ -112,16 +110,16 @@ func TestRegression_ResourceExhaustion(t *testing.T) {
 	if err := tmpFile.Close(); err != nil {
 		t.Skip("Skipping test, could not close file")
 	}
-	
+
 	// Try to scan with a walker that has default max file size
-	files, err := WalkWithOptions("/tmp", WalkOption{
-		MaxFileSize: DefaultMaxFileSize,
+	files, err := filesystem.WalkWithOptions("/tmp", filesystem.WalkOption{
+		MaxFileSize:    filesystem.DefaultMaxFileSize,
 		SkipExtensions: []string{".go", ".txt"}, // Skip most files
 	})
 	if err != nil {
 		t.Skip("Skipping test, walk failed")
 	}
-	
+
 	// The large file should not be in the results
 	for _, f := range files {
 		if f.Path == tmpFile.Name() {

@@ -37,7 +37,7 @@ func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 	}
 
 	// Sanitize branch name to prevent command injection
-	sanitizedBranch, err := sanitizeBranchName(baseBranch)
+	sanitizedBranch, err := SanitizeBranchName(baseBranch)
 	if err != nil {
 		return nil, fmt.Errorf("invalid branch name: %w", err)
 	}

@@ -1,13 +1,11 @@
 package detectors
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -51,9 +49,6 @@ type matchResult struct {
 	Column int
 }
 
-// Regex timeout for matching operations to prevent ReDoS
-const regexTimeout = 100 * time.Millisecond
-
 // Maximum length of content to match against (to prevent memory exhaustion)
 const maxMatchLength = 10 * 1024 * 1024 // 10MB
 
@@ -87,16 +82,16 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	var fResults []findings.Finding
-	
+
 	// Limit content length for regex matching to prevent memory issues
-	content, err := file.Content()
+	content, err := file.GetContent()
 	if err != nil {
 		return nil
 	}
 	if len(content) > maxMatchLength {
 		content = content[:maxMatchLength]
 	}
-	
+
 	lines := strings.Split(string(content), "\n")
 	for _, rule := range d.rules {
 		if !matchesFileFilter(rule.FileFilter, file.Path) {
@@ -110,7 +105,7 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 			if pat.compiled == nil {
 				continue
 			}
-			
+
 			// Use safe matching with timeout
 			matches := pat.safeMatch(content)
 			for _, m := range matches {
@@ -164,18 +159,18 @@ func extractContext(lines []string, center, radius int) string {
 }
 
 func (p *Pattern) compile() error {
-if p.compiled != nil {
-return nil  // Already compiled
-}
+	if p.compiled != nil {
+		return nil // Already compiled
+	}
 	if p.CaptureGroup < 0 {
 		return fmt.Errorf("negative capture_group (%d) is not allowed", p.CaptureGroup)
 	}
-	
+
 	// Check for potentially dangerous regex patterns that could cause ReDoS
 	if isDangerousRegex(p.Regex) {
 		return fmt.Errorf("regex pattern %q appears to be vulnerable to ReDoS (catastrophic backtracking)", p.Regex)
 	}
-	
+
 	re, err := regexp.Compile(p.Regex)
 	if err != nil {
 		return fmt.Errorf("compile pattern %q: %w", p.Regex, err)
@@ -190,26 +185,26 @@ func isDangerousRegex(pattern string) bool {
 	// 1. Nested quantifiers like (a+)+ or (a*)*a
 	// 2. Overlapping alternations with quantifiers
 	// 3. Multiple adjacent quantifiers
-	
+
 	dangerousPatterns := []string{
-		`\(\s*[^)]+\s*\+\s*\)\s*\+`,  // (a+)+ 
-		`\(\s*[^)]+\s*\*\s*\)\s*\*`,  // (a*)*
-		`\(\s*[^)]+\s*\+\s*\)\s*\{`,  // (a+){n,m}
-		`\(\s*[^)]+\s*\*\s*\)\s*\+`,  // (a*)+
-		`\+\s*\+`,                    // ++
-		`\*\s*\*`,                    // **
-		`\?\s*\+`,                    // ?+
-		`\+\s*\?`,                    // +?
-		`\*\s*\+`,                    // *+
-		`\+\s*\*`,                    // +*
+		`\(\s*[^)]+\s*\+\s*\)\s*\+`, // (a+)+
+		`\(\s*[^)]+\s*\*\s*\)\s*\*`, // (a*)*
+		`\(\s*[^)]+\s*\+\s*\)\s*\{`, // (a+){n,m}
+		`\(\s*[^)]+\s*\*\s*\)\s*\+`, // (a*)+
+		`\+\s*\+`,                   // ++
+		`\*\s*\*`,                   // **
+		`\?\s*\+`,                   // ?+
+		`\+\s*\?`,                   // +?
+		`\*\s*\+`,                   // *+
+		`\+\s*\*`,                   // +*
 	}
-	
+
 	for _, dangerous := range dangerousPatterns {
 		if matched, _ := regexp.MatchString(dangerous, pattern); matched {
 			return true
 		}
 	}
-	
+
 	// Check for excessive quantifier nesting
 	// Count the depth of nested quantifiers
 	depth := 0
@@ -225,64 +220,47 @@ func isDangerousRegex(pattern string) bool {
 			depth--
 		}
 	}
-	
+
 	// If we have deeply nested patterns with quantifiers, flag as potentially dangerous
 	if maxDepth > 5 {
 		return true
 	}
-	
+
 	return false
 }
 
-// safeMatch performs regex matching with timeout protection
+// safeMatch runs a regex match. Go's regexp uses RE2 (linear time), so a
+// wall-clock timeout is unnecessary and caused false negatives on large files
+// when timed-out match goroutines piled up and starved later patterns.
 func (p *Pattern) safeMatch(content []byte) []matchResult {
 	if p.compiled == nil {
 		return nil
 	}
-	
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), regexTimeout)
-	defer cancel()
-	
-	// Channel to receive results or timeout
-	resultCh := make(chan []matchResult, 1)
-	
-	go func() {
-		matches := p.compiled.FindAllSubmatchIndex(content, -1)
-		if matches == nil {
-			resultCh <- nil
-			return
-		}
-		var results []matchResult
-		for _, m := range matches {
-			g := p.CaptureGroup * 2
-			if g >= len(m) {
-				g = 0
-			}
-			start := m[g]
-			end := m[g+1]
-			if start == -1 || end == -1 {
-				continue
-			}
-			results = append(results, matchResult{
-				Value:  string(content[start:end]),
-				Start:  start,
-				End:    end,
-				Line:   lineNumber(content, start),
-				Column: columnNumber(content, start),
-			})
-		}
-		resultCh <- results
-	}()
-	
-	select {
-	case results := <-resultCh:
-		return results
-	case <-ctx.Done():
-		// Timeout occurred - log and return empty
-		// In production, you might want to return an error or partial results
+
+	matches := p.compiled.FindAllSubmatchIndex(content, -1)
+	if matches == nil {
 		return nil
 	}
+	var results []matchResult
+	for _, m := range matches {
+		g := p.CaptureGroup * 2
+		if g >= len(m) {
+			g = 0
+		}
+		start := m[g]
+		end := m[g+1]
+		if start == -1 || end == -1 {
+			continue
+		}
+		results = append(results, matchResult{
+			Value:  string(content[start:end]),
+			Start:  start,
+			End:    end,
+			Line:   lineNumber(content, start),
+			Column: columnNumber(content, start),
+		})
+	}
+	return results
 }
 
 func loadRules(rulesDir, ruleType string) ([]Rule, error) {

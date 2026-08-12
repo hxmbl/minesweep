@@ -37,9 +37,9 @@ type Config struct {
 	IncludeTestFiles         bool
 	DisableInlineSuppression bool
 	// Resource limits
-	MaxFiles       int   // Maximum number of files to scan (0 = unlimited)
-	MemoryLimitMB   int   // Maximum memory usage in MB (0 = unlimited)
-	MaxFileSizeMB   int64 // Maximum file size in MB to scan (0 = use default)
+	MaxFiles      int   // Maximum number of files to scan (0 = unlimited)
+	MemoryLimitMB int   // Maximum memory usage in MB (0 = unlimited)
+	MaxFileSizeMB int64 // Maximum file size in MB to scan (0 = use default)
 	// Concurrency limits
 	MaxConcurrentReads int // Maximum concurrent file reads (0 = use Workers)
 }
@@ -68,12 +68,17 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("load regex detector: %w", err)
 	}
 
+	base64Detector, err := detectors.NewBase64Detector(cfg.RulesDir)
+	if err != nil {
+		return nil, fmt.Errorf("load base64 detector: %w", err)
+	}
+
 	detList := []detectors.Detector{
 		regexDetector,
 		detectors.NewFileTypeDetector(),
 		detectors.NewSymlinkDetector(),
 		detectors.NewEntropyDetector(),
-		detectors.NewBase64Detector(cfg.RulesDir),
+		base64Detector,
 		detectors.NewDatabaseDetector(),
 		detectors.NewOAuthDetector(),
 	}
@@ -112,7 +117,7 @@ func New(cfg Config) (*Engine, error) {
 	if maxReads < 1 {
 		maxReads = 1
 	}
-	
+
 	return &Engine{
 		config:        cfg,
 		detectors:     detList,
@@ -120,7 +125,6 @@ func New(cfg Config) (*Engine, error) {
 		readSemaphore: make(chan struct{}, maxReads),
 	}, nil
 }
-
 
 // applyBaseline applies baseline filtering to a report
 func (e *Engine) applyBaseline(report *findings.RiskReport) (*findings.RiskReport, error) {
@@ -140,6 +144,11 @@ func (e *Engine) applyBaseline(report *findings.RiskReport) (*findings.RiskRepor
 	}
 	report.Findings = newFindings
 	newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
+
+	if err := e.updateBaseline(baseline, newFindings); err != nil {
+		return nil, fmt.Errorf("save baseline: %w", err)
+	}
+
 	return &newReport, nil
 }
 
@@ -172,6 +181,7 @@ func (e *Engine) updateBaseline(baseline *findings.Baseline, newFindings []findi
 	findings.UpdateBaseline(baseline, newFindings)
 	return findings.SaveBaseline(e.config.BaselineFile, baseline)
 }
+
 func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -204,13 +214,6 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	if err != nil {
 		return nil, err
 	}
-		if filtered == nil {
-			filtered = []findings.Finding{}
-		}
-		report.Findings = filtered
-		newReport := findings.GenerateRiskReport(filtered, e.config.Boundaries)
-		report = &newReport
-	}
 
 	return report, nil
 }
@@ -237,9 +240,6 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 		if err := file.LoadContent(); err != nil {
 			continue
 		}
-		if err != nil {
-			continue
-		}
 		files = append(files, file)
 	}
 
@@ -249,36 +249,14 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 	reportVal := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
 	report := &reportVal
 
-	if report == nil {
-		return nil, nil
+	report, err = e.applyBaseline(report)
+	if err != nil {
+		return nil, err
 	}
 
-	if e.config.BaselineFile != "" {
-		baseline, err := findings.LoadBaseline(e.config.BaselineFile)
-		if err != nil {
-			return nil, fmt.Errorf("load baseline: %w", err)
-		}
-
-		if report == nil {
-		return nil, nil
-	}
-	if report.Findings == nil {
-		report.Findings = []findings.Finding{}
-	}
-	newFindings := findings.FilterNewFindings(report.Findings, baseline)
-		if newFindings == nil {
-			newFindings = []findings.Finding{}
-		}
-		report.Findings = newFindings
-		newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
-		report = &newReport
-
-		if e.config.UpdateBaseline {
-			findings.UpdateBaseline(baseline, newFindings)
-			if err := findings.SaveBaseline(e.config.BaselineFile, baseline); err != nil {
-				return nil, fmt.Errorf("save baseline: %w", err)
-			}
-		}
+	report, err = e.applySuppressions(report)
+	if err != nil {
+		return nil, err
 	}
 
 	return report, nil
@@ -292,44 +270,20 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 	if err := file.LoadContent(); err != nil {
 		return nil, err
 	}
-	if err != nil {
-		return nil, err
-	}
+
 	allFindings := e.detect(file)
 	evaluated := e.evaluate(allFindings)
 	singleReport := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
 	report := &singleReport
 
-	if report == nil {
-		return nil, nil
+	report, err = e.applyBaseline(report)
+	if err != nil {
+		return nil, err
 	}
 
-	if e.config.BaselineFile != "" {
-		baseline, err := findings.LoadBaseline(e.config.BaselineFile)
-		if err != nil {
-			return nil, fmt.Errorf("load baseline: %w", err)
-		}
-
-		if report == nil {
-		return nil, nil
-	}
-	if report.Findings == nil {
-		report.Findings = []findings.Finding{}
-	}
-	newFindings := findings.FilterNewFindings(report.Findings, baseline)
-		if newFindings == nil {
-			newFindings = []findings.Finding{}
-		}
-		report.Findings = newFindings
-		newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
-		report = &newReport
-
-		if e.config.UpdateBaseline {
-			findings.UpdateBaseline(baseline, newFindings)
-			if err := findings.SaveBaseline(e.config.BaselineFile, baseline); err != nil {
-				return nil, fmt.Errorf("save baseline: %w", err)
-			}
-		}
+	report, err = e.applySuppressions(report)
+	if err != nil {
+		return nil, err
 	}
 
 	return report, nil
@@ -402,7 +356,10 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	}
 
 	if !e.config.DisableInlineSuppression {
-		filtered = findings.FilterInlineSuppressions(filtered, string(file.Content))
+		content, err := file.GetContent()
+		if err == nil {
+			filtered = findings.FilterInlineSuppressions(filtered, string(content))
+		}
 	}
 
 	return filtered

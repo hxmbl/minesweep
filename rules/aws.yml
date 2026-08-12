@@ -41,15 +41,15 @@ rules:
     tags: [aws, cloud]
     patterns:
       # Match AWS account IDs only when they appear in AWS-related contexts
-      - regex: (?i)(aws|amazon)\s*(account|id|account_id|accountid)\s*[:=]\s*["']?(\d{12})["']?
+      - regex: '(?i)(aws|amazon)\s*(account|id|account_id|accountid)\s*[:=]\s*["'']?(\d{12})["'']?'
         confidence: 0.80
         capture_group: 2
       # Match account IDs in ARN format
-      - regex: arn:aws:[a-z-]+:[a-z0-9-]*:\d{12}:
+      - regex: 'arn:aws:[a-z-]+:[a-z0-9-]*:\d{12}:'
         confidence: 0.90
         capture_group: 0
       # Match account IDs in resource policies or IAM documents
-      - regex: (?i)(account|principal)\s*[:{"]\s*\d{12}\s*[}"]
+      - regex: '(?i)(account|principal)\s*[:{"]\s*\d{12}\s*[}"]'
         confidence: 0.70
     file_filter:
       exclude:

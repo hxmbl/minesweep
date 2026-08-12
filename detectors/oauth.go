@@ -13,9 +13,9 @@ type OAuthDetector struct {
 	patterns []struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}
 }
@@ -28,16 +28,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "bearer_token",
 		regex:       regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.85,
-		tags:       []string{"oauth", "bearer", "token", "credentials"},
+		tags:        []string{"oauth", "bearer", "token", "credentials"},
 		description: "Bearer token (JWT format)",
 	})
 
@@ -45,16 +45,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "jwt_token",
 		regex:       regexp.MustCompile(`\b[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\b`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.75,
-		tags:       []string{"jwt", "token", "credentials"},
+		tags:        []string{"jwt", "token", "credentials"},
 		description: "JWT token detected",
 	})
 
@@ -62,16 +62,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "oauth_client_secret",
 		regex:       regexp.MustCompile(`(?i)(oauth|client)[_-]?secret\s*[:=]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.80,
-		tags:       []string{"oauth", "secret", "credentials"},
+		tags:        []string{"oauth", "secret", "credentials"},
 		description: "OAuth client secret",
 	})
 
@@ -79,16 +79,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "oauth_access_token",
 		regex:       regexp.MustCompile(`(?i)(oauth|access)[_-]?token\s*[:=]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.80,
-		tags:       []string{"oauth", "token", "credentials"},
+		tags:        []string{"oauth", "token", "credentials"},
 		description: "OAuth access token",
 	})
 
@@ -96,16 +96,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "github_token",
 		regex:       regexp.MustCompile(`\b(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.95,
-		tags:       []string{"github", "token", "credentials"},
+		tags:        []string{"github", "token", "credentials"},
 		description: "GitHub personal access token",
 	})
 
@@ -113,16 +113,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "gitlab_token",
 		regex:       regexp.MustCompile(`\b(glpat-[A-Za-z0-9\-_]{20,})\b`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.95,
-		tags:       []string{"gitlab", "token", "credentials"},
+		tags:        []string{"gitlab", "token", "credentials"},
 		description: "GitLab personal access token",
 	})
 
@@ -130,16 +130,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "bitbucket_token",
 		regex:       regexp.MustCompile(`\b([A-Za-z0-9]{40})\b`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.70,
-		tags:       []string{"bitbucket", "token", "credentials"},
+		tags:        []string{"bitbucket", "token", "credentials"},
 		description: "Bitbucket app password or token",
 	})
 
@@ -147,16 +147,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "google_api_key",
 		regex:       regexp.MustCompile(`\b(AIza[0-9A-Za-z\-_]{35})\b`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.90,
-		tags:       []string{"google", "api-key", "credentials"},
+		tags:        []string{"google", "api-key", "credentials"},
 		description: "Google API key",
 	})
 
@@ -164,16 +164,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "google_oauth_client_id",
 		regex:       regexp.MustCompile(`\b([0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com)\b`),
-		severity:   findings.Medium,
+		severity:    findings.SeverityMedium,
 		confidence:  0.85,
-		tags:       []string{"google", "oauth", "credentials"},
+		tags:        []string{"google", "oauth", "credentials"},
 		description: "Google OAuth client ID",
 	})
 
@@ -181,16 +181,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "session_cookie",
 		regex:       regexp.MustCompile(`(?i)(PHPSESSID|JSESSIONID|ASP\.NET_SessionId|sessionid|sessid|sid)\s*[=:]\s*["']?[A-Za-z0-9\-_]{20,}['"]?`),
-		severity:   findings.Medium,
+		severity:    findings.SeverityMedium,
 		confidence:  0.75,
-		tags:       []string{"session", "cookie", "credentials"},
+		tags:        []string{"session", "cookie", "credentials"},
 		description: "Session cookie or ID",
 	})
 
@@ -198,16 +198,16 @@ func NewOAuthDetector() *OAuthDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "cloud_storage_credentials",
 		regex:       regexp.MustCompile(`(?i)(aws|gcp|azure|s3|gs|blob)\s*(access|secret|key|token|password)\s*[:=]\s*['"]?[A-Za-z0-9\/+=@\-_]{20,}['"]?`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.80,
-		tags:       []string{"cloud", "storage", "credentials"},
+		tags:        []string{"cloud", "storage", "credentials"},
 		description: "Cloud storage credentials",
 	})
 
@@ -224,11 +224,11 @@ func (d *OAuthDetector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	var fResults []findings.Finding
-	content, err := file.Content()
+	data, err := file.GetContent()
 	if err != nil {
 		return nil
 	}
-	content := string(content)
+	content := string(data)
 	lines := strings.Split(content, "\n")
 
 	for _, pattern := range d.patterns {
@@ -266,7 +266,7 @@ func (d *OAuthDetector) Detect(file *filesystem.File) []findings.Finding {
 			fResults = append(fResults, findings.Finding{
 				Type:       pattern.name,
 				Severity:   pattern.severity,
-				Confidence:  pattern.confidence,
+				Confidence: pattern.confidence,
 				File:       file.Path,
 				Line:       lineNum,
 				Column:     col,

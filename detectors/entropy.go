@@ -25,8 +25,8 @@ const (
 	scoreHighEntropy     = 0.3
 	scoreMediumEntropy   = 0.2
 
-	scoreVeryLong = 0.2
-	scoreLong     = 0.15
+	scoreVeryLong  = 0.2
+	scoreLong      = 0.15
 	scoreMediumLen = 0.1
 
 	scoreKeywordMatch = 0.3
@@ -52,11 +52,16 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 		return nil
 	}
 
+	content, err := file.GetContent()
+	if err != nil {
+		return nil
+	}
+
 	var fResults []findings.Finding
 	lines := bytes.Split(content, []byte("\n"))
 
 	for lineNum, line := range lines {
-		trimmed := strings.TrimSpace(line)
+		trimmed := strings.TrimSpace(string(line))
 		if trimmed == "" {
 			continue
 		}

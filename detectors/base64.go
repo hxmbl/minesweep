@@ -103,7 +103,7 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 	var fResults []findings.Finding
 
 	// Extract base64 strings from the file content
-	content, err := file.Content()
+	content, err := file.GetContent()
 	if err != nil {
 		return nil
 	}
@@ -137,10 +137,10 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 		// Create a temporary file-like structure for scanning
 		// We'll create a mock file with the decoded content
 		decodedFile := &filesystem.File{
-			Path:    file.Path + " (base64 decoded)",
-			Content: decoded,
-			Size:    int64(len(decoded)),
-			Mode:    file.Mode,
+			Path:     file.Path + " (base64 decoded)",
+			Content:  decoded,
+			Size:     int64(len(decoded)),
+			Mode:     file.Mode,
 			IsBinary: isBinaryContent(decoded),
 		}
 
@@ -159,7 +159,7 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 			// Without regex detector, just report the base64 string as a finding
 			fResults = append(fResults, findings.Finding{
 				Type:       "base64_encoded_secret",
-				Severity:   findings.Medium,
+				Severity:   findings.SeverityMedium,
 				Confidence: 0.7,
 				File:       file.Path,
 				Line:       0, // We don't have line info for base64 content

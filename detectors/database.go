@@ -13,9 +13,9 @@ type DatabaseDetector struct {
 	patterns []struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}
 }
@@ -28,16 +28,16 @@ func NewDatabaseDetector() *DatabaseDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "postgresql_connection_string",
 		regex:       regexp.MustCompile(`(?i)postgresql(?:\+\w+)?://([^:]+):([^@]+)@[^\s]+`),
-		severity:   findings.Critical,
+		severity:    findings.SeverityCritical,
 		confidence:  0.90,
-		tags:       []string{"database", "postgresql", "credentials"},
+		tags:        []string{"database", "postgresql", "credentials"},
 		description: "PostgreSQL connection string with credentials",
 	})
 
@@ -45,16 +45,16 @@ func NewDatabaseDetector() *DatabaseDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "mysql_connection_string",
 		regex:       regexp.MustCompile(`(?i)mysql://([^:]+):([^@]+)@[^\s]+`),
-		severity:   findings.Critical,
+		severity:    findings.SeverityCritical,
 		confidence:  0.90,
-		tags:       []string{"database", "mysql", "credentials"},
+		tags:        []string{"database", "mysql", "credentials"},
 		description: "MySQL connection string with credentials",
 	})
 
@@ -62,16 +62,16 @@ func NewDatabaseDetector() *DatabaseDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "mongodb_connection_string",
 		regex:       regexp.MustCompile(`(?i)mongodb(?:\+srv)?://([^:]+):([^@]+)@[^\s]+`),
-		severity:   findings.Critical,
+		severity:    findings.SeverityCritical,
 		confidence:  0.90,
-		tags:       []string{"database", "mongodb", "credentials"},
+		tags:        []string{"database", "mongodb", "credentials"},
 		description: "MongoDB connection string with credentials",
 	})
 
@@ -79,16 +79,16 @@ func NewDatabaseDetector() *DatabaseDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "redis_connection_string",
 		regex:       regexp.MustCompile(`(?i)redis://([^:]+):([^@]+)@[^\s]+`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.85,
-		tags:       []string{"database", "redis", "credentials"},
+		tags:        []string{"database", "redis", "credentials"},
 		description: "Redis connection string with credentials",
 	})
 
@@ -96,16 +96,16 @@ func NewDatabaseDetector() *DatabaseDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "generic_database_url",
 		regex:       regexp.MustCompile(`(?i)(oracle|mssql|sqlite|mariadb|cockroachdb|clickhouse)://([^:]+):([^@]+)@[^\s]+`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.80,
-		tags:       []string{"database", "credentials"},
+		tags:        []string{"database", "credentials"},
 		description: "Generic database connection URL with credentials",
 	})
 
@@ -113,16 +113,16 @@ func NewDatabaseDetector() *DatabaseDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "database_credentials_kv",
 		regex:       regexp.MustCompile(`(?i)(db|database)[_-]?(user|username|user_name|pwd|password|passwd)\s*[:=]\s*['"]?[^\s'"]+['"]?`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.75,
-		tags:       []string{"database", "credentials"},
+		tags:        []string{"database", "credentials"},
 		description: "Database credentials in key-value format",
 	})
 
@@ -130,16 +130,16 @@ func NewDatabaseDetector() *DatabaseDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "sql_connection_string",
 		regex:       regexp.MustCompile(`(?i)Server|Data Source=[^;]+;User ID=[^;]+;Password=[^;]+`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.85,
-		tags:       []string{"database", "sql", "credentials"},
+		tags:        []string{"database", "sql", "credentials"},
 		description: "SQL connection string with credentials",
 	})
 
@@ -147,16 +147,16 @@ func NewDatabaseDetector() *DatabaseDetector {
 	d.patterns = append(d.patterns, struct {
 		name        string
 		regex       *regexp.Regexp
-		severity   findings.Severity
+		severity    findings.Severity
 		confidence  float64
-		tags       []string
+		tags        []string
 		description string
 	}{
 		name:        "jdbc_connection_string",
 		regex:       regexp.MustCompile(`(?i)jdbc:[a-z0-9]+://[^:]+:[^@]+@[^\s]+`),
-		severity:   findings.High,
+		severity:    findings.SeverityHigh,
 		confidence:  0.85,
-		tags:       []string{"database", "jdbc", "credentials"},
+		tags:        []string{"database", "jdbc", "credentials"},
 		description: "JDBC connection string with credentials",
 	})
 
@@ -173,11 +173,11 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	var fResults []findings.Finding
-	content, err := file.Content()
+	data, err := file.GetContent()
 	if err != nil {
 		return nil
 	}
-	content := string(content)
+	content := string(data)
 	lines := strings.Split(content, "\n")
 
 	for _, pattern := range d.patterns {
@@ -215,7 +215,7 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 			fResults = append(fResults, findings.Finding{
 				Type:       pattern.name,
 				Severity:   pattern.severity,
-				Confidence:  pattern.confidence,
+				Confidence: pattern.confidence,
 				File:       file.Path,
 				Line:       lineNum,
 				Column:     col,
@@ -230,26 +230,4 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	return fResults
-}
-
-func extractContext(lines []string, center, radius int) string {
-	start := center - radius
-	if start < 0 {
-		start = 0
-	}
-	end := center + radius + 1
-	if end > len(lines) {
-		end = len(lines)
-	}
-	var sb strings.Builder
-	for i := start; i < end; i++ {
-		prefix := "  "
-		if i == center {
-			prefix = "> "
-		}
-		sb.WriteString(prefix)
-		sb.WriteString(strings.TrimSpace(lines[i]))
-		sb.WriteString("\n")
-	}
-	return sb.String()
 }

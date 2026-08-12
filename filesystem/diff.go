@@ -1,11 +1,6 @@
 package filesystem
 
 import (
-	"fmt"
-	"os"
-	"regexp"
-	"strings"
-
 	"minesweep/git"
 )
 

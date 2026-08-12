@@ -91,12 +91,14 @@ func TestEngineEdgeCases(t *testing.T) {
 	rulesDir := filepath.Join(wd, "../rules")
 	profilesDir := filepath.Join(wd, "../profiles")
 
-	eng, _ := New(Config{
+	eng, err := New(Config{
 		RulesDir:    rulesDir,
 		ProfilesDir: profilesDir,
 		Profile:     "default",
 	})
-
+	if err != nil {
+		t.Fatalf("New engine: %v", err)
+	}
 	t.Run("binary named as text", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "innocent.txt")

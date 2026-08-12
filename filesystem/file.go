@@ -27,7 +27,11 @@ type File struct {
 
 // isSafePath checks if a path is safe (doesn't traverse outside root)
 func isSafePath(path, root string) bool {
-	// Get absolute paths
+	// Relative paths are interpreted relative to the scan root.
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return false
@@ -37,7 +41,6 @@ func isSafePath(path, root string) bool {
 		return false
 	}
 
-	// Ensure the path is within root
 	rel, err := filepath.Rel(absRoot, absPath)
 	if err != nil {
 		return false
@@ -111,13 +114,13 @@ func NewFileWithRoot(path, root string) (*File, error) {
 		}
 	}
 
-	// Don't load content by default - use lazy loading
-	// f.Content will be loaded on-demand via Content() method
+	// Don't load content by default - use lazy loading via GetContent().
 	return f, nil
 }
 
-// Content returns the file content, loading it lazily if not already loaded
-func (f *File) Content() ([]byte, error) {
+// GetContent returns the file content, loading it lazily if not already loaded.
+// Named GetContent (not Content) because File already has a Content field.
+func (f *File) GetContent() ([]byte, error) {
 	f.contentMu.Lock()
 	defer f.contentMu.Unlock()
 
@@ -125,8 +128,16 @@ func (f *File) Content() ([]byte, error) {
 		return f.Content, f.contentErr
 	}
 
-	// For symlinks, don't follow them - return empty content
-	if f.IsSymlink {
+	// Pre-populated content (tests, decoded buffers) — skip disk read.
+	if f.Content != nil {
+		f.contentLoaded = true
+		return f.Content, nil
+	}
+
+	// Unsafe/broken/unreadable symlinks: no content.
+	if f.IsSymlink && (strings.Contains(f.SymlinkTarget, "(unsafe") ||
+		strings.Contains(f.SymlinkTarget, "(broken") ||
+		strings.Contains(f.SymlinkTarget, "(unreadable")) {
 		f.Content = []byte{}
 		f.contentLoaded = true
 		return f.Content, nil
@@ -135,17 +146,16 @@ func (f *File) Content() ([]byte, error) {
 	data, err := os.ReadFile(f.Path)
 	if err != nil {
 		f.contentErr = err
+		f.contentLoaded = true
 		return nil, err
 	}
 	f.Content = data
 	f.contentLoaded = true
 
-	// Calculate hash
 	hasher := blake3.New()
 	hasher.Write(data)
 	f.Hash = hex.EncodeToString(hasher.Sum(nil))
 
-	// Detect if binary
 	f.IsBinary = IsBinary(data)
 
 	return f.Content, nil
@@ -153,7 +163,7 @@ func (f *File) Content() ([]byte, error) {
 
 // LoadContent forces loading of file content (for backward compatibility)
 func (f *File) LoadContent() error {
-	_, err := f.Content()
+	_, err := f.GetContent()
 	return err
 }
 

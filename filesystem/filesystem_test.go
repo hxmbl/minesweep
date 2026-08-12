@@ -233,6 +233,9 @@ func TestNewFileSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFile: %v", err)
 	}
+	if err := f.LoadContent(); err != nil {
+		t.Fatalf("LoadContent: %v", err)
+	}
 	if !f.IsSymlink {
 		t.Fatal("expected symlink flag")
 	}
@@ -271,6 +274,9 @@ func TestNewFileUTF16(t *testing.T) {
 	f, err := NewFile(path)
 	if err != nil {
 		t.Fatalf("NewFile: %v", err)
+	}
+	if err := f.LoadContent(); err != nil {
+		t.Fatalf("LoadContent: %v", err)
 	}
 	if !f.IsBinary {
 		t.Fatal("UTF-16 file should be detected as binary (null bytes)")
@@ -554,6 +560,9 @@ func TestNewFileSymlinkChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFile(chain): %v", err)
 	}
+	if err := f.LoadContent(); err != nil {
+		t.Fatalf("LoadContent: %v", err)
+	}
 	if !f.IsSymlink {
 		t.Fatal("expected symlink flag")
 	}
@@ -606,6 +615,9 @@ func TestNewFileVeryLongPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFile(long path): %v", err)
 	}
+	if err := f.LoadContent(); err != nil {
+		t.Fatalf("LoadContent: %v", err)
+	}
 	if string(f.Content) != "deep path" {
 		t.Fatalf("expected content 'deep path', got %q", string(f.Content))
 	}
@@ -648,6 +660,9 @@ func TestNewFileHash(t *testing.T) {
 	f, err := NewFile(path)
 	if err != nil {
 		t.Fatalf("NewFile: %v", err)
+	}
+	if err := f.LoadContent(); err != nil {
+		t.Fatalf("LoadContent: %v", err)
 	}
 	if f.Hash == "" {
 		t.Fatal("expected non-empty hash")
@@ -922,6 +937,10 @@ func TestNewFileConcurrent(t *testing.T) {
 				t.Errorf("NewFile concurrent: %v", err)
 				return
 			}
+			if err := f.LoadContent(); err != nil {
+				t.Errorf("LoadContent concurrent: %v", err)
+				return
+			}
 			if len(f.Content) == 0 {
 				t.Error("NewFile concurrent: empty content")
 			}
@@ -964,6 +983,8 @@ func TestHashConsistency(t *testing.T) {
 
 	f1, _ := NewFile(path)
 	f2, _ := NewFile(path)
+	_ = f1.LoadContent()
+	_ = f2.LoadContent()
 	if f1.Hash != f2.Hash {
 		t.Fatal("same file should produce same hash")
 	}
@@ -971,6 +992,7 @@ func TestHashConsistency(t *testing.T) {
 	path2 := filepath.Join(dir, "test2.txt")
 	os.WriteFile(path2, []byte("THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG"), 0644)
 	f3, _ := NewFile(path2)
+	_ = f3.LoadContent()
 	if f1.Hash == f3.Hash {
 		t.Fatal("different content should produce different hash")
 	}
