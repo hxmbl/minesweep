@@ -7,6 +7,7 @@ linters:
     - staticcheck
     - unused
     - revive
+    - gosec
     - gofmt
     - misspell
 

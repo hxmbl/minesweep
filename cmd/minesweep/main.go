@@ -343,7 +343,7 @@ func runInstallHooks(cmd *cobra.Command, args []string) error {
 	}
 
 	hookPath := filepath.Join(hooksDir, "pre-commit")
-	if err := os.WriteFile(hookPath, []byte(preCommitHook), 0755); err != nil {
+	if err := os.WriteFile(hookPath, []byte(preCommitHook), 0755); err != nil { //nolint:gosec // pre-commit hook must be executable
 		return fmt.Errorf("write pre-commit hook: %w", err)
 	}
 

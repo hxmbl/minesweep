@@ -410,7 +410,7 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 				// Check memory limit
 				if e.config.MemoryLimitMB > 0 {
 					runtime.ReadMemStats(&memStats)
-					limit := uint64(e.config.MemoryLimitMB) * 1024 * 1024
+					limit := uint64(e.config.MemoryLimitMB) * 1024 * 1024 //nolint:gosec // guarded by > 0 check above
 					if memStats.Alloc-initialAlloc > limit {
 						// Memory limit exceeded, stop processing
 						close(fileCh)
