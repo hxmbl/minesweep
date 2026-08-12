@@ -42,7 +42,7 @@ func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 		return nil, fmt.Errorf("invalid branch name: %w", err)
 	}
 
-	cmd := exec.Command("git", "diff", "--name-only", sanitizedBranch+"...HEAD")
+	cmd := exec.Command("git", "diff", "--name-only", sanitizedBranch+"...HEAD") //nolint:gosec // branch name sanitized by SanitizeBranchName
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {

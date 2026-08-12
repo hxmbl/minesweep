@@ -45,7 +45,7 @@ func SaveSuppressions(path string, list *SuppressionList) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0644) //nolint:gosec // standard permissions for CLI output
 }
 
 func FilterSuppressed(findings []Finding, suppressions *SuppressionList) []Finding {
