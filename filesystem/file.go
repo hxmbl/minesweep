@@ -153,7 +153,11 @@ func (f *File) GetContent() ([]byte, error) {
 	f.contentLoaded = true
 
 	hasher := blake3.New()
-	hasher.Write(data)
+	if _, err := hasher.Write(data); err != nil {
+		f.contentErr = err
+		f.contentLoaded = true
+		return nil, err
+	}
 	f.Hash = hex.EncodeToString(hasher.Sum(nil))
 
 	f.IsBinary = IsBinary(data)

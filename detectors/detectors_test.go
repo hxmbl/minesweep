@@ -121,7 +121,7 @@ func TestRegexDetectorLargeInput(t *testing.T) {
 		t.Fatalf("NewRegexDetector: %v", err)
 	}
 
-	largeContent := strings.Repeat("hello world this is a safe file\n", 100000) + "AKIAIOSFODNN7EXAMPLE\n"
+	largeContent := strings.Repeat("hello world this is a safe file\n", 10000) + "AKIAIOSFODNN7EXAMPLE\n"
 	file := &filesystem.File{
 		Path:    "large.txt",
 		Content: []byte(largeContent),

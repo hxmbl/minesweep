@@ -120,14 +120,11 @@ func (w *Watcher) watch() {
 }
 
 func (w *Watcher) checkChanges() {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-
 	var changedFiles []string
 	maxFiles := 10000 // Prevent excessive memory usage
 
 	for _, dir := range w.dirs {
-		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return nil
 			}
@@ -144,20 +141,20 @@ func (w *Watcher) checkChanges() {
 				return nil
 			}
 
-			// Use RLock for reading
 			w.mu.RLock()
 			lastMod, exists := w.fileStates[path]
 			w.mu.RUnlock()
 
 			if !exists || info.ModTime().After(lastMod) {
-				// Use Lock for writing
 				w.mu.Lock()
 				w.fileStates[path] = info.ModTime()
 				w.mu.Unlock()
 				changedFiles = append(changedFiles, path)
 			}
 			return nil
-		})
+		}); err != nil {
+			log.Printf("minesweep: error walking directory %s: %v", dir, err)
+		}
 	}
 
 	if len(changedFiles) > 0 && time.Since(w.lastNotify) > w.debounce {

@@ -237,7 +237,10 @@ func (p *Pattern) safeMatch(content []byte) []matchResult {
 		return nil
 	}
 
-	matches := p.compiled.FindAllSubmatchIndex(content, -1)
+	// Cap matches to avoid pathological memory use on large files with
+	// repetitive content that generates millions of submatches.
+	const maxMatches = 10000
+	matches := p.compiled.FindAllSubmatchIndex(content, maxMatches)
 	if matches == nil {
 		return nil
 	}
