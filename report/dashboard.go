@@ -146,10 +146,3 @@ func WriteDashboard(w io.Writer, d *Dashboard, verbose bool) error {
 
 	return nil
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

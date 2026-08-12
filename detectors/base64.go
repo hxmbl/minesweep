@@ -219,11 +219,3 @@ func truncateString(s string, maxLen int) string {
 	}
 	return s[:maxLen]
 }
-
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
