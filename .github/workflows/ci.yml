@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ["1.21", "1.22", "1.23", "1.26", "latest"]
+        go-version: ["1.26"]
 
     steps:
       - name: Checkout code
@@ -52,12 +52,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v4
         with:
           version: latest
+          install-mode: goinstall
 
   build:
     name: Build
@@ -70,7 +71,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "latest"
+          go-version: "1.26"
 
       - name: Build
         run: go build -o minesweep ./cmd/minesweep
@@ -92,7 +93,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "latest"
+          go-version: "1.26"
 
       - name: Build
         run: go build -o minesweep ./cmd/minesweep
@@ -114,7 +115,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "latest"
+          go-version: "1.26"
 
       - name: Build
         run: go build -o minesweep.exe ./cmd/minesweep
