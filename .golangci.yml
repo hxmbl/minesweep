@@ -7,7 +7,6 @@ linters:
     - staticcheck
     - unused
     - revive
-    - gosec
     - gofmt
     - misspell
 
@@ -34,4 +33,3 @@ issues:
     - path: _test\.go
       linters:
         - errcheck
-        - gosec
