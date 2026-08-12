@@ -7,11 +7,11 @@ import (
 )
 
 type Suppression struct {
-	ID       string `yaml:"id" json:"id"`
-	RuleID   string `yaml:"rule_id" json:"rule_id"`
-	File     string `yaml:"file" json:"file"`
-	Pattern  string `yaml:"pattern" json:"pattern"`
-	Reason   string `yaml:"reason" json:"reason"`
+	ID      string `yaml:"id" json:"id"`
+	RuleID  string `yaml:"rule_id" json:"rule_id"`
+	File    string `yaml:"file" json:"file"`
+	Pattern string `yaml:"pattern" json:"pattern"`
+	Reason  string `yaml:"reason" json:"reason"`
 }
 
 type SuppressionList struct {

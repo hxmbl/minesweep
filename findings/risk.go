@@ -6,12 +6,12 @@ import (
 )
 
 type RiskReport struct {
-	RiskScore   RiskScore         `yaml:"risk_score" json:"risk_score"`
-	Summary     string            `yaml:"summary" json:"summary"`
-	Findings    []Finding         `yaml:"findings" json:"findings"`
-	Reasons     []string          `yaml:"reasons" json:"reasons"`
-	SafeToShare map[string]bool   `yaml:"safe_to_share" json:"safe_to_share"`
-	Boundaries  []string          `yaml:"boundaries" json:"boundaries"`
+	RiskScore   RiskScore       `yaml:"risk_score" json:"risk_score"`
+	Summary     string          `yaml:"summary" json:"summary"`
+	Findings    []Finding       `yaml:"findings" json:"findings"`
+	Reasons     []string        `yaml:"reasons" json:"reasons"`
+	SafeToShare map[string]bool `yaml:"safe_to_share" json:"safe_to_share"`
+	Boundaries  []string        `yaml:"boundaries" json:"boundaries"`
 }
 
 func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {

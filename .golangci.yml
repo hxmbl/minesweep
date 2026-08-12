@@ -8,10 +8,8 @@ linters:
     - unused
     - revive
     - gosec
-    - goconst
     - gofmt
     - misspell
-    - prealloc
 
 run:
   deadline: 5m

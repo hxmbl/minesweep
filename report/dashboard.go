@@ -10,12 +10,12 @@ import (
 )
 
 type RuleStats struct {
-	RuleID    string
-	RuleName  string
-	HitCount  int
-	Severity  findings.Severity
-	AvgConf   float64
-	Files     map[string]bool
+	RuleID   string
+	RuleName string
+	HitCount int
+	Severity findings.Severity
+	AvgConf  float64
+	Files    map[string]bool
 }
 
 type Dashboard struct {
@@ -54,7 +54,7 @@ func GenerateDashboard(data *findings.RiskReport) *Dashboard {
 		}
 
 		stats.HitCount++
-		stats.AvgConf = (stats.AvgConf * float64(stats.HitCount-1) + f.Confidence) / float64(stats.HitCount)
+		stats.AvgConf = (stats.AvgConf*float64(stats.HitCount-1) + f.Confidence) / float64(stats.HitCount)
 		stats.Files[f.File] = true
 	}
 

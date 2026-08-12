@@ -158,9 +158,9 @@ func TestIsUTF8(t *testing.T) {
 
 func TestHasBOM(t *testing.T) {
 	tests := []struct {
-		name string
-		data []byte
-		enc  string
+		name  string
+		data  []byte
+		enc   string
 		found bool
 	}{
 		{"UTF-8 BOM", []byte{0xEF, 0xBB, 0xBF, 'h', 'e', 'l', 'l', 'o'}, "utf-8", true},

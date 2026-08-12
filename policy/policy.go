@@ -11,9 +11,9 @@ import (
 )
 
 type PolicyRule struct {
-	Tags       []string         `yaml:"tags"`
-	Action     findings.Action  `yaml:"action"`
-	Reason     string           `yaml:"reason,omitempty"`
+	Tags        []string        `yaml:"tags"`
+	Action      findings.Action `yaml:"action"`
+	Reason      string          `yaml:"reason,omitempty"`
 	MinSeverity string          `yaml:"min_severity,omitempty"`
 }
 

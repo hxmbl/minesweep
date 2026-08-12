@@ -1,3 +1,4 @@
+//go:build gofuzz
 // +build gofuzz
 
 package detectors
@@ -41,7 +42,7 @@ func FuzzRuleParsing(f *testing.F) {
 			// Expected for invalid input
 			return
 		}
-		
+
 		// Try to compile all patterns
 		for i := range rf.Rules {
 			for j := range rf.Rules[i].Patterns {
@@ -76,7 +77,7 @@ func FuzzRegexMatching(f *testing.F) {
 			Size:    int64(len(content)),
 			Mode:    0644,
 		}
-		
+
 		// This should not panic or hang
 		findings := d.Detect(file)
 		// We don't care about the results, just that it doesn't crash

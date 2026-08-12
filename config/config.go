@@ -24,9 +24,9 @@ type FileConfig struct {
 	Workers        int      `yaml:"workers" json:"workers"`
 	DiffBase       string   `yaml:"diff_base" json:"diff_base"`
 	// Resource limits
-	MaxFiles       int   `yaml:"max_files" json:"max_files"`
-	MemoryLimitMB   int   `yaml:"memory_limit_mb" json:"memory_limit_mb"`
-	MaxFileSizeMB   int64 `yaml:"max_file_size_mb" json:"max_file_size_mb"`
+	MaxFiles      int   `yaml:"max_files" json:"max_files"`
+	MemoryLimitMB int   `yaml:"memory_limit_mb" json:"memory_limit_mb"`
+	MaxFileSizeMB int64 `yaml:"max_file_size_mb" json:"max_file_size_mb"`
 	// Concurrency limits
 	MaxConcurrentReads int `yaml:"max_concurrent_reads" json:"max_concurrent_reads"`
 }

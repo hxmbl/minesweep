@@ -157,13 +157,13 @@ var DefaultSkipDirs = []string{
 const DefaultMaxFileSize int64 = 50 * 1024 * 1024 // 50MB
 
 type WalkOption struct {
-	Ignore          *IgnorePattern
-	IgnoreFilePath  string
-	MaxFileSize     int64
-	MaxFiles        int // Maximum number of files to scan (0 = unlimited)
-	OnError         func(path string, err error)
-	SkipExtensions  []string
-	SkipDirs        []string
+	Ignore           *IgnorePattern
+	IgnoreFilePath   string
+	MaxFileSize      int64
+	MaxFiles         int // Maximum number of files to scan (0 = unlimited)
+	OnError          func(path string, err error)
+	SkipExtensions   []string
+	SkipDirs         []string
 	IncludeTestFiles bool
 }
 

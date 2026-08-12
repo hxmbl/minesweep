@@ -53,10 +53,10 @@ func NewDetectorFactory(rulesDir string) *DefaultDetectorFactory {
 
 // MockDetector is a mock detector for testing
 type MockDetector struct {
-	name       string
-	findings   []findings.Finding
-	shouldErr  bool
-	err        error
+	name      string
+	findings  []findings.Finding
+	shouldErr bool
+	err       error
 }
 
 // Detect implements the Detector interface

@@ -186,8 +186,8 @@ func TestEngineProfileDifferences(t *testing.T) {
 	os.WriteFile(filepath.Join(sharedDir, "key.pem"), secretContent, 0644)
 
 	profiles := []struct {
-		name   string
-		check  func(t *testing.T, report *findings.RiskReport)
+		name  string
+		check func(t *testing.T, report *findings.RiskReport)
 	}{
 		{
 			name: "developer",

@@ -17,17 +17,17 @@ func TestRegexDetectorNoFalsePositives(t *testing.T) {
 	}
 
 	safeFiles := map[string]string{
-		"empty.go":               "",
-		"hello_world.go":         "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n",
-		"just_README.md":         "# My Project\n\nThis is a safe project.\n",
-		"plain_text.txt":         "The quick brown fox jumps over the lazy dog.\n",
-		"numbers.txt":            "12345 67890 1112131415 1617181920\n",
-		"urls.txt":               "https://example.com/page?q=search&limit=10\n",
-		"html_page.html":         "<html><body><h1>Hello</h1><p>World</p></body></html>\n",
-		"css_styles.css":         "body { margin: 0; padding: 0; background: #fff; }\n",
-		"sql_query.sql":          "SELECT id, name, email FROM users WHERE active = 1;\n",
-		"json_data.json":         `{"users":[{"id":1,"name":"John"}],"total":100}` + "\n",
-		"yaml_config.yml":        "server:\n  port: 8080\n  host: localhost\n",
+		"empty.go":        "",
+		"hello_world.go":  "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n",
+		"just_README.md":  "# My Project\n\nThis is a safe project.\n",
+		"plain_text.txt":  "The quick brown fox jumps over the lazy dog.\n",
+		"numbers.txt":     "12345 67890 1112131415 1617181920\n",
+		"urls.txt":        "https://example.com/page?q=search&limit=10\n",
+		"html_page.html":  "<html><body><h1>Hello</h1><p>World</p></body></html>\n",
+		"css_styles.css":  "body { margin: 0; padding: 0; background: #fff; }\n",
+		"sql_query.sql":   "SELECT id, name, email FROM users WHERE active = 1;\n",
+		"json_data.json":  `{"users":[{"id":1,"name":"John"}],"total":100}` + "\n",
+		"yaml_config.yml": "server:\n  port: 8080\n  host: localhost\n",
 	}
 
 	for name, content := range safeFiles {

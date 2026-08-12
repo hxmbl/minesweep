@@ -103,7 +103,7 @@ func (w *Watcher) Stop() {
 
 func (w *Watcher) watch() {
 	defer w.wg.Done()
-	
+
 	// For now, use polling mode
 	// In the future, we could add fsnotify support for event-driven watching
 	ticker := time.NewTicker(w.interval)
@@ -175,60 +175,4 @@ func (w *Watcher) shouldIgnore(path string) bool {
 		}
 	}
 	return false
-}
-
-// Optimized version that uses a cache of directory entries
-// This reduces the number of filesystem operations
-func (w *Watcher) checkChangesOptimized() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	var changedFiles []string
-	maxFiles := 10000
-
-	// For each directory, track which files we've seen
-	// This is more efficient than walking the entire tree every time
-	for _, dir := range w.dirs {
-		// Get list of files in directory
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-
-		for _, entry := range entries {
-			if len(changedFiles) >= maxFiles {
-				break
-			}
-
-			if entry.IsDir() {
-				continue
-			}
-
-			path := filepath.Join(dir, entry.Name())
-			
-			if w.shouldIgnore(path) {
-				continue
-			}
-
-			// Get file info
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-
-			lastMod, exists := w.fileStates[path]
-			if !exists || info.ModTime().After(lastMod) {
-				w.fileStates[path] = info.ModTime()
-				changedFiles = append(changedFiles, path)
-			}
-		}
-	}
-
-	if len(changedFiles) > 0 && time.Since(w.lastNotify) > w.debounce {
-		w.lastNotify = time.Now()
-		log.Printf("minesweep: detected %d changed files", len(changedFiles))
-		if w.onChange != nil {
-			w.onChange(changedFiles)
-		}
-	}
 }

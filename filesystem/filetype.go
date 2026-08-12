@@ -43,18 +43,18 @@ func IsBinaryFile(ext string) bool {
 }
 
 var binaryMagics = [][]byte{
-	{0x7f, 'E', 'L', 'F'},             // ELF
-	{'M', 'Z'},                         // PE/Windows
-	{'%', 'P', 'D', 'F'},               // PDF
-	{0x89, 'P', 'N', 'G'},              // PNG
-	{'P', 'K', 0x03, 0x04},             // ZIP
-	{0x1f, 0x8b},                       // GZIP
-	{0x42, 0x5a},                       // BZ2
-	{0xfd, 0x37, 0x7a, 0x58, 0x5a},    // XZ
-	{0xfe, 0xed, 0xfa, 0xce},          // Mach-O (32-bit big)
-	{0xfe, 0xed, 0xfa, 0xcf},          // Mach-O (64-bit big)
-	{0xce, 0xfa, 0xed, 0xfe},          // Mach-O (32-bit little)
-	{0xcf, 0xfa, 0xed, 0xfe},          // Mach-O (64-bit little)
+	{0x7f, 'E', 'L', 'F'},          // ELF
+	{'M', 'Z'},                     // PE/Windows
+	{'%', 'P', 'D', 'F'},           // PDF
+	{0x89, 'P', 'N', 'G'},          // PNG
+	{'P', 'K', 0x03, 0x04},         // ZIP
+	{0x1f, 0x8b},                   // GZIP
+	{0x42, 0x5a},                   // BZ2
+	{0xfd, 0x37, 0x7a, 0x58, 0x5a}, // XZ
+	{0xfe, 0xed, 0xfa, 0xce},       // Mach-O (32-bit big)
+	{0xfe, 0xed, 0xfa, 0xcf},       // Mach-O (64-bit big)
+	{0xce, 0xfa, 0xed, 0xfe},       // Mach-O (32-bit little)
+	{0xcf, 0xfa, 0xed, 0xfe},       // Mach-O (64-bit little)
 }
 
 func hasMagic(data []byte, magic []byte) bool {

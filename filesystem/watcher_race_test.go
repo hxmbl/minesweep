@@ -39,7 +39,7 @@ func TestWatcherRaceConditions(t *testing.T) {
 
 	// Concurrently modify files and access the watcher
 	var wg sync.WaitGroup
-	
+
 	// Goroutine 1: Modify files
 	wg.Add(1)
 	go func() {
@@ -90,7 +90,7 @@ func TestWatcherConcurrentStartStop(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	var wg sync.WaitGroup
-	
+
 	// Start multiple watchers concurrently
 	for i := 0; i < 5; i++ {
 		wg.Add(1)

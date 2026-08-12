@@ -1,3 +1,4 @@
+//go:build gofuzz
 // +build gofuzz
 
 package filesystem
@@ -24,7 +25,7 @@ func FuzzPathTraversal(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		path := string(data)
 		root := "/safe/root"
-		
+
 		// This should not panic
 		safe := isSafePath(path, root)
 		_ = safe
@@ -65,7 +66,7 @@ func FuzzNewFileWithRoot(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		path := string(data)
 		root := "/safe/root"
-		
+
 		// We can't actually create files in fuzzing, but we can test the logic
 		// by checking if the path would be safe
 		if path != "" {

@@ -31,11 +31,11 @@ type SARIFDriver struct {
 }
 
 type SARIFRule struct {
-	ID                   string     `json:"id"`
-	Name                 string     `json:"name"`
+	ID                   string       `json:"id"`
+	Name                 string       `json:"name"`
 	Description          SARIFMessage `json:"description"`
-	HelpURI              string     `json:"helpUri,omitempty"`
-	DefaultConfiguration SARIFConfig `json:"defaultConfiguration"`
+	HelpURI              string       `json:"helpUri,omitempty"`
+	DefaultConfiguration SARIFConfig  `json:"defaultConfiguration"`
 }
 
 type SARIFConfig struct {

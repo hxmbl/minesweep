@@ -30,7 +30,7 @@ func TestRegression_CommandInjection(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			sanitized, err := sanitizeBranchName(tc.branch)
-			
+
 			if tc.shouldFail {
 				if err == nil {
 					t.Errorf("Expected error for branch %q, but got none", tc.branch)

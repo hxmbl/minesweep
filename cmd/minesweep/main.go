@@ -16,15 +16,15 @@ import (
 )
 
 var (
-	cfg         engine.Config
-	outputJSON  bool
-	outputSARIF bool
+	cfg             engine.Config
+	outputJSON      bool
+	outputSARIF     bool
 	outputDashboard bool
 	showAnnotations bool
-	sarifVersion = "0.1.0"
-	configPath  string
-	watchMode   bool
-	watchInterval time.Duration
+	sarifVersion    = "0.1.0"
+	configPath      string
+	watchMode       bool
+	watchInterval   time.Duration
 )
 
 func main() {
