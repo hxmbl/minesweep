@@ -160,7 +160,7 @@ func TestWriteJSONEmptyReport(t *testing.T) {
 		t.Fatal("expected JSON output for empty report")
 	}
 	if strings.Contains(output, `"findings"`) && !strings.Contains(output, `"findings": null`) {
-		// Allow either null or empty
+		t.Fatal("expected findings to be null or empty for empty report")
 	}
 }
 

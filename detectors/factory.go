@@ -61,10 +61,6 @@ type MockDetector struct {
 
 // Detect implements the Detector interface
 func (m *MockDetector) Detect(file *filesystem.File) []findings.Finding {
-	if m.shouldErr {
-		// In a real mock, you might want to return an error differently
-		// For now, we just return the configured findings
-	}
 	return m.findings
 }
 
