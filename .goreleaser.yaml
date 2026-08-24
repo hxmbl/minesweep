@@ -53,6 +53,6 @@ brews:
       name: hxmbl
       email: hxmbl@users.noreply.github.com
     homepage: https://github.com/Hxmbl/minesweep
-    description: Policy-driven secrets and sensitive data scanner with git history forensics.
+    description: Policy-driven secrets and sensitive data scanner with git history forensics
     test: |
-      system "#{bin}/minesweep version"
+      system "#{bin}/minesweep", "version"
