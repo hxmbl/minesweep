@@ -2,11 +2,13 @@ rules:
   - id: github-pat
     type: regex
     name: GitHub Personal Access Token
-    description: GitHub personal access token (ghp_ prefix)
+    description: GitHub personal access token (ghp_ prefix or fine-grained github_pat_ prefix)
     severity: critical
     tags: [github, credentials, vcs]
     patterns:
       - regex: \b(ghp_[0-9A-Za-z]{36,251})\b
+        confidence: 0.95
+      - regex: \b(github_pat_[A-Za-z0-9_]{22,255})\b
         confidence: 0.95
       - regex: \b(gho_[0-9A-Za-z]{36,251})\b
         confidence: 0.95

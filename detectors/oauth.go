@@ -8,210 +8,70 @@ import (
 	"minesweep/findings"
 )
 
-// OAuthDetector detects OAuth tokens, bearer tokens, and other API credentials
+// oauthPattern is one compiled detection pattern of the OAuthDetector.
+type oauthPattern struct {
+	name        string
+	regex       *regexp.Regexp
+	severity    findings.Severity
+	confidence  float64
+	tags        []string
+	description string
+}
+
+// OAuthDetector detects OAuth/API credentials that are not already covered by
+// the YAML rules (JWTs, GitHub tokens, and Google keys live in rules/*.yml).
 type OAuthDetector struct {
-	patterns []struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
+	patterns []oauthPattern
+}
+
+func newOAuthPattern(name, pattern string, severity findings.Severity, confidence float64, tags []string, description string) oauthPattern {
+	return oauthPattern{
+		name:        name,
+		regex:       regexp.MustCompile(pattern),
+		severity:    severity,
+		confidence:  confidence,
+		tags:        tags,
+		description: description,
 	}
 }
 
-// NewOAuthDetector creates a new OAuth detector
+// NewOAuthDetector creates a new OAuth detector.
 func NewOAuthDetector() *OAuthDetector {
-	d := &OAuthDetector{}
+	return &OAuthDetector{
+		patterns: []oauthPattern{
+			newOAuthPattern("oauth_client_secret",
+				`(?i)(oauth|client)[_-]?secret\s*[:=]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
+				findings.SeverityHigh, 0.80,
+				[]string{"oauth", "secret", "credentials"}, "OAuth client secret"),
 
-	// Bearer tokens (generic)
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "bearer_token",
-		regex:       regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+`),
-		severity:    findings.SeverityHigh,
-		confidence:  0.85,
-		tags:        []string{"oauth", "bearer", "token", "credentials"},
-		description: "Bearer token (JWT format)",
-	})
+			newOAuthPattern("oauth_access_token",
+				`(?i)(oauth|access)[_-]?token\s*[:=]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
+				findings.SeverityHigh, 0.80,
+				[]string{"oauth", "token", "credentials"}, "OAuth access token"),
 
-	// Generic JWT tokens
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "jwt_token",
-		regex:       regexp.MustCompile(`\b[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\b`),
-		severity:    findings.SeverityHigh,
-		confidence:  0.75,
-		tags:        []string{"jwt", "token", "credentials"},
-		description: "JWT token detected",
-	})
+			newOAuthPattern("gitlab_token",
+				`\b(glpat-[A-Za-z0-9\-_]{20,})\b`,
+				findings.SeverityHigh, 0.95,
+				[]string{"gitlab", "token", "credentials", "vcs"}, "GitLab personal access token"),
 
-	// OAuth client secrets
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "oauth_client_secret",
-		regex:       regexp.MustCompile(`(?i)(oauth|client)[_-]?secret\s*[:=]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?`),
-		severity:    findings.SeverityHigh,
-		confidence:  0.80,
-		tags:        []string{"oauth", "secret", "credentials"},
-		description: "OAuth client secret",
-	})
+			// Anchored to an explicit key/value context: an unanchored
+			// fixed-length match would flag every git SHA-1 in sight.
+			newOAuthPattern("bitbucket_token",
+				`(?i)bitbucket[_-]?(?:token|app[_-]?password)\s*[:=]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
+				findings.SeverityHigh, 0.85,
+				[]string{"bitbucket", "token", "credentials", "vcs"}, "Bitbucket app password or token"),
 
-	// OAuth access tokens
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "oauth_access_token",
-		regex:       regexp.MustCompile(`(?i)(oauth|access)[_-]?token\s*[:=]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?`),
-		severity:    findings.SeverityHigh,
-		confidence:  0.80,
-		tags:        []string{"oauth", "token", "credentials"},
-		description: "OAuth access token",
-	})
+			newOAuthPattern("session_cookie",
+				`(?i)(PHPSESSID|JSESSIONID|ASP\.NET_SessionId|sessionid|sessid|sid)\s*[=:]\s*["']?[A-Za-z0-9\-_]{20,}['"]?`,
+				findings.SeverityMedium, 0.75,
+				[]string{"session", "cookie", "credentials"}, "Session cookie or ID"),
 
-	// GitHub tokens
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "github_token",
-		regex:       regexp.MustCompile(`\b(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b`),
-		severity:    findings.SeverityHigh,
-		confidence:  0.95,
-		tags:        []string{"github", "token", "credentials"},
-		description: "GitHub personal access token",
-	})
-
-	// GitLab tokens
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "gitlab_token",
-		regex:       regexp.MustCompile(`\b(glpat-[A-Za-z0-9\-_]{20,})\b`),
-		severity:    findings.SeverityHigh,
-		confidence:  0.95,
-		tags:        []string{"gitlab", "token", "credentials"},
-		description: "GitLab personal access token",
-	})
-
-	// Bitbucket tokens
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "bitbucket_token",
-		regex:       regexp.MustCompile(`\b([A-Za-z0-9]{40})\b`),
-		severity:    findings.SeverityHigh,
-		confidence:  0.70,
-		tags:        []string{"bitbucket", "token", "credentials"},
-		description: "Bitbucket app password or token",
-	})
-
-	// Google API keys
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "google_api_key",
-		regex:       regexp.MustCompile(`\b(AIza[0-9A-Za-z\-_]{35})\b`),
-		severity:    findings.SeverityHigh,
-		confidence:  0.90,
-		tags:        []string{"google", "api-key", "credentials"},
-		description: "Google API key",
-	})
-
-	// Google OAuth client IDs
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "google_oauth_client_id",
-		regex:       regexp.MustCompile(`\b([0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com)\b`),
-		severity:    findings.SeverityMedium,
-		confidence:  0.85,
-		tags:        []string{"google", "oauth", "credentials"},
-		description: "Google OAuth client ID",
-	})
-
-	// Session cookies
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "session_cookie",
-		regex:       regexp.MustCompile(`(?i)(PHPSESSID|JSESSIONID|ASP\.NET_SessionId|sessionid|sessid|sid)\s*[=:]\s*["']?[A-Za-z0-9\-_]{20,}['"]?`),
-		severity:    findings.SeverityMedium,
-		confidence:  0.75,
-		tags:        []string{"session", "cookie", "credentials"},
-		description: "Session cookie or ID",
-	})
-
-	// Cloud storage credentials
-	d.patterns = append(d.patterns, struct {
-		name        string
-		regex       *regexp.Regexp
-		severity    findings.Severity
-		confidence  float64
-		tags        []string
-		description string
-	}{
-		name:        "cloud_storage_credentials",
-		regex:       regexp.MustCompile(`(?i)(aws|gcp|azure|s3|gs|blob)\s*(access|secret|key|token|password)\s*[:=]\s*['"]?[A-Za-z0-9\/+=@\-_]{20,}['"]?`),
-		severity:    findings.SeverityHigh,
-		confidence:  0.80,
-		tags:        []string{"cloud", "storage", "credentials"},
-		description: "Cloud storage credentials",
-	})
-
-	return d
+			newOAuthPattern("cloud_storage_credentials",
+				`(?i)(aws|gcp|azure|s3|gs|blob)\s*(access|secret|key|token|password)\s*[:=]\s*['"]?[A-Za-z0-9/+=@\-_]{20,}['"]?`,
+				findings.SeverityHigh, 0.80,
+				[]string{"cloud", "storage", "credentials"}, "Cloud storage credentials"),
+		},
+	}
 }
 
 func (d *OAuthDetector) Name() string {
@@ -232,36 +92,19 @@ func (d *OAuthDetector) Detect(file *filesystem.File) []findings.Finding {
 	lines := strings.Split(content, "\n")
 
 	for _, pattern := range d.patterns {
-		matches := pattern.regex.FindAllStringSubmatchIndex(content, -1)
+		matches := pattern.regex.FindAllStringSubmatchIndex(content, maxMatchesPerPattern)
 		for _, match := range matches {
-			// Extract the full match
-			start := match[0]
-			end := match[1]
+			start, end := match[0], match[1]
 			if start == -1 || end == -1 {
 				continue
 			}
 			value := content[start:end]
+			lineNum, col := locate(content, start)
 
-			// Get line number
-			lineNum := 1
-			for i := 0; i < start && i < len(content); i++ {
-				if content[i] == '\n' {
-					lineNum++
-				}
-			}
-
-			// Get source line
 			sourceLine := ""
 			if lineNum-1 >= 0 && lineNum-1 < len(lines) {
 				sourceLine = strings.TrimSpace(lines[lineNum-1])
 			}
-
-			// Get column
-			col := start
-			for i := start - 1; i >= 0 && content[i] != '\n'; i-- {
-				col--
-			}
-			col++
 
 			fResults = append(fResults, findings.Finding{
 				Type:       pattern.name,
@@ -274,7 +117,7 @@ func (d *OAuthDetector) Detect(file *filesystem.File) []findings.Finding {
 				Reason:     pattern.description,
 				RuleID:     pattern.name,
 				Tags:       pattern.tags,
-				Context:    extractOAuthContext(lines, lineNum-1, 2),
+				Context:    extractContext(lines, lineNum-1, 2),
 				SourceLine: sourceLine,
 			})
 		}
@@ -283,24 +126,16 @@ func (d *OAuthDetector) Detect(file *filesystem.File) []findings.Finding {
 	return fResults
 }
 
-func extractOAuthContext(lines []string, center, radius int) string {
-	start := center - radius
-	if start < 0 {
-		start = 0
-	}
-	end := center + radius + 1
-	if end > len(lines) {
-		end = len(lines)
-	}
-	var sb strings.Builder
-	for i := start; i < end; i++ {
-		prefix := "  "
-		if i == center {
-			prefix = "> "
+// locate returns the 1-based line number and column of byte offset pos.
+func locate(content string, pos int) (line, col int) {
+	line = 1
+	lastNewline := -1
+	for i := 0; i < pos && i < len(content); i++ {
+		if content[i] == '\n' {
+			line++
+			lastNewline = i
 		}
-		sb.WriteString(prefix)
-		sb.WriteString(strings.TrimSpace(lines[i]))
-		sb.WriteString("\n")
 	}
-	return sb.String()
+	col = pos - lastNewline
+	return line, col
 }

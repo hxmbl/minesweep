@@ -1,17 +1,23 @@
 package engine
 
 import (
+	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 
 	"minesweep/detectors"
 	"minesweep/filesystem"
 	"minesweep/findings"
+	"minesweep/git"
 	"minesweep/policy"
+
+	"minesweep"
 )
 
 type Config struct {
@@ -68,42 +74,19 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("load regex detector: %w", err)
 	}
 
-	base64Detector, err := detectors.NewBase64Detector(cfg.RulesDir)
-	if err != nil {
-		return nil, fmt.Errorf("load base64 detector: %w", err)
-	}
-
 	detList := []detectors.Detector{
 		regexDetector,
 		detectors.NewFileTypeDetector(),
 		detectors.NewSymlinkDetector(),
 		detectors.NewEntropyDetector(),
-		base64Detector,
+		detectors.NewBase64DetectorWithRegex(regexDetector),
 		detectors.NewDatabaseDetector(),
 		detectors.NewOAuthDetector(),
 	}
 
-	var policies []policy.PolicyRule
-	switch {
-	case cfg.Profile != "":
-		if cfg.PolicyFile != "" {
-			fmt.Fprintf(os.Stderr, "warning: both --profile and --policy set; --profile (%q) takes precedence\n", cfg.Profile)
-		}
-		policies, err = policy.ResolveProfile(cfg.ProfilesDir, cfg.Profile)
-		if err != nil {
-			return nil, fmt.Errorf("resolve profile %q: %w", cfg.Profile, err)
-		}
-	case cfg.PolicyFile != "":
-		policies, err = policy.LoadPolicyFile(cfg.PolicyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load policy file: %w", err)
-		}
-	default:
-		defaultPath := filepath.Join(cfg.PolicyDir, "default.yml")
-		policies, err = policy.LoadPolicyFile(defaultPath)
-		if err != nil {
-			return nil, fmt.Errorf("load default policy: %w", err)
-		}
+	policies, err := resolvePolicies(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	// Initialize semaphore for concurrent reads
@@ -126,51 +109,121 @@ func New(cfg Config) (*Engine, error) {
 	}, nil
 }
 
-// applyBaseline applies baseline filtering to a report
-func (e *Engine) applyBaseline(report *findings.RiskReport) (*findings.RiskReport, error) {
-	if e.config.BaselineFile == "" || report == nil {
-		return report, nil
+// resolvePolicies loads policy rules from, in order of precedence:
+//  1. an explicit profile (from disk profiles dir if present, else embedded)
+//  2. an explicit policy file (must exist on disk)
+//  3. <policy-dir>/default.yml from disk if that dir exists, else embedded
+func resolvePolicies(cfg Config) ([]policy.PolicyRule, error) {
+	switch {
+	case cfg.Profile != "":
+		if cfg.PolicyFile != "" {
+			fmt.Fprintf(os.Stderr, "warning: both --profile and --policy set; --profile (%q) takes precedence\n", cfg.Profile)
+		}
+		fsys, embedded := dirOrEmbedded(cfg.ProfilesDir, "profiles")
+		if embedded && cfg.Verbose {
+			fmt.Fprintf(os.Stderr, "minesweep: profiles dir %q not found; using built-in profiles\n", cfg.ProfilesDir)
+		}
+		policies, err := policy.ResolveProfileFS(fsys, cfg.Profile)
+		if err != nil {
+			return nil, fmt.Errorf("resolve profile %q: %w", cfg.Profile, err)
+		}
+		return policies, nil
+
+	case cfg.PolicyFile != "":
+		policies, err := policy.LoadPolicyFile(cfg.PolicyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load policy file: %w", err)
+		}
+		return policies, nil
+
+	default:
+		if info, err := os.Stat(cfg.PolicyDir); err == nil && info.IsDir() {
+			defaultPath := filepath.Join(cfg.PolicyDir, "default.yml")
+			policies, err := policy.LoadPolicyFile(defaultPath)
+			if err != nil {
+				return nil, fmt.Errorf("load default policy: %w", err)
+			}
+			return policies, nil
+		}
+		policyFS, err := fs.Sub(minesweep.Assets, "policy")
+		if err != nil {
+			return nil, err
+		}
+		if cfg.Verbose {
+			fmt.Fprintf(os.Stderr, "minesweep: policy dir %q not found; using built-in default policy\n", cfg.PolicyDir)
+		}
+		policies, err := policy.LoadPolicyFileFS(policyFS, "default.yml")
+		if err != nil {
+			return nil, fmt.Errorf("load default policy: %w", err)
+		}
+		return policies, nil
+	}
+}
+
+// dirOrEmbedded returns an fs.FS for a directory if it exists on disk,
+// otherwise a subtree of the embedded assets. The second return value reports
+// whether the embedded fallback was used.
+func dirOrEmbedded(dir, embeddedSubtree string) (fs.FS, bool) {
+	if dir != "" {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return os.DirFS(dir), false
+		}
+	}
+	sub, err := fs.Sub(minesweep.Assets, embeddedSubtree)
+	if err != nil {
+		// Embedded subtree names are compile-time constants; this cannot fail.
+		panic(fmt.Sprintf("embedded asset subtree %q: %v", embeddedSubtree, err))
+	}
+	return sub, true
+}
+
+// finalize runs the post-detection pipeline: baseline filtering, suppression
+// filtering, policy evaluation, and report generation. Filtering deliberately
+// happens BEFORE evaluation so that baselines and suppression patterns match
+// raw secret values, not redacted ones.
+func (e *Engine) finalize(allFindings []findings.Finding) (*findings.RiskReport, error) {
+	filtered, err := e.filterBaseline(allFindings)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered, err = e.filterSuppressions(filtered)
+	if err != nil {
+		return nil, err
+	}
+
+	evaluated := e.evaluate(filtered)
+	rep := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
+	return &rep, nil
+}
+
+// filterBaseline removes findings already recorded in the baseline file.
+func (e *Engine) filterBaseline(fs []findings.Finding) ([]findings.Finding, error) {
+	if e.config.BaselineFile == "" {
+		return fs, nil
 	}
 	baseline, err := findings.LoadBaseline(e.config.BaselineFile)
 	if err != nil {
 		return nil, fmt.Errorf("load baseline: %w", err)
 	}
-	if report.Findings == nil {
-		report.Findings = []findings.Finding{}
-	}
-	newFindings := findings.FilterNewFindings(report.Findings, baseline)
-	if newFindings == nil {
-		newFindings = []findings.Finding{}
-	}
-	report.Findings = newFindings
-	newReport := findings.GenerateRiskReport(newFindings, e.config.Boundaries)
+	newFindings := findings.FilterNewFindings(fs, baseline)
 
 	if err := e.updateBaseline(baseline, newFindings); err != nil {
 		return nil, fmt.Errorf("save baseline: %w", err)
 	}
-
-	return &newReport, nil
+	return newFindings, nil
 }
 
-// applySuppressions applies suppression filtering to a report
-func (e *Engine) applySuppressions(report *findings.RiskReport) (*findings.RiskReport, error) {
-	if e.config.SuppressFile == "" || report == nil {
-		return report, nil
+// filterSuppressions removes findings matching the suppression file.
+func (e *Engine) filterSuppressions(fs []findings.Finding) ([]findings.Finding, error) {
+	if e.config.SuppressFile == "" {
+		return fs, nil
 	}
 	suppressions, err := findings.LoadSuppressions(e.config.SuppressFile)
 	if err != nil {
 		return nil, fmt.Errorf("load suppressions: %w", err)
 	}
-	if report.Findings == nil {
-		report.Findings = []findings.Finding{}
-	}
-	filtered := findings.FilterSuppressed(report.Findings, suppressions)
-	if filtered == nil {
-		filtered = []findings.Finding{}
-	}
-	report.Findings = filtered
-	newReport := findings.GenerateRiskReport(filtered, e.config.Boundaries)
-	return &newReport, nil
+	return findings.FilterSuppressed(fs, suppressions), nil
 }
 
 // updateBaseline updates the baseline file with new findings
@@ -200,21 +253,6 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	if report == nil {
-		return nil, nil
-	}
-
-	report, err = e.applyBaseline(report)
-	if err != nil {
-		return nil, err
-	}
-
-	report, err = e.applySuppressions(report)
-	if err != nil {
-		return nil, err
-	}
-
 	return report, nil
 }
 
@@ -222,17 +260,27 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 	var diffFiles []string
 	var err error
 	if e.config.StagedOnly {
-		diffFiles, err = filesystem.GetStagedFiles(root)
+		diffFiles, err = git.GetStagedFiles(root)
 	} else {
-		diffFiles, err = filesystem.GetDiffFiles(root, e.config.DiffBase)
+		diffFiles, err = git.GetDiffFiles(root, e.config.DiffBase)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get diff files: %w", err)
 	}
 
+	// Git reports paths relative to the repository top level; resolve them
+	// there and keep only files inside the requested scan root.
+	top := git.TopLevel(root)
+	if top == "" {
+		top = root
+	}
+
 	var files []*filesystem.File
 	for _, relPath := range diffFiles {
-		absPath := filepath.Join(root, relPath)
+		absPath := filepath.Join(top, relPath)
+		if !withinDir(absPath, root) {
+			continue // changed file outside the requested scan root
+		}
 		file, err := filesystem.NewFileWithRoot(absPath, root)
 		if err != nil {
 			continue
@@ -244,22 +292,7 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 	}
 
 	allFindings := e.detectParallel(files)
-
-	evaluated := e.evaluate(allFindings)
-	reportVal := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
-	report := &reportVal
-
-	report, err = e.applyBaseline(report)
-	if err != nil {
-		return nil, err
-	}
-
-	report, err = e.applySuppressions(report)
-	if err != nil {
-		return nil, err
-	}
-
-	return report, nil
+	return e.finalize(allFindings)
 }
 
 func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
@@ -272,21 +305,7 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 	}
 
 	allFindings := e.detect(file)
-	evaluated := e.evaluate(allFindings)
-	singleReport := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
-	report := &singleReport
-
-	report, err = e.applyBaseline(report)
-	if err != nil {
-		return nil, err
-	}
-
-	report, err = e.applySuppressions(report)
-	if err != nil {
-		return nil, err
-	}
-
-	return report, nil
+	return e.finalize(allFindings)
 }
 
 func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
@@ -312,10 +331,7 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 	}
 
 	allFindings := e.detectParallel(files)
-
-	evaluated := e.evaluate(allFindings)
-	report := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
-	return &report, nil
+	return e.finalize(allFindings)
 }
 
 func (e *Engine) detect(file *filesystem.File) []findings.Finding {
@@ -396,6 +412,14 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 	}
 	initialAlloc := memStats.Alloc
 
+	// Cancelling ctx stops processing of remaining files without closing fileCh,
+	// which is owned by the producer below (closing it from a worker would risk
+	// a send-on-closed-channel panic).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const memCheckInterval = 64
+
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -406,16 +430,20 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 				}
 			}()
 			defer wg.Done()
+			processed := 0
 			for file := range fileCh {
-				// Check memory limit
-				if e.config.MemoryLimitMB > 0 {
+				// Check memory limit periodically
+				if e.config.MemoryLimitMB > 0 && processed%memCheckInterval == 0 {
 					runtime.ReadMemStats(&memStats)
 					limit := uint64(e.config.MemoryLimitMB) * 1024 * 1024 //nolint:gosec // guarded by > 0 check above
 					if memStats.Alloc-initialAlloc > limit {
-						// Memory limit exceeded, stop processing
-						close(fileCh)
-						return
+						cancel()
 					}
+				}
+				processed++
+
+				if ctx.Err() != nil {
+					continue // drain the channel without processing
 				}
 
 				fResults := e.detect(file)
@@ -450,6 +478,23 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 	}
 
 	return allFindings
+}
+
+// withinDir reports whether absPath is located inside (or equal to) dir.
+// Both sides are symlink-resolved first: e.g. git reports /private/tmp/... on
+// macOS while filepath.Abs yields /tmp/..., which are otherwise unrelated.
+func withinDir(absPath, dir string) bool {
+	if rp, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = rp
+	}
+	if rd, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = rd
+	}
+	rel, err := filepath.Rel(dir, absPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func hasAnyTag(findingTags, filterTags []string) bool {

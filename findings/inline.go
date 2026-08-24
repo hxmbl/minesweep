@@ -41,12 +41,6 @@ func FilterInlineSuppressions(findings []Finding, fileContent string) []Finding 
 	for i, line := range lines {
 		if sp := ParseInlineSuppression(line); sp != nil {
 			lineSuppressions[i+1] = sp
-			if sp.RuleIDs == nil {
-				lineSuppressions[i+1] = &InlineSuppression{
-					RuleIDs: nil,
-					Reason:  sp.Reason,
-				}
-			}
 		}
 	}
 

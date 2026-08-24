@@ -1,4 +1,4 @@
-package filesystem
+package git
 
 import (
 	"os"
@@ -93,6 +93,56 @@ func TestGetDiffFilesCommittedDiff(t *testing.T) {
 	// The function should return something or error gracefully
 }
 
+func TestGetDiffFilesSubdir(t *testing.T) {
+	// Regression: paths must resolve against the repo top level even when the
+	// scan root is a subdirectory of the repository.
+	dir := t.TempDir()
+
+	if err := runGitCmd(dir, "init", "-b", "main"); err != nil {
+		t.Skip("git not available:", err)
+	}
+	runGitCmd(dir, "config", "user.email", "test@test.com")
+	runGitCmd(dir, "config", "user.name", "Test")
+
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(dir, "pkg", "a.txt"), "base")
+	runGitCmd(dir, "add", ".")
+	runGitCmd(dir, "commit", "-m", "init")
+	runGitCmd(dir, "checkout", "-q", "-b", "feature")
+	writeTestFile(t, filepath.Join(dir, "pkg", "a.txt"), "changed with AKIAIOSFODNN7EXAMPLE")
+	runGitCmd(dir, "add", ".")
+	runGitCmd(dir, "commit", "-m", "change")
+
+	files, err := GetDiffFiles(filepath.Join(dir, "pkg"), "main")
+	if err != nil {
+		t.Fatalf("GetDiffFiles from subdir: %v", err)
+	}
+	found := false
+	for _, f := range files {
+		if f == "pkg/a.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected pkg/a.txt in diff files relative to toplevel, got %v", files)
+	}
+}
+
+func TestTopLevel(t *testing.T) {
+	dir := t.TempDir()
+	if TopLevel(dir) != "" && IsGitRepo(dir) {
+		t.Error("TopLevel should be empty outside a repo")
+	}
+	if err := runGitCmd(dir, "init"); err != nil {
+		t.Skip("git not available:", err)
+	}
+	if got := TopLevel(dir); got == "" {
+		t.Error("expected non-empty toplevel inside repo")
+	}
+}
+
 func TestIsGitRepo(t *testing.T) {
 	dir := t.TempDir()
 	if IsGitRepo(dir) {
@@ -143,6 +193,55 @@ func TestReadFileLinesMissing(t *testing.T) {
 	_, err := ReadFileLines("/nonexistent/file.txt")
 	if err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+// TestRegression_CommandInjection tests that branch names are properly sanitized
+// to prevent command injection (Issue 4.3)
+func TestRegression_CommandInjection(t *testing.T) {
+	testCases := []struct {
+		name       string
+		branch     string
+		shouldFail bool
+	}{
+		{"valid branch", "main", false},
+		{"valid feature branch", "feature/test", false},
+		{"valid with dash", "fix-bug", false},
+		{"valid with underscore", "test_branch", false},
+		{"valid with dot", "release.1.0", false},
+		{"command injection attempt 1", "main; rm -rf /", true},
+		{"command injection attempt 2", "main | cat /etc/passwd", true},
+		{"command injection attempt 3", "main && echo hacked", true},
+		{"command injection attempt 4", "main `whoami`", true},
+		{"command injection attempt 5", "main $(whoami)", true},
+		{"command injection attempt 6", "main > /tmp/hack", true},
+		{"command injection attempt 7", "main < /tmp/hack", true},
+		{"empty branch", "", false}, // Should default to main
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sanitized, err := SanitizeBranchName(tc.branch)
+
+			if tc.shouldFail {
+				if err == nil {
+					t.Errorf("Expected error for branch %q, but got none", tc.branch)
+				}
+				if sanitized != "" {
+					t.Errorf("Expected empty sanitized branch for %q, but got %q", tc.branch, sanitized)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error for branch %q: %v", tc.branch, err)
+				}
+				if tc.branch == "" && sanitized != "main" {
+					t.Errorf("Expected 'main' for empty branch, but got %q", sanitized)
+				}
+				if tc.branch != "" && sanitized != tc.branch {
+					t.Errorf("Expected %q, but got %q", tc.branch, sanitized)
+				}
+			}
+		})
 	}
 }
 

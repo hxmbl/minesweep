@@ -6,6 +6,9 @@ import (
 	"regexp"
 )
 
+// Suppression identifies findings to exclude from reports. ID is a human
+// label for the entry (not matched against anything); at least one of
+// RuleID, File, or Pattern should be set to actually match findings.
 type Suppression struct {
 	ID      string `yaml:"id" json:"id"`
 	RuleID  string `yaml:"rule_id" json:"rule_id"`
@@ -53,31 +56,42 @@ func FilterSuppressed(findings []Finding, suppressions *SuppressionList) []Findi
 		return findings
 	}
 
+	patterns := compilePatterns(suppressions.Suppression)
+
 	var result []Finding
 	for _, f := range findings {
-		if !isSuppressed(f, suppressions) {
+		if !isSuppressed(f, suppressions.Suppression, patterns) {
 			result = append(result, f)
 		}
 	}
 	return result
 }
 
-func isSuppressed(f Finding, suppressions *SuppressionList) bool {
-	for _, s := range suppressions.Suppression {
-		if s.ID != "" && f.File == s.ID {
-			return true
+// compilePatterns precompiles the pattern of each suppression entry.
+// Invalid patterns yield nil and never match (they are ignored).
+func compilePatterns(entries []Suppression) []*regexp.Regexp {
+	patterns := make([]*regexp.Regexp, len(entries))
+	for i, s := range entries {
+		if s.Pattern == "" {
+			continue
 		}
+		if re, err := regexp.Compile(s.Pattern); err == nil {
+			patterns[i] = re
+		}
+	}
+	return patterns
+}
+
+func isSuppressed(f Finding, entries []Suppression, patterns []*regexp.Regexp) bool {
+	for i, s := range entries {
 		if s.RuleID != "" && f.RuleID == s.RuleID {
 			return true
 		}
 		if s.File != "" && f.File == s.File {
 			return true
 		}
-		if s.Pattern != "" {
-			if matched, _ := regexp.MatchString(s.Pattern, f.Value); matched {
-				return true
-			}
-			if matched, _ := regexp.MatchString(s.Pattern, f.File); matched {
+		if re := patterns[i]; re != nil {
+			if re.MatchString(f.Value) || re.MatchString(f.File) {
 				return true
 			}
 		}

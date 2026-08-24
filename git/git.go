@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -30,7 +31,20 @@ func SanitizeBranchName(name string) (string, error) {
 	return name, nil
 }
 
-// GetDiffFiles returns the list of files changed between baseBranch and HEAD
+// TopLevel returns the absolute path of the repository working tree root
+// containing path (or "" if not a git repo).
+func TopLevel(path string) string {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = path
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// GetDiffFiles returns the list of files changed between baseBranch and HEAD,
+// relative to the repository top-level directory.
 func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 	if baseBranch == "" {
 		baseBranch = "main"
@@ -42,47 +56,56 @@ func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 		return nil, fmt.Errorf("invalid branch name: %w", err)
 	}
 
+	// git prints paths relative to the repo root regardless of cwd, so run
+	// from the top level to make the returned paths unambiguous.
+	top := TopLevel(root)
+	if top == "" {
+		return nil, fmt.Errorf("not a git repository: %s", root)
+	}
+
 	cmd := exec.Command("git", "diff", "--name-only", sanitizedBranch+"...HEAD") //nolint:gosec // branch name sanitized by SanitizeBranchName
-	cmd.Dir = root
+	cmd.Dir = top
 	out, err := cmd.Output()
 	if err != nil {
-		cmd = exec.Command("git", "diff", "--name-only", sanitizedBranch)
-		cmd.Dir = root
+		cmd = exec.Command("git", "diff", "--name-only", sanitizedBranch) //nolint:gosec // branch name sanitized by SanitizeBranchName
+		cmd.Dir = top
 		out, err = cmd.Output()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("git diff --name-only %q: %w", sanitizedBranch, err)
 		}
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	var files []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			files = append(files, line)
-		}
-	}
-	return files, nil
+	return parseFileList(string(out)), nil
 }
 
-// GetStagedFiles returns the list of staged files
+// GetStagedFiles returns the list of staged files, relative to the repository
+// top-level directory.
 func GetStagedFiles(root string) ([]string, error) {
-	cmd := exec.Command("git", "diff", "--cached", "--name-only")
-	cmd.Dir = root
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, err
+	top := TopLevel(root)
+	if top == "" {
+		return nil, fmt.Errorf("not a git repository: %s", root)
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	cmd := exec.Command("git", "diff", "--cached", "--name-only")
+	cmd.Dir = top
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git diff --cached --name-only: %w", err)
+	}
+
+	return parseFileList(string(out)), nil
+}
+
+func parseFileList(out string) []string {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
 	var files []string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" {
-			files = append(files, line)
+			files = append(files, filepath.ToSlash(filepath.Clean(line)))
 		}
 	}
-	return files, nil
+	return files
 }
 
 // IsGitRepo checks if a path is a git repository

@@ -9,20 +9,24 @@ import (
 )
 
 type FileConfig struct {
-	RulesDir       string   `yaml:"rules_dir" json:"rules_dir"`
-	ProfilesDir    string   `yaml:"profiles_dir" json:"profiles_dir"`
-	PolicyDir      string   `yaml:"policy_dir" json:"policy_dir"`
-	Profile        string   `yaml:"profile" json:"profile"`
-	PolicyFile     string   `yaml:"policy_file" json:"policy_file"`
-	Verbose        bool     `yaml:"verbose" json:"verbose"`
-	Boundaries     []string `yaml:"boundaries" json:"boundaries"`
-	SkipExtensions []string `yaml:"skip_extensions" json:"skip_extensions"`
-	FailOn         string   `yaml:"fail_on" json:"fail_on"`
-	MinConfidence  float64  `yaml:"min_confidence" json:"min_confidence"`
-	MinSeverity    string   `yaml:"min_severity" json:"min_severity"`
-	Tags           []string `yaml:"tags" json:"tags"`
-	Workers        int      `yaml:"workers" json:"workers"`
-	DiffBase       string   `yaml:"diff_base" json:"diff_base"`
+	RulesDir         string   `yaml:"rules_dir" json:"rules_dir"`
+	ProfilesDir      string   `yaml:"profiles_dir" json:"profiles_dir"`
+	PolicyDir        string   `yaml:"policy_dir" json:"policy_dir"`
+	Profile          string   `yaml:"profile" json:"profile"`
+	PolicyFile       string   `yaml:"policy_file" json:"policy_file"`
+	Verbose          bool     `yaml:"verbose" json:"verbose"`
+	Boundaries       []string `yaml:"boundaries" json:"boundaries"`
+	SkipExtensions   []string `yaml:"skip_extensions" json:"skip_extensions"`
+	FailOn           string   `yaml:"fail_on" json:"fail_on"`
+	MinConfidence    float64  `yaml:"min_confidence" json:"min_confidence"`
+	MinSeverity      string   `yaml:"min_severity" json:"min_severity"`
+	Tags             []string `yaml:"tags" json:"tags"`
+	Workers          int      `yaml:"workers" json:"workers"`
+	DiffBase         string   `yaml:"diff_base" json:"diff_base"`
+	BaselineFile     string   `yaml:"baseline_file" json:"baseline_file"`
+	UpdateBaseline   bool     `yaml:"update_baseline" json:"update_baseline"`
+	SuppressFile     string   `yaml:"suppress_file" json:"suppress_file"`
+	IncludeTestFiles bool     `yaml:"include_test_files" json:"include_test_files"`
 	// Resource limits
 	MaxFiles      int   `yaml:"max_files" json:"max_files"`
 	MemoryLimitMB int   `yaml:"memory_limit_mb" json:"memory_limit_mb"`

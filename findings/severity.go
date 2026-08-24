@@ -1,5 +1,7 @@
 package findings
 
+import "strings"
+
 type Severity int
 
 const (
@@ -30,7 +32,7 @@ func (s Severity) String() string {
 }
 
 func ParseSeverity(s string) Severity {
-	switch s {
+	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "info":
 		return SeverityInfo
 	case "low":
@@ -43,6 +45,17 @@ func ParseSeverity(s string) Severity {
 		return SeverityCritical
 	default:
 		return SeverityInfo
+	}
+}
+
+// IsValidSeverity reports whether s names a known severity level
+// (case-insensitive). Use it to reject typos instead of silently falling back.
+func IsValidSeverity(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "info", "low", "medium", "high", "critical":
+		return true
+	default:
+		return false
 	}
 }
 

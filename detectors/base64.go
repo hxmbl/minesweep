@@ -21,28 +21,24 @@ type Base64Detector struct {
 	regexDetector *RegexDetector
 }
 
-// NewBase64Detector creates a new base64 detector
+// NewBase64Detector creates a new base64 detector with its own regex detector
 func NewBase64Detector(rulesDir string) (*Base64Detector, error) {
-	// Pattern to match base64 strings (with optional padding)
-	// Matches strings that look like base64: alphanumeric, +, /, = characters
-	pattern := regexp.MustCompile(`\b([A-Za-z0-9+/]{4}){3,}([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})\b`)
-
-	// Create a regex detector for scanning decoded content
 	regexDetector, err := NewRegexDetector(rulesDir)
 	if err != nil {
-		// If we can't load rules, still create the detector with just base64 detection
-		return &Base64Detector{
-			base64Pattern: pattern,
-			minLength:     16, // Minimum 16 chars (decodes to at least 12 bytes)
-			regexDetector: nil,
-		}, nil
+		return nil, err
 	}
+	return NewBase64DetectorWithRegex(regexDetector), nil
+}
 
+// NewBase64DetectorWithRegex creates a base64 detector that reuses an existing
+// RegexDetector, so rules are compiled and held only once per scan.
+func NewBase64DetectorWithRegex(regexDetector *RegexDetector) *Base64Detector {
+	pattern := regexp.MustCompile(`\b([A-Za-z0-9+/]{4}){3,}([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})\b`)
 	return &Base64Detector{
 		base64Pattern: pattern,
-		minLength:     16,
+		minLength:     16, // Minimum 16 chars (decodes to at least 12 bytes)
 		regexDetector: regexDetector,
-	}, nil
+	}
 }
 
 func (d *Base64Detector) Name() string {
@@ -77,10 +73,14 @@ func decodeBase64(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)
 }
 
+// maxBase64Candidates caps how many base64 candidate strings are decoded and
+// rescanned per file.
+const maxBase64Candidates = 1000
+
 // extractBase64Strings extracts all potential base64 strings from content
 func (d *Base64Detector) extractBase64Strings(content []byte) []string {
 	contentStr := string(content)
-	matches := d.base64Pattern.FindAllStringSubmatch(contentStr, -1)
+	matches := d.base64Pattern.FindAllStringSubmatch(contentStr, maxBase64Candidates)
 
 	var results []string
 	for _, match := range matches {
@@ -146,15 +146,15 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 
 		// If we have a regex detector, use it to scan the decoded content
 		if d.regexDetector != nil {
-			findings := d.regexDetector.Detect(decodedFile)
+			decodedFindings := d.regexDetector.Detect(decodedFile)
 			// Adjust the findings to indicate they were found in base64
-			for i := range findings {
-				findings[i].Type = "base64_" + findings[i].Type
-				findings[i].Reason = "Base64 encoded secret detected: " + findings[i].Reason
+			for i := range decodedFindings {
+				decodedFindings[i].Type = "base64_" + decodedFindings[i].Type
+				decodedFindings[i].Reason = "Base64 encoded secret detected: " + decodedFindings[i].Reason
 				// Add context about the base64 string
-				findings[i].Context += "\n[Base64 encoded content detected and decoded]"
+				decodedFindings[i].Context += "\n[Base64 encoded content detected and decoded]"
 			}
-			fResults = append(fResults, findings...)
+			fResults = append(fResults, decodedFindings...)
 		} else {
 			// Without regex detector, just report the base64 string as a finding
 			fResults = append(fResults, findings.Finding{

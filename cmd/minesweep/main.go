@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,10 +22,14 @@ var (
 	outputSARIF     bool
 	outputDashboard bool
 	showAnnotations bool
-	sarifVersion    = "0.1.0"
-	configPath      string
-	watchMode       bool
-	watchInterval   time.Duration
+	// toolVersion is stamped at build time via
+	// -ldflags "-X main.toolVersion=x.y.z".
+	// It must NOT have a package-level constant initializer, otherwise the
+	// compiler folds the value into call sites and -X silently no-ops.
+	toolVersion   string
+	configPath    string
+	watchMode     bool
+	watchInterval time.Duration
 )
 
 func main() {
@@ -37,6 +42,12 @@ evaluates them against policies, and produces a risk report.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Name() == "install-hooks" || cmd.Name() == "uninstall-hooks" {
 				return nil
+			}
+			if cfg.FailOn != "" && !findings.IsValidSeverity(cfg.FailOn) {
+				return fmt.Errorf("invalid --fail-on value %q (valid: info, low, medium, high, critical)", cfg.FailOn)
+			}
+			if cfg.MinSeverity != "" && !findings.IsValidSeverity(cfg.MinSeverity) {
+				return fmt.Errorf("invalid --min-severity value %q (valid: info, low, medium, high, critical)", cfg.MinSeverity)
 			}
 			return loadConfig(args[0])
 		},
@@ -154,9 +165,18 @@ func applyDefaults(fileCfg *config.FileConfig) {
 	}
 	if cfg.Workers == 0 && fileCfg.Workers > 0 {
 		cfg.Workers = fileCfg.Workers
+	}
+	if cfg.MaxFiles == 0 && fileCfg.MaxFiles > 0 {
 		cfg.MaxFiles = fileCfg.MaxFiles
+	}
+	if cfg.MemoryLimitMB == 0 && fileCfg.MemoryLimitMB > 0 {
 		cfg.MemoryLimitMB = fileCfg.MemoryLimitMB
+	}
+	if cfg.MaxFileSizeMB == 0 && fileCfg.MaxFileSizeMB > 0 {
 		cfg.MaxFileSizeMB = fileCfg.MaxFileSizeMB
+	}
+	if cfg.MaxConcurrentReads == 0 && fileCfg.MaxConcurrentReads > 0 {
+		cfg.MaxConcurrentReads = fileCfg.MaxConcurrentReads
 	}
 	if cfg.DiffBase == "main" && fileCfg.DiffBase != "" {
 		cfg.DiffBase = fileCfg.DiffBase
@@ -166,6 +186,18 @@ func applyDefaults(fileCfg *config.FileConfig) {
 	}
 	if len(cfg.SkipExtensions) == 0 && len(fileCfg.SkipExtensions) > 0 {
 		cfg.SkipExtensions = fileCfg.SkipExtensions
+	}
+	if cfg.BaselineFile == "" && fileCfg.BaselineFile != "" {
+		cfg.BaselineFile = fileCfg.BaselineFile
+	}
+	if !cfg.UpdateBaseline && fileCfg.UpdateBaseline {
+		cfg.UpdateBaseline = true
+	}
+	if cfg.SuppressFile == "" && fileCfg.SuppressFile != "" {
+		cfg.SuppressFile = fileCfg.SuppressFile
+	}
+	if !cfg.IncludeTestFiles && fileCfg.IncludeTestFiles {
+		cfg.IncludeTestFiles = true
 	}
 }
 
@@ -201,7 +233,14 @@ func runScan(cmd *cobra.Command, args []string) error {
 		return runWatch(scanPath)
 	}
 
-	return scanAndReport(scanPath)
+	code, err := scanAndReport(scanPath)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		os.Exit(code)
+	}
+	return nil
 }
 
 func runWatch(scanPath string) error {
@@ -212,7 +251,9 @@ func runWatch(scanPath string) error {
 	watcher := filesystem.NewWatcher([]string{scanPath}, nil, watchInterval)
 	watcher.OnChange(func(files []string) {
 		fmt.Fprintf(os.Stderr, "\nminesweep: rescanning due to changes...\n")
-		if err := scanAndReport(scanPath); err != nil {
+		// Deliberately ignore the exit code here: findings during watch mode
+		// are reported, but must not terminate the watcher.
+		if _, err := scanAndReport(scanPath); err != nil {
 			fmt.Fprintf(os.Stderr, "minesweep: scan error: %v\n", err)
 		}
 	})
@@ -226,39 +267,49 @@ func runWatch(scanPath string) error {
 	select {}
 }
 
-func scanAndReport(scanPath string) error {
+func displayVersion() string {
+	if toolVersion == "" {
+		return "dev"
+	}
+	return toolVersion
+}
+
+// scanAndReport runs a scan and renders the result. It returns the process
+// exit code (0 = clean, 1 = findings at or above --fail-on) but never exits
+// itself, so callers such as watch mode can keep running.
+func scanAndReport(scanPath string) (int, error) {
 	eng, err := engine.New(cfg)
 	if err != nil {
-		return fmt.Errorf("init engine: %w", err)
+		return 0, fmt.Errorf("init engine: %w", err)
 	}
 
 	reportData, err := eng.Run(scanPath)
 	if err != nil {
-		return fmt.Errorf("scan: %w", err)
+		return 0, fmt.Errorf("scan: %w", err)
 	}
 
 	if outputJSON {
 		if err := report.WriteJSON(os.Stdout, reportData); err != nil {
-			return err
+			return 0, err
 		}
 	} else if outputSARIF {
-		if err := report.WriteSARIF(os.Stdout, reportData, sarifVersion); err != nil {
-			return err
+		if err := report.WriteSARIF(os.Stdout, reportData, displayVersion()); err != nil {
+			return 0, err
 		}
 	} else if outputDashboard {
 		dashboard := report.GenerateDashboard(reportData)
 		if err := report.WriteDashboard(os.Stdout, dashboard, cfg.Verbose); err != nil {
-			return err
+			return 0, err
 		}
 	} else if showAnnotations {
 		minSev := findings.ParseSeverity(cfg.MinSeverity)
 		annotations := report.GenerateAnnotations(reportData.Findings, minSev)
 		if err := report.WriteGitHubAnnotations(os.Stdout, annotations); err != nil {
-			return err
+			return 0, err
 		}
 	} else {
 		if err := report.WriteText(os.Stdout, reportData, cfg.Verbose); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
@@ -266,11 +317,11 @@ func scanAndReport(scanPath string) error {
 		minSev := findings.ParseSeverity(cfg.FailOn)
 		for _, f := range reportData.Findings {
 			if f.Severity >= minSev && f.Action != findings.ActionAllow {
-				os.Exit(1)
+				return 1, nil
 			}
 		}
 	}
-	return nil
+	return 0, nil
 }
 
 const preCommitHook = `#!/bin/sh
@@ -368,7 +419,7 @@ func runUninstallHooks(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("read hook: %w", err)
 	}
-	if !contains(string(content), "MineSweep") {
+	if !strings.Contains(string(content), "MineSweep") {
 		return fmt.Errorf("pre-commit hook does not appear to be a minesweep hook")
 	}
 
@@ -378,17 +429,4 @@ func runUninstallHooks(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "Removed pre-commit hook: %s\n", hookPath)
 	return nil
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

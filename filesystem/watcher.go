@@ -14,20 +14,16 @@ type Watcher struct {
 	interval   time.Duration
 	onChange   func(files []string)
 	stopCh     chan struct{}
+	stopOnce   sync.Once
 	wg         sync.WaitGroup
 	debounce   time.Duration
 	lastNotify time.Time
 	fileStates map[string]time.Time
 	mu         sync.RWMutex
-	// Track if we're using polling or event-driven mode
-	usePolling bool
 }
 
 type WatchOption struct {
-	Include []string
 	Exclude []string
-	// UsePolling forces polling mode even if fsnotify is available
-	UsePolling bool
 }
 
 func NewWatcher(dirs []string, opts *WatchOption, interval time.Duration) *Watcher {
@@ -39,14 +35,9 @@ func NewWatcher(dirs []string, opts *WatchOption, interval time.Duration) *Watch
 	w := &Watcher{
 		interval:   interval,
 		stopCh:     make(chan struct{}),
+		stopOnce:   sync.Once{},
 		debounce:   500 * time.Millisecond,
 		fileStates: make(map[string]time.Time),
-		usePolling: true, // Default to polling for now
-	}
-
-	// If opts specifies to use polling, always use polling
-	if opts != nil && opts.UsePolling {
-		w.usePolling = true
 	}
 
 	// Validate and resolve all directories to prevent path traversal
@@ -97,7 +88,7 @@ func (w *Watcher) Start() error {
 }
 
 func (w *Watcher) Stop() {
-	close(w.stopCh)
+	w.stopOnce.Do(func() { close(w.stopCh) })
 	w.wg.Wait()
 }
 

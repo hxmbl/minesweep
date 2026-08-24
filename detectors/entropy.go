@@ -60,8 +60,9 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 	var fResults []findings.Finding
 	lines := bytes.Split(content, []byte("\n"))
 
-	for lineNum, line := range lines {
-		trimmed := strings.TrimSpace(string(line))
+	for lineNum, rawLine := range lines {
+		lineStr := string(rawLine)
+		trimmed := strings.TrimSpace(lineStr)
 		if trimmed == "" {
 			continue
 		}
@@ -84,13 +85,20 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 				continue
 			}
 
+			// Column should be relative to the original line, not the
+			// whitespace-trimmed one.
+			col := strings.Index(lineStr, word)
+			if col < 0 {
+				col = strings.Index(trimmed, word)
+			}
+
 			fResults = append(fResults, findings.Finding{
 				Type:       "High Entropy String",
 				Severity:   findings.SeverityLow,
 				Confidence: confidence,
 				File:       file.Path,
 				Line:       lineNum + 1,
-				Column:     strings.Index(trimmed, word) + 1,
+				Column:     col + 1,
 				Value:      word,
 				Reason:     "High-entropy string detected (potential secret)",
 				RuleID:     "entropy-high",

@@ -20,7 +20,8 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /app
 
 COPY --from=builder /app/minesweep /usr/local/bin/minesweep
-COPY --from=builder /app/rules /app/rules
+
+# Rules, policy, and profiles are embedded in the binary; no asset files needed.
 
 ENTRYPOINT ["minesweep"]
 CMD ["/data"]

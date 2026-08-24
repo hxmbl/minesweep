@@ -62,8 +62,11 @@ func GenerateDashboard(data *findings.RiskReport) *Dashboard {
 		d.Rules = append(d.Rules, stats)
 	}
 
-	sort.Slice(d.Rules, func(i, j int) bool {
-		return d.Rules[i].HitCount > d.Rules[j].HitCount
+	sort.SliceStable(d.Rules, func(i, j int) bool {
+		if d.Rules[i].HitCount != d.Rules[j].HitCount {
+			return d.Rules[i].HitCount > d.Rules[j].HitCount
+		}
+		return d.Rules[i].RuleID < d.Rules[j].RuleID
 	})
 
 	seenFiles := make(map[string]bool)

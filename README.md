@@ -4,11 +4,7 @@ A policy driven secrets and sensitive data scanner for code repositories. MineSw
 
 ## Installation
 
-```bash
-go install github.com/minesweep/minesweep@latest
-```
-
-Or build from source:
+Build from source:
 
 ```bash
 git clone https://github.com/minesweep/minesweep
@@ -59,6 +55,21 @@ minesweep [path] [flags]
 | `--staged` | `-s` | `false` | Only scan git staged files |
 | `--baseline` | `-b` | | Baseline file to compare against |
 | `--update-baseline` | | `false` | Update baseline with current findings |
+| `--workers` | `-w` | NumCPU | Number of concurrent workers |
+| `--config` | | | Path to config file (default: search for `.minesweep.yml`) |
+| `--suppress` | | | Suppression file to ignore specific findings |
+| `--include-tests` | | `false` | Include test files in scan (skipped by default) |
+| `--watch` | | `false` | Watch for file changes and re-scan automatically |
+| `--watch-interval` | | `2s` | How often to check for changes in watch mode |
+| `--max-files` | | `0` | Maximum number of files to scan (0 = unlimited) |
+| `--memory-limit-mb` | | `0` | Maximum memory usage in MB (0 = unlimited) |
+| `--max-file-size-mb` | | `0` | Maximum file size in MB to scan (0 = use default 50MB) |
+| `--max-concurrent-reads` | | `0` | Maximum concurrent file reads (0 = use workers) |
+
+### Subcommands
+
+- `minesweep install-hooks` - Install a git pre-commit hook that scans staged files
+- `minesweep uninstall-hooks` - Remove the pre-commit hook
 
 ## Examples
 
@@ -115,7 +126,7 @@ minesweep --diff --diff-base origin/main .
 minesweep --tag aws --tag gcp .
 
 # Show only specific severity
-minesweep --min-severity medium --max-severity critical .
+minesweep --min-severity medium .
 ```
 
 ## Output Formats
@@ -191,15 +202,21 @@ SARIF output follows the SARIF 2.1.0 format for integration with code scanning t
 
 ## Rules
 
-MineSweep uses YAML-based rules to detect secrets. Rules are located in the `rules/` directory:
+MineSweep uses YAML-based rules to detect secrets. Rules are located in the `rules/` directory.
+
+Detection rules, the default policy, and profiles are embedded in the binary — it works out of the box from any working directory. If a `rules/`, `policy/`, or `profiles/` directory exists relative to the working directory (or is passed via flags), those on-disk files take precedence over the built-in ones.
 
 - `aws.yml` - AWS credentials and keys
-- `gcp.yml` - Google Cloud credentials
 - `azure.yml` - Azure credentials
-- `github.yml` - GitHub tokens and keys
-- `generic.yml` - Generic patterns (passwords, API keys, etc.)
+- `database.yml` - Database connection strings
 - `env.yml` - Environment variable patterns
-- `private-key.yml` - Private keys and certificates
+- `gcp.yml` - Google Cloud Platform credentials
+- `generic.yml` - Generic patterns (passwords, API keys, etc.)
+- `github.yml` - GitHub tokens and keys
+- `google.yml` - Google/Firebase keys and tokens
+- `jwt.yml` - JWT tokens
+- `sendgrid.yml` - SendGrid API keys
+- `ssh.yml` - SSH private keys
 
 ### Custom Rules
 
@@ -215,6 +232,23 @@ reason: "Custom API key detected"
 tags:
   - custom
   - api-key
+```
+
+## Project Structure
+
+```
+minesweep/
+├── cmd/minesweep/     # CLI entrypoint (cobra commands, flags, hook install)
+├── config/            # .minesweep.yml config file discovery and loading
+├── detectors/         # Detection implementations (regex, entropy, base64, ...)
+├── engine/            # Orchestration: walk -> detect -> filter -> evaluate
+├── filesystem/        # File walking, ignore patterns, diff/staged helpers
+├── findings/          # Finding model, severity, risk report, baseline/suppression
+├── git/               # Git operations (diff files, staged files, branch sanitization)
+├── policy/            # Policy rules and profiles evaluation
+├── profiles/          # Bundled policy profiles (developer, enterprise, ...)
+├── report/            # Output formats (text, JSON, SARIF, dashboard, annotations)
+└── rules/             # Built-in detection rule YAML files
 ```
 
 ## Exit Codes

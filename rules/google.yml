@@ -2,9 +2,9 @@ rules:
   - id: google-api-key
     type: regex
     name: Google API Key
-    description: Google API key (AIza prefix)
+    description: Google Cloud / Google API key (AIza prefix)
     severity: high
-    tags: [google, cloud, credentials, api-key]
+    tags: [google, gcp, cloud, credentials, api-key]
     patterns:
       - regex: \b(AIza[0-9A-Za-z\-_]{35})\b
         confidence: 0.90

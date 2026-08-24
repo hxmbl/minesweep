@@ -426,13 +426,32 @@ func TestEngineDeepDirectory(t *testing.T) {
 }
 
 func TestEngineNoProfilesDir(t *testing.T) {
-	_, err := New(Config{
+	// A nonexistent profiles directory now falls back to the built-in
+	// embedded profiles instead of erroring.
+	eng, err := New(Config{
 		RulesDir:    "../rules",
 		ProfilesDir: "/nonexistent/profiles",
 		Profile:     "default",
 	})
+	if err != nil {
+		t.Fatalf("expected embedded profile fallback, got error: %v", err)
+	}
+	if len(eng.Policies()) == 0 {
+		t.Fatal("expected policies from embedded default profile")
+	}
+}
+
+func TestEngineExistingProfilesDirMissingProfile(t *testing.T) {
+	// But an existing profiles dir without the requested profile is still
+	// an error (the user pointed us at it explicitly).
+	dir := t.TempDir()
+	_, err := New(Config{
+		RulesDir:    "../rules",
+		ProfilesDir: dir,
+		Profile:     "does-not-exist",
+	})
 	if err == nil {
-		t.Fatal("expected error for nonexistent profiles dir")
+		t.Fatal("expected error for missing profile in existing profiles dir")
 	}
 }
 

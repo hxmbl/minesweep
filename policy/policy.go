@@ -2,8 +2,10 @@ package policy
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -83,6 +85,19 @@ func LoadPolicyFile(path string) ([]PolicyRule, error) {
 	return pf.Policies, nil
 }
 
+// LoadPolicyFileFS loads a policy from any fs.FS source (disk or embedded).
+func LoadPolicyFileFS(fsys fs.FS, name string) ([]PolicyRule, error) {
+	data, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return nil, fmt.Errorf("read policy %q: %w", name, err)
+	}
+	var pf PolicyFile
+	if err := yaml.Unmarshal(data, &pf); err != nil {
+		return nil, fmt.Errorf("parse policy %q: %w", name, err)
+	}
+	return pf.Policies, nil
+}
+
 func LoadProfile(path string) (Profile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -95,6 +110,30 @@ func LoadProfile(path string) (Profile, error) {
 	return p, nil
 }
 
+// LoadProfileFS loads a profile (by file name with or without extension)
+// from any fs.FS source.
+func LoadProfileFS(fsys fs.FS, name string) (Profile, error) {
+	candidates := []string{name + ".yml", name + ".yaml"}
+	if strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".yaml") {
+		candidates = []string{name}
+	}
+	for _, c := range candidates {
+		if _, err := fs.Stat(fsys, c); err == nil {
+			data, err := fs.ReadFile(fsys, c)
+			if err != nil {
+				return Profile{}, fmt.Errorf("read profile %q: %w", c, err)
+			}
+			var p Profile
+			if err := yaml.Unmarshal(data, &p); err != nil {
+				return Profile{}, fmt.Errorf("parse profile %q: %w", c, err)
+			}
+			return p, nil
+		}
+	}
+	// Neither candidate exists — produce an error mentioning the primary name.
+	return Profile{}, fmt.Errorf("read profile %q: not found", name+".yml")
+}
+
 func LoadProfileByName(profilesDir, name string) (Profile, error) {
 	path := filepath.Join(profilesDir, name+".yml")
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -104,23 +143,27 @@ func LoadProfileByName(profilesDir, name string) (Profile, error) {
 }
 
 func ResolveProfile(profilesDir, name string) ([]PolicyRule, error) {
-	return resolveProfileWithSeen(profilesDir, name, map[string]bool{})
+	return ResolveProfileFS(os.DirFS(profilesDir), name)
 }
 
-func resolveProfileWithSeen(profilesDir, name string, seen map[string]bool) ([]PolicyRule, error) {
+func ResolveProfileFS(profilesFS fs.FS, name string) ([]PolicyRule, error) {
+	return resolveProfileWithSeenFS(profilesFS, name, map[string]bool{})
+}
+
+func resolveProfileWithSeenFS(profilesFS fs.FS, name string, seen map[string]bool) ([]PolicyRule, error) {
 	if seen[name] {
 		return nil, fmt.Errorf("profile cycle detected: %q already in resolution chain", name)
 	}
 	seen[name] = true
 
-	p, err := LoadProfileByName(profilesDir, name)
+	p, err := LoadProfileFS(profilesFS, name)
 	if err != nil {
 		return nil, err
 	}
-	var rules []PolicyRule
+	rules := make([]PolicyRule, 0, len(p.Actions))
 	rules = append(rules, p.Actions...)
 	if p.Extends != "" {
-		parent, err := resolveProfileWithSeen(profilesDir, p.Extends, seen)
+		parent, err := resolveProfileWithSeenFS(profilesFS, p.Extends, seen)
 		if err != nil {
 			return nil, err
 		}

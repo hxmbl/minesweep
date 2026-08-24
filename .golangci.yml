@@ -24,10 +24,8 @@ linters-settings:
         disabled: true
 
 run:
-  deadline: 5m
+  timeout: 5m
   tests: true
-  build-tags:
-    - all
 
 issues:
   exclude-rules:

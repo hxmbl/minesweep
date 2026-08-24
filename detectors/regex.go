@@ -2,6 +2,7 @@ package detectors
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +12,8 @@ import (
 
 	"minesweep/filesystem"
 	"minesweep/findings"
+
+	"minesweep"
 )
 
 type RuleFile struct {
@@ -57,14 +60,35 @@ type RegexDetector struct {
 }
 
 func NewRegexDetector(rulesDir string) (*RegexDetector, error) {
-	rules, err := loadRules(rulesDir, "regex")
-	if err != nil {
-		return nil, err
+	var (
+		rules []Rule
+		err   error
+	)
+	if rulesDir != "" {
+		if info, statErr := os.Stat(rulesDir); statErr == nil && info.IsDir() {
+			rules, err = loadRules(rulesDir, "regex")
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			// No on-disk rules directory: fall back to the embedded defaults.
+			fsys, subErr := fs.Sub(minesweep.Assets, "rules")
+			if subErr != nil {
+				return nil, subErr
+			}
+			rules, err = loadRulesFS(fsys, "regex")
+			if err != nil {
+				return nil, fmt.Errorf("load embedded rules: %w", err)
+			}
+		}
 	}
 
 	userRulesDir := getUserRulesDir()
 	if userRulesDir != "" {
-		if userRules, err := loadRules(userRulesDir, "regex"); err == nil {
+		userRules, uErr := loadRules(userRulesDir, "regex")
+		if uErr != nil {
+			fmt.Fprintf(os.Stderr, "minesweep: warning: ignoring user rules dir %q: %v\n", userRulesDir, uErr)
+		} else {
 			rules = mergeRules(rules, userRules)
 		}
 	}
@@ -205,18 +229,28 @@ func isDangerousRegex(pattern string) bool {
 		}
 	}
 
-	// Check for excessive quantifier nesting
-	// Count the depth of nested quantifiers
+	// Check for excessive quantifier nesting.
+	// Count the depth of nested groups/character classes, ignoring escaped
+	// characters and quantifier braces (e.g. {2,3}), which otherwise inflate
+	// the depth for perfectly sane patterns like AKIA[0-9A-Z]{16}.
 	depth := 0
 	maxDepth := 0
+	escaped := false
 	for i := 0; i < len(pattern); i++ {
-		switch pattern[i] {
-		case '(', '[', '{':
+		c := pattern[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch c {
+		case '\\':
+			escaped = true
+		case '(', '[':
 			depth++
 			if depth > maxDepth {
 				maxDepth = depth
 			}
-		case ')', ']', '}':
+		case ')', ']':
 			depth--
 		}
 	}
@@ -267,9 +301,13 @@ func (p *Pattern) safeMatch(content []byte) []matchResult {
 }
 
 func loadRules(rulesDir, ruleType string) ([]Rule, error) {
-	entries, err := os.ReadDir(rulesDir)
+	return loadRulesFS(os.DirFS(rulesDir), ruleType)
+}
+
+func loadRulesFS(rulesFS fs.FS, ruleType string) ([]Rule, error) {
+	entries, err := fs.ReadDir(rulesFS, ".")
 	if err != nil {
-		return nil, fmt.Errorf("read rules dir %q: %w", rulesDir, err)
+		return nil, fmt.Errorf("read rules dir: %w", err)
 	}
 	var allRules []Rule
 	for _, entry := range entries {
@@ -279,24 +317,31 @@ func loadRules(rulesDir, ruleType string) ([]Rule, error) {
 		if filepath.Ext(entry.Name()) != ".yml" && filepath.Ext(entry.Name()) != ".yaml" {
 			continue
 		}
-		path := filepath.Join(rulesDir, entry.Name())
-		data, err := os.ReadFile(path)
+		data, err := fs.ReadFile(rulesFS, entry.Name())
 		if err != nil {
-			return nil, fmt.Errorf("read rule file %q: %w", path, err)
+			return nil, fmt.Errorf("read rule file %q: %w", entry.Name(), err)
 		}
 		var rf RuleFile
 		if err := yaml.Unmarshal(data, &rf); err != nil {
-			return nil, fmt.Errorf("parse rule file %q: %w", path, err)
+			return nil, fmt.Errorf("parse rule file %q: %w", entry.Name(), err)
 		}
 		for i := range rf.Rules {
 			if rf.Rules[i].Type != ruleType {
 				continue
 			}
+			failed := 0
 			for j := range rf.Rules[i].Patterns {
 				if err := rf.Rules[i].Patterns[j].compile(); err != nil {
-					// Log the error but don't fail - just skip this pattern
-					rf.Rules[i].Patterns[j].compiledErr = err
+					// Warn loudly: a silently skipped pattern is silently
+					// missing coverage.
+					failed++
+					fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s): skipping pattern %d: %v\n",
+						rf.Rules[i].ID, entry.Name(), j+1, err)
 				}
+			}
+			if failed > 0 && failed == len(rf.Rules[i].Patterns) {
+				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q is disabled (all patterns failed to compile)\n", rf.Rules[i].ID)
+				continue
 			}
 			allRules = append(allRules, rf.Rules[i])
 		}

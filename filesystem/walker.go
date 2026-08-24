@@ -160,7 +160,6 @@ type WalkOption struct {
 	Ignore           *IgnorePattern
 	IgnoreFilePath   string
 	MaxFileSize      int64
-	MaxFiles         int // Maximum number of files to scan (0 = unlimited)
 	OnError          func(path string, err error)
 	SkipExtensions   []string
 	SkipDirs         []string
@@ -205,7 +204,6 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 	}
 
 	var files []*File
-	fileCount := 0
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if opts.OnError != nil {
@@ -219,11 +217,6 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 				return filepath.SkipDir
 			}
 			return nil
-		}
-
-		// Check max files limit
-		if opts.MaxFiles > 0 && fileCount >= opts.MaxFiles {
-			return filepath.SkipDir
 		}
 
 		rel, _ := filepath.Rel(root, path)
@@ -268,14 +261,7 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 			}
 			return nil
 		}
-		if err != nil {
-			if opts.OnError != nil {
-				opts.OnError(path, err)
-			}
-			return nil
-		}
 		files = append(files, f)
-		fileCount++
 		return nil
 	})
 	if err != nil {

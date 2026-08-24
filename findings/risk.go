@@ -116,8 +116,13 @@ func buildSummary(score RiskScore, count int, typeCounts map[string]int, critica
 	summary += "Found " + formatCount(count, "finding") + " across " + formatCount(len(typeCounts), "type") + ".\n\n"
 
 	if len(criticalTypes) > 0 {
-		summary += "Critical items detected:\n"
+		criticalList := make([]string, 0, len(criticalTypes))
 		for t := range criticalTypes {
+			criticalList = append(criticalList, t)
+		}
+		sort.Strings(criticalList)
+		summary += "Critical items detected:\n"
+		for _, t := range criticalList {
 			summary += "  \u2022 " + t + "\n"
 		}
 		summary += "\n"

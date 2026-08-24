@@ -9,16 +9,6 @@ rules:
       - regex: '"private_key"\s*:\s*"-----BEGIN (RSA )?PRIVATE KEY-----[^"]+"'
         confidence: 0.95
 
-  - id: gcp-api-key
-    type: regex
-    name: GCP API Key
-    description: Google Cloud Platform API key
-    severity: high
-    tags: [gcp, cloud, api-key]
-    patterns:
-      - regex: '\b(AIza[0-9A-Za-z\-_]{35})\b'
-        confidence: 0.90
-
   - id: gcp-oauth-token
     type: regex
     name: GCP OAuth Token
