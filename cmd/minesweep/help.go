@@ -16,7 +16,7 @@ type flagSection struct {
 var flagSections = []flagSection{
 	{
 		title: "Essential",
-		flags: []string{"verbose", "json", "sarif", "dashboard", "profile", "fail-on", "color", "benchmark", "runs", "help", "version"},
+		flags: []string{"verbose", "json", "sarif", "dashboard", "profile", "fail-on", "color", "no-pager", "benchmark", "runs", "help", "version"},
 	},
 	{
 		title: "Git & CI",

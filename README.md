@@ -67,6 +67,7 @@ minesweep [path] [flags]
 | `--dashboard` | | `false` | Show rule health dashboard |
 | `--annotations` | | `false` | Show GitHub Actions annotations |
 | `--color` | | `auto` | When to colorize text output: `auto`, `always`, `never` |
+| `--no-pager` | | `false` | Print text reports directly instead of piping through a pager |
 | `--benchmark` | | `false` | Time full scans instead of writing a report |
 | `--runs` | | `1` | Number of timed runs for `--benchmark` |
 | `--verbose` | `-v` | `false` | Verbose output showing details |
@@ -98,6 +99,14 @@ minesweep [path] [flags]
 - `minesweep explain [rule-id]` - Show what a rule detects, its patterns, and remediation guidance
 - `minesweep install-hooks` - Install a git pre-commit hook that scans staged files
 - `minesweep uninstall-hooks` - Remove the pre-commit hook
+
+### Paging
+
+Interactive terminal runs page colored output through `less -FRX`: colors are
+preserved, short reports print directly without invoking the pager, and the
+report stays on screen after you quit. Override with `MINESWEEP_PAGER`
+(also honored: `GIT_PAGER`, `PAGER`), or disable with `--no-pager`.
+Piped/redirected output, JSON, SARIF, and watch mode are never paged.
 
 ### Output colors
 

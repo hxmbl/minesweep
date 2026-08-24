@@ -39,6 +39,7 @@ var (
 	colorMode       string
 	benchMode       bool
 	benchRuns       int
+	noPager         bool
 	// toolVersion is stamped at build time via
 	// -ldflags "-X main.toolVersion=x.y.z".
 	// It must NOT have a package-level constant initializer, otherwise the
@@ -111,6 +112,7 @@ func main() {
 	root.Flags().BoolVarP(&outputDashboard, "dashboard", "", false, "Show rule health dashboard")
 	root.Flags().BoolVarP(&showAnnotations, "annotations", "", false, "Show GitHub Actions annotations")
 	root.Flags().StringVarP(&colorMode, "color", "", "auto", "When to colorize output: auto, always, never")
+	root.Flags().BoolVarP(&noPager, "no-pager", "", false, "Print text reports directly instead of paging")
 	root.Flags().BoolVarP(&benchMode, "benchmark", "", false, "Time full scans instead of writing a report")
 	root.Flags().IntVarP(&benchRuns, "runs", "", 1, "Number of timed runs for --benchmark (min/median/mean/max reported)")
 	root.Flags().StringVarP(&cfg.PolicyDir, "policy-dir", "", "policy", "Directory containing policy YAML files")
@@ -391,7 +393,7 @@ func scanAndReport(scanPath string) (int, error) {
 			Color:   report.ParseColorMode(colorMode),
 			Hints:   nextStepHints(scanPath, reportData),
 		}
-		if err := report.WriteText(os.Stdout, reportData, opts); err != nil {
+		if err := renderTextInteractive(reportData, &opts); err != nil {
 			return 0, err
 		}
 	}
