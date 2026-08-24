@@ -74,9 +74,9 @@ func runBenchmark(scanPath string, jsonOut bool, runs int) error {
 
 		var memDelta int64
 		if after.Alloc >= before.Alloc {
-			memDelta = int64(after.Alloc - before.Alloc)
+			memDelta = int64(after.Alloc - before.Alloc) //nolint:gosec // heap alloc delta is bounded well below MaxInt64
 		} else {
-			memDelta = -int64(before.Alloc - after.Alloc)
+			memDelta = -int64(before.Alloc - after.Alloc) //nolint:gosec // same bound applies to the reversed difference
 		}
 
 		results = append(results, benchRun{
