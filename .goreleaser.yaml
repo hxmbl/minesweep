@@ -48,7 +48,7 @@ brews:
   - name: minesweep
     repository:
       owner: Hxmbl
-      name: homebrew-minesweep
+      name: homebrew-tap
     commit_author:
       name: hxmbl
       email: hxmbl@users.noreply.github.com

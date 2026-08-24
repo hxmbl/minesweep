@@ -4,10 +4,16 @@ A policy driven secrets and sensitive data scanner for code repositories. MineSw
 
 ## Installation
 
+Homebrew (macOS/Linux):
+
+```bash
+brew install hxmbl/tap/minesweep
+```
+
 Build from source:
 
 ```bash
-git clone https://github.com/minesweep/minesweep
+git clone https://github.com/hxmbl/minesweep
 cd minesweep
 go build -o minesweep ./cmd/minesweep
 ```
