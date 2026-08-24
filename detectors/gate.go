@@ -46,17 +46,6 @@ func (g literalGate) satisfied(content, lowered []byte) bool {
 	return false
 }
 
-func (g literalGate) needsFold() bool {
-	for _, branch := range g {
-		for _, conj := range branch {
-			if conj.fold {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func containsAny(hay []byte, needles [][]byte) bool {
 	for _, n := range needles {
 		if bytes.Contains(hay, n) {

@@ -124,7 +124,7 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 	lowered := file.LoweredContent()
 	if len(content) > maxMatchLength {
 		content = content[:maxMatchLength]
-		if lowered != nil && len(lowered) > maxMatchLength {
+		if len(lowered) > maxMatchLength {
 			lowered = lowered[:maxMatchLength]
 		}
 	}
