@@ -60,6 +60,9 @@ minesweep [path] [flags]
 | `--sarif` | | `false` | Output as SARIF (for CI/CD) |
 | `--dashboard` | | `false` | Show rule health dashboard |
 | `--annotations` | | `false` | Show GitHub Actions annotations |
+| `--color` | | `auto` | When to colorize text output: `auto`, `always`, `never` |
+| `--benchmark` | | `false` | Time full scans instead of writing a report |
+| `--runs` | | `1` | Number of timed runs for `--benchmark` |
 | `--verbose` | `-v` | `false` | Verbose output showing details |
 | `--fail-on` | | `low` | Minimum severity that exits non-zero |
 | `--min-confidence` | | `0` | Minimum confidence threshold (0.0-1.0) |
@@ -68,6 +71,7 @@ minesweep [path] [flags]
 | `--diff` | `-d` | `false` | Only scan files changed vs base branch |
 | `--diff-base` | | `main` | Base branch for diff comparison |
 | `--staged` | `-s` | `false` | Only scan git staged files |
+| `--history` | `-H` | `false` | Scan every unique blob across all git history |
 | `--baseline` | `-b` | | Baseline file to compare against |
 | `--update-baseline` | | `false` | Update baseline with current findings |
 | `--workers` | `-w` | NumCPU | Number of concurrent workers |
@@ -94,6 +98,24 @@ minesweep [path] [flags]
 Text output is colorized on terminals only. Control it with `--color auto|always|never`;
 `NO_COLOR` and `TERM=dumb` also disable colors in `auto` mode (the default). Piped or
 redirected output is never colorized, so CI logs stay clean.
+
+### Benchmark mode
+
+Time full scans (walk → read → detect → policy) instead of writing a report:
+
+```bash
+# Single timed scan with throughput and memory stats
+minesweep --benchmark .
+
+# Five timed runs (plus one untimed warmup): min/median/mean/max
+minesweep --benchmark --runs 5 .
+
+# Machine-readable stats for regression tracking
+minesweep --benchmark --json --runs 5 . > bench.json
+```
+
+Benchmark runs always exit `0` — they are not a pass/fail gate. Combine with any
+scan options (`--profile`, `--diff`, `--staged`, ...) to benchmark a specific setup.
 
 ## Examples
 
@@ -240,24 +262,118 @@ Detection rules, the default policy, and profiles are embedded in the binary —
 - `github.yml` - GitHub tokens and keys
 - `google.yml` - Google/Firebase keys and tokens
 - `jwt.yml` - JWT tokens
-- `sendgrid.yml` - SendGrid API keys
+- `sendgrid.yml` - SendGrid, Mailgun, and Twilio keys
 - `ssh.yml` - SSH private keys
+- `stripe.yml` - Stripe payment API keys
 
 ### Custom Rules
 
-Create a YAML file in the rules directory:
+Create a YAML file in the rules directory (or point `--rules` at your own):
 
 ```yaml
-id: my-custom-rule
-type: regex
-severity: high
-confidence: 0.9
-pattern: "MY_API_KEY=[A-Za-z0-9]{32}"
-reason: "Custom API key detected"
-tags:
-  - custom
-  - api-key
+rules:
+  - id: my-custom-rule
+    type: regex
+    name: My Custom API Key
+    description: Custom API key detected
+    severity: high
+    tags:
+      - custom
+      - api-key
+    patterns:
+      - regex: "MY_API_KEY=[A-Za-z0-9]{32}"
+        confidence: 0.9
 ```
+
+Fields: `severity` is one of `info, low, medium, high, critical`; `confidence`
+is 0.0–1.0; `capture_group` (optional) selects which regex group is reported as
+the secret value. Rules are matched per line and can be filtered with
+`file_filter: {include: [...], exclude: [...]}` glob lists. Verify custom rules
+with `minesweep explain <rule-id>` (pass `-r <dir>` when your rules live outside
+the default directory).
+
+### Policies & profiles
+
+Findings are evaluated against ordered policy rules; the first matching rule
+wins. Each rule has a tag list (`"*"` matches everything), an action
+(`allow`, `warn`, `redact`, or `block`), and an optional `min_severity`.
+Invalid actions or severities fail loudly at startup rather than being
+silently ignored. Profiles (see `profiles/`) may extend other profiles via
+`extends:`.
+
+### Git history
+
+Most real leaks live in *old* commits, not the working tree. `--history` scans
+every unique blob reachable from all refs and attributes each finding to the
+commit that introduced it:
+
+```bash
+minesweep --history .
+```
+
+```
+  [block] AWS Access Key ID
+          src/config.py@9f2c1a77b0e3:12 · 95% confident · commit 4a91f02
+          introduced 2025-11-03T14:22:01Z by alice
+          "add deployment config"
+          ↳ Rotate this key in the AWS IAM console...
+```
+
+Cost scales with content diversity, not commit count: each blob is scanned
+exactly once (a secret present in 400 commits costs one scan), then flagged
+objects are attributed via `git log --find-object`. Findings participate in
+exit codes like any other scan, so `--fail-on` gates work in CI. Combine with
+`--baseline` to silence already-handled history findings.
+
+### Gitleaks compatibility
+
+Drop any gitleaks TOML config into your rules directory (or point `--rules` at
+it) and it loads natively — no conversion step:
+
+```bash
+cp gitleaks.toml rules/           # or: minesweep -r ~/.config/gitleaks .
+minesweep --history .             # 200+ community rules, our engine
+```
+
+Supported fields: `id`, `description`, `regex`, `secretGroup` (→ capture
+group), `entropy` (→ per-pattern minimum Shannon entropy), `tags`, and both
+legacy (`[rules.allowlist]`) and modern (`[[rules.allowlists]]`) allowlists
+with path/content regexes, stopwords, and OR/AND conditions. Global
+allowlists apply to every rule in the file.
+
+Documented divergences:
+- **Severity is assigned heuristically** (gitleaks has none): private-key ids
+  → critical, known provider prefixes → high, generics → medium. Imported
+  findings carry the `imported-gitleaks` tag so you can filter them.
+- `keywords` are advisory in gitleaks and are not used for gating here; ours
+  extracts required literals from each regex automatically.
+- `[extend]` (loading remote/default configs) and commit-based allowlists are
+  unsupported and warn at load time.
+
+Switching teams can keep their triage history:
+
+```bash
+minesweep import-gitleaks-ignores .gitleaksignore -o suppress.json
+minesweep --suppress suppress.json --history .
+```
+
+### Suppressions
+
+`--suppress <file>` takes a JSON file of findings to exclude:
+
+```json
+{
+  "version": "1",
+  "suppressions": [
+    { "id": "docs-example", "rule_id": "aws-account-id", "reason": "sample data in docs" },
+    { "id": "fixture", "pattern": "^test/fixtures/" }
+  ]
+}
+```
+
+Within one entry, any field that matches suppresses the finding: `rule_id`
+matches exactly, `file` matches exactly, and `pattern` is a regular
+expression applied to both the value and the file path.
 
 ## Project Structure
 

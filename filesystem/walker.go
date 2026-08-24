@@ -203,6 +203,24 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 		skipDirSet[d] = true
 	}
 
+	// Split extension rules into exact matches and suffix matches once per
+	// walk instead of re-scanning the slice for every file. Entries with an
+	// inner dot (".min.js") must be suffix-matched against the base name.
+	skipExts := opts.SkipExtensions
+	if skipExts == nil {
+		skipExts = DefaultSkipExtensions
+	}
+	skipExtSet := make(map[string]bool, len(skipExts))
+	var skipSuffixes []string
+	for _, e := range skipExts {
+		if strings.Contains(e[1:], ".") {
+			skipSuffixes = append(skipSuffixes, e)
+		} else {
+			skipExtSet[e] = true
+		}
+	}
+	includeTests := opts.IncludeTestFiles
+
 	var files []*File
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -224,22 +242,20 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 			return nil
 		}
 
-		skipExts := opts.SkipExtensions
-		if skipExts == nil {
-			skipExts = DefaultSkipExtensions
-		}
 		ext := filepath.Ext(path)
-		base := filepath.Base(path)
-		for _, e := range skipExts {
-			if ext == e {
-				return nil
-			}
-			if strings.HasSuffix(base, e) {
-				return nil
+		if skipExtSet[ext] {
+			return nil
+		}
+		if len(skipSuffixes) > 0 {
+			base := filepath.Base(path)
+			for _, sfx := range skipSuffixes {
+				if strings.HasSuffix(base, sfx) {
+					return nil
+				}
 			}
 		}
 
-		if !opts.IncludeTestFiles && isTestFile(path) {
+		if !includeTests && isTestFile(path) {
 			return nil
 		}
 
@@ -248,19 +264,17 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 			return nil
 		}
 
-		f, err := NewFileWithRoot(path, root)
+		f, err := newFileFromDirEntry(path, d, root)
 		if err != nil {
 			if opts.OnError != nil {
 				opts.OnError(path, err)
 			}
 			return nil
 		}
-		if err := f.LoadContent(); err != nil {
-			if opts.OnError != nil {
-				opts.OnError(path, err)
-			}
-			return nil
-		}
+
+		// Content is loaded lazily by the scan workers so that file reads,
+		// binary detection, and any hashing happen concurrently instead of
+		// serializing the entire walk on disk I/O.
 		files = append(files, f)
 		return nil
 	})

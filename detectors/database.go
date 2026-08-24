@@ -12,6 +12,7 @@ import (
 type dbPattern struct {
 	name        string
 	regex       *regexp.Regexp
+	gate        literalGate
 	severity    findings.Severity
 	confidence  float64
 	tags        []string
@@ -22,6 +23,7 @@ func newDBPattern(name, pattern string, severity findings.Severity, confidence f
 	return dbPattern{
 		name:        name,
 		regex:       regexp.MustCompile(pattern),
+		gate:        extractLiteralGate(pattern),
 		severity:    severity,
 		confidence:  confidence,
 		tags:        tags,
@@ -98,23 +100,23 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 	if err != nil {
 		return nil
 	}
-	content := string(data)
-	lines := strings.Split(content, "\n")
 
+	lowered := file.LoweredContent()
+	var li *filesystem.LineIndex
 	for _, pattern := range d.patterns {
-		matches := pattern.regex.FindAllStringSubmatchIndex(content, maxMatchesPerPattern)
+		if pattern.gate != nil && !pattern.gate.satisfied(data, lowered) {
+			continue
+		}
+		matches := pattern.regex.FindAllSubmatchIndex(data, maxMatchesPerPattern)
 		for _, match := range matches {
 			start, end := match[0], match[1]
 			if start == -1 || end == -1 {
 				continue
 			}
-			value := content[start:end]
-			lineNum, col := locate(content, start)
-
-			sourceLine := ""
-			if lineNum-1 >= 0 && lineNum-1 < len(lines) {
-				sourceLine = strings.TrimSpace(lines[lineNum-1])
+			if li == nil {
+				li = file.Lines()
 			}
+			lineNum, col := li.LineCol(start)
 
 			fResults = append(fResults, findings.Finding{
 				Type:       pattern.name,
@@ -123,12 +125,12 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 				File:       file.Path,
 				Line:       lineNum,
 				Column:     col,
-				Value:      value,
+				Value:      string(data[start:end]),
 				Reason:     pattern.description,
 				RuleID:     pattern.name,
 				Tags:       pattern.tags,
-				Context:    extractContext(lines, lineNum-1, 2),
-				SourceLine: sourceLine,
+				Context:    li.Context(lineNum-1, 2),
+				SourceLine: strings.TrimSpace(li.LineText(lineNum - 1)),
 			})
 		}
 	}

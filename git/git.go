@@ -125,6 +125,7 @@ func ReadFileLines(path string) ([]string, error) {
 	if len(content) == 0 {
 		return nil, nil
 	}
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	return lines, nil
 }

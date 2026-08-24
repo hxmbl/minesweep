@@ -82,6 +82,9 @@ func LoadPolicyFile(path string) ([]PolicyRule, error) {
 	if err := yaml.Unmarshal(data, &pf); err != nil {
 		return nil, fmt.Errorf("parse policy %q: %w", path, err)
 	}
+	if err := ValidateRules(pf.Policies); err != nil {
+		return nil, fmt.Errorf("policy %q: %w", path, err)
+	}
 	return pf.Policies, nil
 }
 
@@ -95,7 +98,27 @@ func LoadPolicyFileFS(fsys fs.FS, name string) ([]PolicyRule, error) {
 	if err := yaml.Unmarshal(data, &pf); err != nil {
 		return nil, fmt.Errorf("parse policy %q: %w", name, err)
 	}
+	if err := ValidateRules(pf.Policies); err != nil {
+		return nil, fmt.Errorf("policy %q: %w", name, err)
+	}
 	return pf.Policies, nil
+}
+
+// ValidateRules rejects rules whose action or min_severity is not a known
+// value. Without this, a typo such as "action: blok" flows through the whole
+// pipeline producing unlabeled findings and confusing exit codes.
+func ValidateRules(rules []PolicyRule) error {
+	for i, r := range rules {
+		switch r.Action {
+		case findings.ActionAllow, findings.ActionWarn, findings.ActionRedact, findings.ActionBlock:
+		default:
+			return fmt.Errorf("rule %d (%s): invalid action %q (valid: allow, warn, redact, block)", i+1, strings.Join(r.Tags, ","), r.Action)
+		}
+		if r.MinSeverity != "" && !findings.IsValidSeverity(r.MinSeverity) {
+			return fmt.Errorf("rule %d (%s): invalid min_severity %q (valid: info, low, medium, high, critical)", i+1, strings.Join(r.Tags, ","), r.MinSeverity)
+		}
+	}
+	return nil
 }
 
 func LoadProfile(path string) (Profile, error) {
@@ -159,6 +182,9 @@ func resolveProfileWithSeenFS(profilesFS fs.FS, name string, seen map[string]boo
 	p, err := LoadProfileFS(profilesFS, name)
 	if err != nil {
 		return nil, err
+	}
+	if err := ValidateRules(p.Actions); err != nil {
+		return nil, fmt.Errorf("profile %q: %w", name, err)
 	}
 	rules := make([]PolicyRule, 0, len(p.Actions))
 	rules = append(rules, p.Actions...)

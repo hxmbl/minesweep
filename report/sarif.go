@@ -73,31 +73,27 @@ type SARIFRegion struct {
 }
 
 func WriteSARIF(w io.Writer, report *findings.RiskReport, toolVersion string) error {
-	rules := make(map[string]SARIFRule)
-	var ruleList []SARIFRule
+	// The SARIF schema requires arrays (or absent keys); "null" is invalid
+	// and gets rejected by consumers such as GitHub code scanning.
+	rules := make(map[string]int)
+	ruleList := []SARIFRule{}
 
 	for _, f := range report.Findings {
 		if _, exists := rules[f.RuleID]; !exists {
-			rule := SARIFRule{
+			rules[f.RuleID] = len(ruleList)
+			ruleList = append(ruleList, SARIFRule{
 				ID:          f.RuleID,
 				Name:        f.Type,
 				Description: SARIFMessage{Text: f.Reason},
 				DefaultConfiguration: SARIFConfig{
 					Level: severityToSARIFLevel(f.Severity),
 				},
-			}
-			rules[f.RuleID] = rule
-			ruleList = append(ruleList, rule)
+			})
 		}
 	}
 
-	var sarifResults []SARIFResult
+	sarifResults := []SARIFResult{}
 	for _, f := range report.Findings {
-		idx := findRuleIndex(ruleList, f.RuleID)
-		var ruleIdx *int
-		if idx >= 0 {
-			ruleIdx = &idx
-		}
 		result := SARIFResult{
 			RuleID: f.RuleID,
 			Level:  severityToSARIFLevel(f.Severity),
@@ -115,13 +111,16 @@ func WriteSARIF(w io.Writer, report *findings.RiskReport, toolVersion string) er
 					},
 				},
 			},
-			RuleIndex: ruleIdx,
+		}
+		if idx, ok := rules[f.RuleID]; ok {
+			ruleIdx := idx
+			result.RuleIndex = &ruleIdx
 		}
 		sarifResults = append(sarifResults, result)
 	}
 
 	output := SARIFOutput{
-		Schema:  "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+		Schema:  "https://json.schemastore.org/sarif-2.1.0.json",
 		Version: "2.1.0",
 		Runs: []SARIFRun{
 			{
@@ -152,13 +151,4 @@ func severityToSARIFLevel(sev findings.Severity) string {
 	default:
 		return "note"
 	}
-}
-
-func findRuleIndex(rules []SARIFRule, ruleID string) int {
-	for i, r := range rules {
-		if r.ID == ruleID {
-			return i
-		}
-	}
-	return -1
 }

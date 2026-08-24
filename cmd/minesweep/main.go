@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,6 +20,16 @@ import (
 	"minesweep/report"
 )
 
+// exitCodeError carries a process exit code through cobra's error chain
+// so that deferred functions run and cobra can clean up before the process exits.
+type exitCodeError struct {
+	code int
+}
+
+func (e *exitCodeError) Error() string {
+	return fmt.Sprintf("exit code %d", e.code)
+}
+
 var (
 	cfg             engine.Config
 	outputJSON      bool
@@ -24,6 +37,8 @@ var (
 	outputDashboard bool
 	showAnnotations bool
 	colorMode       string
+	benchMode       bool
+	benchRuns       int
 	// toolVersion is stamped at build time via
 	// -ldflags "-X main.toolVersion=x.y.z".
 	// It must NOT have a package-level constant initializer, otherwise the
@@ -63,7 +78,8 @@ func main() {
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Name() == "install-hooks" || cmd.Name() == "uninstall-hooks" ||
-				cmd.Name() == "init" || cmd.Name() == "version" || cmd.Name() == "explain" {
+				cmd.Name() == "init" || cmd.Name() == "version" || cmd.Name() == "explain" ||
+				cmd.Name() == "import-gitleaks-ignores" {
 				return nil
 			}
 			if cfg.FailOn != "" && !findings.IsValidSeverity(cfg.FailOn) {
@@ -71,6 +87,9 @@ func main() {
 			}
 			if cfg.MinSeverity != "" && !findings.IsValidSeverity(cfg.MinSeverity) {
 				return fmt.Errorf("invalid --min-severity value %q (valid: info, low, medium, high, critical)", cfg.MinSeverity)
+			}
+			if cfg.HistoryMode && (cfg.DiffMode || cfg.StagedOnly) {
+				return fmt.Errorf("--history scans all refs and cannot be combined with --diff or --staged")
 			}
 			return loadConfig(args[0])
 		},
@@ -81,7 +100,9 @@ func main() {
 		fmt.Fprint(cmd.OutOrStdout(), renderGroupedHelp(cmd))
 	})
 
-	root.Flags().StringVarP(&cfg.RulesDir, "rules", "r", "rules", "Directory containing rule YAML files")
+	// --rules is persistent so subcommands like `explain` resolve the same
+	// rule directory (disk dir, embedded fallback) as scans do.
+	root.PersistentFlags().StringVarP(&cfg.RulesDir, "rules", "r", "rules", "Directory containing rule YAML files")
 	root.Flags().StringVarP(&cfg.PolicyFile, "policy", "", "", "Policy file to evaluate against")
 	root.Flags().StringVarP(&cfg.Profile, "profile", "p", "", "Profile name (developer, enterprise, public-github)")
 	root.Flags().StringVarP(&cfg.ProfilesDir, "profiles", "", "profiles", "Directory containing profile YAML files")
@@ -90,6 +111,8 @@ func main() {
 	root.Flags().BoolVarP(&outputDashboard, "dashboard", "", false, "Show rule health dashboard")
 	root.Flags().BoolVarP(&showAnnotations, "annotations", "", false, "Show GitHub Actions annotations")
 	root.Flags().StringVarP(&colorMode, "color", "", "auto", "When to colorize output: auto, always, never")
+	root.Flags().BoolVarP(&benchMode, "benchmark", "", false, "Time full scans instead of writing a report")
+	root.Flags().IntVarP(&benchRuns, "runs", "", 1, "Number of timed runs for --benchmark (min/median/mean/max reported)")
 	root.Flags().StringVarP(&cfg.PolicyDir, "policy-dir", "", "policy", "Directory containing policy YAML files")
 	root.Flags().BoolVarP(&cfg.Verbose, "verbose", "v", false, "Verbose output")
 	root.Flags().StringVarP(&cfg.FailOn, "fail-on", "", "low", "Minimum severity that exits non-zero (info, low, medium, high, critical)")
@@ -97,6 +120,7 @@ func main() {
 	root.Flags().StringVarP(&cfg.MinSeverity, "min-severity", "", "", "Minimum severity to report (info, low, medium, high, critical)")
 	root.Flags().StringArrayVarP(&cfg.Tags, "tag", "t", nil, "Filter by tag (can be specified multiple times)")
 	root.Flags().BoolVarP(&cfg.DiffMode, "diff", "d", false, "Only scan files changed vs base branch")
+	root.Flags().BoolVarP(&cfg.HistoryMode, "history", "H", false, "Scan every unique blob across all git history")
 	root.Flags().StringVarP(&cfg.DiffBase, "diff-base", "", "main", "Base branch for diff comparison")
 	root.Flags().BoolVarP(&cfg.StagedOnly, "staged", "s", false, "Only scan git staged files")
 	root.Flags().StringVarP(&cfg.BaselineFile, "baseline", "b", "", "Baseline file to compare against (only report new findings)")
@@ -128,8 +152,13 @@ func main() {
 	root.AddCommand(newInitCommand())
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newExplainCommand())
+	root.AddCommand(newImportIgnoresCommand())
 
 	if err := root.Execute(); err != nil {
+		var exitErr *exitCodeError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.code)
+		}
 		fmt.Fprintf(os.Stderr, "%s %v\n", "error:", err)
 		fmt.Fprintf(os.Stderr, "\nRun 'minesweep --help' to see all commands and options.\n")
 		os.Exit(1)
@@ -264,7 +293,17 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if watchMode {
+		if benchMode {
+			return fmt.Errorf("--watch cannot be combined with --benchmark")
+		}
+		if cfg.HistoryMode {
+			return fmt.Errorf("--watch cannot be combined with --history")
+		}
 		return runWatch(scanPath)
+	}
+
+	if benchMode {
+		return runBenchmark(scanPath, outputJSON, benchRuns)
 	}
 
 	code, err := scanAndReport(scanPath)
@@ -272,7 +311,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if code != 0 {
-		os.Exit(code)
+		return &exitCodeError{code: code}
 	}
 	return nil
 }
@@ -297,8 +336,13 @@ func runWatch(scanPath string) error {
 	}
 	defer watcher.Stop()
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
 	fmt.Fprintf(os.Stderr, "minesweep: watching for changes (press Ctrl+C to stop)\n")
-	select {}
+	<-sigCh
+	fmt.Fprintf(os.Stderr, "\nminesweep: stopping watcher\n")
+	return nil
 }
 
 func displayVersion() string {
@@ -395,7 +439,7 @@ func hasPreCommitHook(repoTop string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(data), "MineSweep")
+	return strings.Contains(strings.ToLower(string(data)), "minesweep")
 }
 
 const preCommitHook = `#!/bin/sh
@@ -493,7 +537,7 @@ func runUninstallHooks(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("read hook: %w", err)
 	}
-	if !strings.Contains(string(content), "MineSweep") {
+	if !strings.Contains(strings.ToLower(string(content)), "minesweep") {
 		return fmt.Errorf("pre-commit hook does not appear to be a minesweep hook")
 	}
 

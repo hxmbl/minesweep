@@ -69,6 +69,13 @@ func hasMagic(data []byte, magic []byte) bool {
 	return true
 }
 
+// binarySampleSize limits NUL-byte and control-character detection to a
+// prefix window, following the same convention as git and ripgrep. Real
+// binaries almost always reveal themselves within the first few KB, and
+// scanning multi-megabyte files byte-by-byte was a measurable share of load
+// time.
+const binarySampleSize = 8192
+
 func IsBinary(data []byte) bool {
 	if len(data) == 0 {
 		return false
@@ -80,19 +87,24 @@ func IsBinary(data []byte) bool {
 		}
 	}
 
-	for _, b := range data {
+	sample := data
+	if len(sample) > binarySampleSize {
+		sample = sample[:binarySampleSize]
+	}
+
+	for _, b := range sample {
 		if b == 0 {
 			return true
 		}
 	}
 
 	controlCount := 0
-	for _, b := range data {
+	for _, b := range sample {
 		if b < 0x20 && b != 0x09 && b != 0x0a && b != 0x0d {
 			controlCount++
 		}
 	}
-	return float64(controlCount)/float64(len(data)) > 0.10
+	return float64(controlCount)/float64(len(sample)) > 0.10
 }
 
 func IsUTF8(data []byte) bool {

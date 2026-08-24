@@ -28,7 +28,6 @@ var ruleRemediations = map[string]string{
 	"jwt-encoded":                "Treat this JWT as compromised until it expires. Shorten its remaining lifetime where possible and investigate how it leaked.",
 	"jwt-bearer":                 "Treat this bearer token as compromised until it expires. Rotate the credentials behind it if the token is long-lived.",
 	"jwt-standalone":             "Verify whether this is a real token or sample data. Real tokens grant access until expiry - shorten lifetime and re-issue.",
-	"jose-token":                 "Treat this JOSE token as compromised until expiry; rotate the signing credentials if it is long-lived.",
 	"database-url":               "Rotate the password embedded in this database URL and move the full URL to an environment variable or secrets manager.",
 	"postgres-connection-string": "Change this PostgreSQL user's password and move the connection string to environment configuration.",
 	"mysql-connection-string":    "Change this MySQL user's password and move the connection string to environment configuration.",
@@ -85,8 +84,8 @@ func RemediationText(ruleID string, tags []string) string {
 	if txt, ok := ruleRemediations[ruleID]; ok {
 		return txt
 	}
-	for _, tr := range tagRemediations {
-		for _, t := range tags {
+	for _, t := range tags {
+		for _, tr := range tagRemediations {
 			if t == tr.tag {
 				return tr.text
 			}

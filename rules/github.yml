@@ -42,13 +42,9 @@ rules:
   - id: github-oauth-token
     type: regex
     name: GitHub OAuth Token
-    description: GitHub OAuth access token
+    description: GitHub OAuth access token (gho_ prefixed)
     severity: high
     tags: [github, credentials, vcs]
     patterns:
-      - regex: \b([0-9a-fA-F]{40})\b
-        confidence: 0.40
-    file_filter:
-      exclude:
-        - "*.md"
-        - "*.txt"
+      - regex: \b(gho_[0-9A-Za-z]{36,251})\b
+        confidence: 0.90

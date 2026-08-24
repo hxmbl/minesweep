@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"math"
 	"regexp"
-	"strings"
 
 	"minesweep/filesystem"
 	"minesweep/findings"
@@ -47,6 +46,8 @@ func (d *EntropyDetector) Name() string {
 	return "entropy"
 }
 
+var extractStringsRe = regexp.MustCompile(`[A-Za-z0-9\-_+=/]{20,}`)
+
 func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 	if file.IsBinary {
 		return nil
@@ -58,24 +59,36 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	var fResults []findings.Finding
-	lines := bytes.Split(content, []byte("\n"))
+	lineNum := 0
+	for rest := content; len(rest) > 0; {
+		var raw []byte
+		if idx := bytes.IndexByte(rest, '\n'); idx >= 0 {
+			raw, rest = rest[:idx], rest[idx+1:]
+		} else {
+			raw, rest = rest, nil
+		}
+		lineNum++
 
-	for lineNum, rawLine := range lines {
-		lineStr := string(rawLine)
-		trimmed := strings.TrimSpace(lineStr)
-		if trimmed == "" {
+		// A line shorter than the minimum token length cannot contain a
+		// candidate word; skip before touching any regex.
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) < entropyMinWordLength {
 			continue
 		}
 
-		hasKeyword := secretKeywords.MatchString(trimmed)
+		candidates := extractStringsRe.FindAllIndex(trimmed, -1)
+		if len(candidates) == 0 {
+			continue
+		}
 
-		words := extractStrings(trimmed)
-		for _, word := range words {
-			if len(word) < entropyMinWordLength {
-				continue
-			}
+		// The keyword regex is the expensive part; only pay for it once a
+		// candidate word exists on the line.
+		hasKeyword := secretKeywords.Match(trimmed)
 
-			entropy := shannonEntropy(word)
+		for _, loc := range candidates {
+			word := trimmed[loc[0]:loc[1]]
+
+			entropy := shannonEntropyBytes(word)
 			if entropy < entropyMedium {
 				continue
 			}
@@ -85,54 +98,54 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 				continue
 			}
 
-			// Column should be relative to the original line, not the
-			// whitespace-trimmed one.
-			col := strings.Index(lineStr, word)
-			if col < 0 {
-				col = strings.Index(trimmed, word)
-			}
+			// Column should be relative to the original line. Only
+			// leading whitespace separates raw from trimmed, so the
+			// regex offset shifts by exactly that amount.
+			leading := len(raw) - len(bytes.TrimLeft(raw, " \t\r\n\v\f"))
+			col := leading + loc[0]
 
 			fResults = append(fResults, findings.Finding{
 				Type:       "High Entropy String",
 				Severity:   findings.SeverityLow,
 				Confidence: confidence,
 				File:       file.Path,
-				Line:       lineNum + 1,
+				Line:       lineNum,
 				Column:     col + 1,
-				Value:      word,
+				Value:      string(word),
 				Reason:     "High-entropy string detected (potential secret)",
 				RuleID:     "entropy-high",
 				Tags:       []string{"entropy", "potential-secret"},
-				SourceLine: trimmed,
+				SourceLine: string(bytes.TrimRight(raw, "\r")),
 			})
 		}
 	}
 	return fResults
 }
 
-var extractStringsRe = regexp.MustCompile(`[A-Za-z0-9\-_+=/]{20,}`)
-
-func extractStrings(line string) []string {
-	return extractStringsRe.FindAllString(line, -1)
+func shannonEntropy(s string) float64 {
+	return shannonEntropyBytes([]byte(s))
 }
 
-func shannonEntropy(s string) float64 {
-	if len(s) == 0 {
+// shannonEntropyBytes computes Shannon entropy using a fixed 256-slot
+// frequency table instead of a map: no allocations and no per-byte hashing.
+func shannonEntropyBytes(data []byte) float64 {
+	if len(data) == 0 {
 		return 0
 	}
 
-	freq := make(map[rune]int)
-	for _, c := range s {
-		freq[c]++
+	var freq [256]int
+	for _, b := range data {
+		freq[b]++
 	}
 
-	length := float64(len(s))
+	length := float64(len(data))
 	entropy := 0.0
 	for _, count := range freq {
-		p := float64(count) / length
-		if p > 0 {
-			entropy -= p * math.Log2(p)
+		if count == 0 {
+			continue
 		}
+		p := float64(count) / length
+		entropy -= p * math.Log2(p)
 	}
 	return entropy
 }

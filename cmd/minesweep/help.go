@@ -16,11 +16,11 @@ type flagSection struct {
 var flagSections = []flagSection{
 	{
 		title: "Essential",
-		flags: []string{"verbose", "json", "sarif", "dashboard", "profile", "fail-on", "color", "help", "version"},
+		flags: []string{"verbose", "json", "sarif", "dashboard", "profile", "fail-on", "color", "benchmark", "runs", "help", "version"},
 	},
 	{
 		title: "Git & CI",
-		flags: []string{"diff", "diff-base", "staged", "annotations", "baseline", "update-baseline", "suppress"},
+		flags: []string{"diff", "diff-base", "staged", "history", "annotations", "baseline", "update-baseline", "suppress"},
 	},
 	{
 		title: "Filtering",

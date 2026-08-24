@@ -5,11 +5,13 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"minesweep/detectors"
+	"minesweep/findings"
 	"minesweep/report"
 )
 
@@ -94,6 +96,147 @@ func runInit(force bool) error {
 	fmt.Println("  1. Edit the file and keep only the options you want.")
 	fmt.Println("  2. Run 'minesweep .' to scan with your new settings.")
 	fmt.Println("  3. Run 'minesweep install-hooks' to guard future commits.")
+	return nil
+}
+
+const importIgnoreLongDesc = `Convert a .gitleaksignore file into a MineSweep suppressions file.
+
+Both known layouts are handled:
+  <commit>:<path>:<line>            (classic)
+  <commit>:<path>:<rule-id>:<line>  (fingerprint style)
+
+Each entry becomes a line-scoped suppression, so teams switching from
+gitleaks keep their triage history verbatim. Unknown lines are reported
+and skipped.`
+
+func newImportIgnoresCommand() *cobra.Command {
+	var out string
+
+	cmd := &cobra.Command{
+		Use:   "import-gitleaks-ignores <file>",
+		Short: "Convert .gitleaksignore entries to a suppressions file",
+		Long:  importIgnoreLongDesc,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runImportIgnores(args[0], out)
+		},
+	}
+	cmd.Flags().StringVarP(&out, "output", "o", ".minesweep-suppress.json", "Output suppressions file")
+	return cmd
+}
+
+// parseGitleaksIgnoreLine handles "<sha>:<path>:<line>" and
+// "<sha>:<path>:<rule>:<line>". Returns nil for lines it cannot represent.
+// Paths containing ':' (e.g. Windows C:\...) are handled by splitting from
+// the right: the first field is always the SHA and the last field is always
+// the line number.
+func parseGitleaksIgnoreLine(line string) *findings.Suppression {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return nil
+	}
+
+	// Split from the right: last field is line number, first field is SHA.
+	// This correctly handles paths with ':' (Windows drive letters).
+	lastColon := strings.LastIndex(line, ":")
+	if lastColon < 0 {
+		return nil
+	}
+	lineStr := strings.TrimSpace(line[lastColon+1:])
+	rest := line[:lastColon]
+
+	n, err := strconv.Atoi(lineStr)
+	if err != nil || n <= 0 {
+		return nil
+	}
+
+	// Now rest is "<sha>:<path>" or "<sha>:<path>:<rule>"
+	firstColon := strings.Index(rest, ":")
+	if firstColon < 0 {
+		return nil
+	}
+	sha := rest[:firstColon]
+	pathAndRule := rest[firstColon+1:]
+	if sha == "" {
+		return nil
+	}
+
+	var path, ruleID string
+	// Check if there's a rule ID (3rd colon-separated field in the middle)
+	// Format: <sha>:<path>:<rule>:<line>  — rule is optional
+	// We know path can contain colons on Windows, so try the simple case first:
+	// if there's exactly one colon in pathAndRule, it's just the path.
+	// If there are more colons, we can't reliably distinguish path from rule
+	// without additional context, so treat the whole thing as path.
+	parts := strings.SplitN(pathAndRule, ":", 2)
+	if len(parts) == 1 {
+		path = parts[0]
+	} else {
+		// Could be <path> or <path>:<rule>. Heuristic: if parts[1] looks
+		// like a rule ID (alphanumeric + hyphens, no path separators), treat
+		// it as a rule. Otherwise it's part of the path.
+		candidate := parts[1]
+		if candidate != "" && !strings.ContainsAny(candidate, "/\\") &&
+			strings.ContainsAny(candidate, "-") {
+			path = parts[0]
+			ruleID = candidate
+		} else {
+			path = pathAndRule
+		}
+	}
+
+	if path == "" {
+		return nil
+	}
+
+	id := fmt.Sprintf("gitleaks-%s", shortLabel(sha))
+	s := &findings.Suppression{
+		ID:     id,
+		File:   path,
+		Line:   n,
+		Reason: fmt.Sprintf("imported from .gitleaksignore (%s)", sha),
+	}
+	if ruleID != "" {
+		s.RuleID = ruleID
+		s.Reason = fmt.Sprintf("imported from .gitleaksignore (commit %s)", sha)
+	}
+	return s
+}
+
+func shortLabel(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
+}
+
+func runImportIgnores(in, out string) error {
+	data, err := os.ReadFile(in)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", in, err)
+	}
+
+	list := &findings.SuppressionList{Version: "1"}
+	lines := strings.Split(string(data), "\n")
+	for i, raw := range lines {
+		s := parseGitleaksIgnoreLine(raw)
+		if s == nil {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+				fmt.Fprintf(os.Stderr, "minesweep: warning: %s:%d: unrecognized entry %q; skipped\n", in, i+1, trimmed)
+			}
+			continue
+		}
+		list.Suppression = append(list.Suppression, *s)
+	}
+
+	if err := findings.SaveSuppressions(out, list); err != nil {
+		return fmt.Errorf("write %s: %w", out, err)
+	}
+
+	fmt.Printf("Converted %d entries -> %s\n\n", len(list.Suppression), out)
+	fmt.Println("Use it with:")
+	fmt.Printf("  minesweep --suppress %s .\n", out)
 	return nil
 }
 
@@ -244,6 +387,9 @@ func printRuleDetail(r detectors.Rule) {
 
 func wrapTextPlain(s, indent string) string {
 	words := strings.Fields(s)
+	if len(words) == 0 {
+		return ""
+	}
 	const width = 90
 	var b strings.Builder
 	line := words[0]

@@ -14,4 +14,9 @@ type Finding struct {
 	Action     Action   `yaml:"action" json:"action"`
 	Context    string   `yaml:"context,omitempty" json:"context,omitempty"`
 	SourceLine string   `yaml:"source_line,omitempty" json:"source_line,omitempty"`
+	// History attribution (populated only in --history mode).
+	Commit        string `yaml:"commit,omitempty" json:"commit,omitempty"`
+	Author        string `yaml:"author,omitempty" json:"author,omitempty"`
+	Date          string `yaml:"date,omitempty" json:"date,omitempty"`
+	CommitSummary string `yaml:"commit_summary,omitempty" json:"commit_summary,omitempty"`
 }

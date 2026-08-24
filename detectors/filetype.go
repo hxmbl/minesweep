@@ -18,6 +18,11 @@ func (d *FileTypeDetector) Name() string {
 func (d *FileTypeDetector) Detect(file *filesystem.File) []findings.Finding {
 	var fResults []findings.Finding
 
+	// IsBinary is computed during content load; touch the content so this
+	// detector is correct no matter which order detectors run in. The call
+	// is cheap once any other detector has loaded the file.
+	_, _ = file.GetContent()
+
 	if file.IsBinary {
 		fResults = append(fResults, findings.Finding{
 			Type:       "Binary File",

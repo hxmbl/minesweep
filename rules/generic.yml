@@ -77,18 +77,6 @@ rules:
       - regex: https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+
         confidence: 0.85
 
-  - id: generic-stripe-key
-    type: regex
-    name: Stripe API Key
-    description: Stripe secret or publishable key
-    severity: high
-    tags: [credentials, api-key, stripe]
-    patterns:
-      - regex: \b(sk_live_[0-9A-Za-z]{24,}|pk_live_[0-9A-Za-z]{24,})\b
-        confidence: 0.90
-      - regex: \b(sk_test_[0-9A-Za-z]{24,}|pk_test_[0-9A-Za-z]{24,})\b
-        confidence: 0.85
-
   - id: generic-twilio-key
     type: regex
     name: Twilio API Key

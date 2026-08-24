@@ -48,7 +48,14 @@ func WriteGitHubAnnotations(w io.Writer, annotations []GitHubAnnotation) error {
 		// Sanitize to prevent log injection
 		safePath := unsafeChars.ReplaceAllString(a.Path, "_")
 		safeMsg := unsafeChars.ReplaceAllString(a.Message, " ")
-		fmt.Fprintf(w, "::%s file=%s,line=%d::%s\n", a.Level, safePath, a.Line, safeMsg)
+		// Sanitize level to only valid GitHub Actions annotation levels
+		level := "warning"
+		if a.Level == "error" {
+			level = "error"
+		}
+		// Also strip :: from path to prevent breaking the annotation format
+		safePath = strings.ReplaceAll(safePath, "::", "_")
+		fmt.Fprintf(w, "::%s file=%s,line=%d::%s\n", level, safePath, a.Line, safeMsg)
 	}
 	return nil
 }

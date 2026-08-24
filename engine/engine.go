@@ -35,6 +35,7 @@ type Config struct {
 	DiffMode                 bool
 	DiffBase                 string
 	StagedOnly               bool
+	HistoryMode              bool
 	BaselineFile             string
 	UpdateBaseline           bool
 	MinSeverity              string
@@ -57,8 +58,9 @@ type Engine struct {
 	policies  []policy.PolicyRule
 	// Semaphore for limiting concurrent file reads
 	readSemaphore chan struct{}
-	// Number of files examined during the most recent Run
-	filesScanned int
+	// Number of files and bytes examined during the most recent Run
+	filesScanned atomic.Int64
+	bytesScanned atomic.Int64
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -239,10 +241,13 @@ func (e *Engine) updateBaseline(baseline *findings.Baseline, newFindings []findi
 }
 
 func (e *Engine) Run(path string) (*findings.RiskReport, error) {
+	e.filesScanned.Store(0)
+	e.bytesScanned.Store(0)
 	start := time.Now()
 	rep, err := e.run(path)
 	if rep != nil {
-		rep.FilesScanned = e.filesScanned
+		rep.FilesScanned = int(e.filesScanned.Load())
+		rep.BytesScanned = e.bytesScanned.Load()
 		rep.DurationMs = time.Since(start).Milliseconds()
 	}
 	return rep, err
@@ -260,6 +265,10 @@ func (e *Engine) run(path string) (*findings.RiskReport, error) {
 
 	if e.config.DiffMode || e.config.StagedOnly {
 		return e.runDiff(path)
+	}
+
+	if e.config.HistoryMode {
+		return e.runHistory(path)
 	}
 
 	report, err := e.runDirectory(path)
@@ -304,7 +313,12 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 		files = append(files, file)
 	}
 
-	e.filesScanned = len(files)
+	e.filesScanned.Store(int64(len(files)))
+	var bytesTotal int64
+	for _, file := range files {
+		bytesTotal += file.Size
+	}
+	e.bytesScanned.Store(bytesTotal)
 	allFindings := e.detectParallel(files)
 	return e.finalize(allFindings)
 }
@@ -318,9 +332,116 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 		return nil, err
 	}
 
-	e.filesScanned = 1
+	e.filesScanned.Store(1)
+	e.bytesScanned.Store(file.Size)
 	allFindings := e.detect(file)
 	return e.finalize(allFindings)
+}
+
+// runHistory scans every unique blob reachable from all refs. Cost scales
+// with content diversity, not commit count: each object is fetched and
+// scanned exactly once, then findings are attributed to the commit that
+// introduced them.
+func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
+	maxFileSize := filesystem.DefaultMaxFileSize
+	if e.config.MaxFileSizeMB > 0 {
+		maxFileSize = e.config.MaxFileSizeMB * 1024 * 1024
+	}
+
+	objects, err := git.ListHistoryObjects(root)
+	if err != nil {
+		return nil, fmt.Errorf("list history objects: %w", err)
+	}
+	if e.config.MaxFiles > 0 && len(objects) > e.config.MaxFiles {
+		objects = objects[:e.config.MaxFiles]
+		fmt.Fprintf(os.Stderr, "warning: reached max files limit (%d), scanning first %d objects\n", e.config.MaxFiles, e.config.MaxFiles)
+	}
+
+	fetcher, err := git.NewBlobFetcher(root)
+	if err != nil {
+		return nil, fmt.Errorf("start blob fetcher: %w", err)
+	}
+	defer fetcher.Close()
+
+	files := make([]*filesystem.File, 0, len(objects))
+	displaySHA := make(map[string]string, len(objects))
+	var bytesTotal int64
+	var skippedOversize int
+	for _, obj := range objects {
+		obj := obj
+		if obj.Path == "" {
+			continue
+		}
+		if obj.Size > maxFileSize {
+			skippedOversize++
+			continue
+		}
+		bytesTotal += obj.Size
+
+		display := fmt.Sprintf("%s@%s", obj.Path, shortSHA(obj.SHA))
+		displaySHA[display] = obj.SHA
+		files = append(files, filesystem.NewBlobFile(display, obj.Size, func() ([]byte, error) {
+			return fetcher.Fetch(obj.SHA)
+		}))
+	}
+	if skippedOversize > 0 && e.config.Verbose {
+		fmt.Fprintf(os.Stderr, "minesweep: skipped %d history objects larger than %d MB\n", skippedOversize, maxFileSize/1024/1024)
+	}
+
+	e.filesScanned.Store(int64(len(files)))
+	e.bytesScanned.Store(bytesTotal)
+	allFindings := e.detectParallel(files)
+
+	attributed := e.attributeHistory(root, allFindings, displaySHA)
+	return e.finalize(attributed)
+}
+
+// attributeHistory resolves the introducing commit for each flagged blob.
+// Queries run once per unique SHA — typically a handful — never per finding.
+func (e *Engine) attributeHistory(root string, fs []findings.Finding, displaySHA map[string]string) []findings.Finding {
+	shas := make(map[string]bool)
+	for _, f := range fs {
+		if sha, ok := displaySHA[f.File]; ok && !shas[sha] {
+			shas[sha] = true
+		}
+	}
+
+	infos := make(map[string]*git.CommitInfo, len(shas))
+	for sha := range shas {
+		info, err := git.FindOriginCommit(root, sha)
+		if err != nil {
+			if e.config.Verbose {
+				fmt.Fprintf(os.Stderr, "minesweep: attribution failed for %s: %v\n", shortSHA(sha), err)
+			}
+			continue
+		}
+		infos[sha] = info
+	}
+
+	out := make([]findings.Finding, len(fs))
+	copy(out, fs)
+	for i := range out {
+		sha, ok := displaySHA[out[i].File]
+		if !ok {
+			continue
+		}
+		info := infos[sha]
+		if info == nil {
+			continue
+		}
+		out[i].Commit = info.SHA
+		out[i].Author = info.Author
+		out[i].Date = info.Date
+		out[i].CommitSummary = info.Summary
+	}
+	return out
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
@@ -345,7 +466,12 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 		fmt.Fprintf(os.Stderr, "warning: reached max files limit (%d), scanning first %d files\n", e.config.MaxFiles, e.config.MaxFiles)
 	}
 
-	e.filesScanned = len(files)
+	e.filesScanned.Store(int64(len(files)))
+	var bytesTotal int64
+	for _, file := range files {
+		bytesTotal += file.Size
+	}
+	e.bytesScanned.Store(bytesTotal)
 	allFindings := e.detectParallel(files)
 	return e.finalize(allFindings)
 }
@@ -367,17 +493,19 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 		all = append(all, fResults...)
 	}
 
+	var minSev findings.Severity
+	if e.config.MinSeverity != "" {
+		minSev = findings.ParseSeverity(e.config.MinSeverity)
+	}
+
 	var filtered []findings.Finding
 	for _, f := range all {
 		if e.config.MinConfidence > 0 && f.Confidence < e.config.MinConfidence {
 			continue
 		}
 
-		if e.config.MinSeverity != "" {
-			minSev := findings.ParseSeverity(e.config.MinSeverity)
-			if f.Severity < minSev {
-				continue
-			}
+		if minSev > 0 && f.Severity < minSev {
+			continue
 		}
 
 		if len(e.config.Tags) > 0 && !hasAnyTag(f.Tags, e.config.Tags) {
@@ -387,7 +515,7 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 		filtered = append(filtered, f)
 	}
 
-	if !e.config.DisableInlineSuppression {
+	if len(filtered) > 0 && !e.config.DisableInlineSuppression {
 		content, err := file.GetContent()
 		if err == nil {
 			filtered = findings.FilterInlineSuppressions(filtered, string(content))
@@ -421,7 +549,8 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 
 	totalFiles := int64(len(files))
 
-	// Track memory usage if limit is set
+	// Track memory usage if limit is set. Each worker keeps its own
+	// MemStats scratch: sharing one struct between goroutines would race.
 	var memStats runtime.MemStats
 	if e.config.MemoryLimitMB > 0 {
 		runtime.ReadMemStats(&memStats)
@@ -436,6 +565,8 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 
 	const memCheckInterval = 64
 
+	var memCancelWarned atomic.Bool
+
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -446,13 +577,17 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 				}
 			}()
 			defer wg.Done()
+			var localMem runtime.MemStats
 			processed := 0
 			for file := range fileCh {
 				// Check memory limit periodically
 				if e.config.MemoryLimitMB > 0 && processed%memCheckInterval == 0 {
-					runtime.ReadMemStats(&memStats)
+					runtime.ReadMemStats(&localMem)
 					limit := uint64(e.config.MemoryLimitMB) * 1024 * 1024 //nolint:gosec // guarded by > 0 check above
-					if memStats.Alloc-initialAlloc > limit {
+					if localMem.Alloc > initialAlloc+limit {
+						if memCancelWarned.CompareAndSwap(false, true) {
+							fmt.Fprintf(os.Stderr, "warning: memory limit (%d MB) reached; stopping scan early, results are incomplete\n", e.config.MemoryLimitMB)
+						}
 						cancel()
 					}
 				}
@@ -462,10 +597,17 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 					continue // drain the channel without processing
 				}
 
-				fResults := e.detect(file)
-				findingsFound.Add(int64(len(fResults)))
-				filesScanned.Add(1)
-				resultCh <- result{findings: fResults}
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Fprintf(os.Stderr, "panic in detector for %s: %v\n", file.Path, r)
+						}
+					}()
+					fResults := e.detect(file)
+					findingsFound.Add(int64(len(fResults)))
+					filesScanned.Add(1)
+					resultCh <- result{findings: fResults}
+				}()
 
 				if e.config.Verbose && filesScanned.Load()%100 == 0 {
 					fmt.Fprintf(os.Stderr, "\rScanning: %d/%d files (%d findings)", filesScanned.Load(), totalFiles, findingsFound.Load())

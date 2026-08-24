@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 )
 
 type Baseline struct {
@@ -112,14 +113,11 @@ func GetBaselineStats(baseline *Baseline) (total int, files []string) {
 }
 
 func splitLocation(s string) []string {
-	var result []string
-	start := 0
-	for i, c := range s {
-		if c == ':' {
-			result = append(result, s[start:i])
-			start = i + 1
-		}
+	// Split on the last colon to handle Windows paths (e.g. C:\path\file:123).
+	// The stored format is always "file:line" where line is numeric.
+	idx := strings.LastIndex(s, ":")
+	if idx < 0 {
+		return []string{s}
 	}
-	result = append(result, s[start:])
-	return result
+	return []string{s[:idx], s[idx+1:]}
 }

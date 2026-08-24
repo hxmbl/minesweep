@@ -19,16 +19,6 @@ rules:
       - regex: \b(eyJ[A-Za-z0-9\-_]{10,}\.eyJ[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_]{10,})\b
         confidence: 0.85
 
-  - id: jose-token
-    type: regex
-    name: JOSE Token
-    description: JSON Object Signing and Encryption token
-    severity: medium
-    tags: [jwt, credentials]
-    patterns:
-      - regex: \b(eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)\b
-        confidence: 0.70
-
   - id: jwt-encoded
     type: regex
     name: URL-Encoded JWT Token

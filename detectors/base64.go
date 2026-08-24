@@ -2,7 +2,6 @@ package detectors
 
 import (
 	"encoding/base64"
-	"math"
 	"regexp"
 	"strings"
 
@@ -52,7 +51,8 @@ func isBase64(s string) bool {
 		return false
 	}
 	// Check if it only contains base64 characters
-	for _, c := range s {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
 		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
 			(c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') {
 			return false
@@ -77,15 +77,20 @@ func decodeBase64(s string) ([]byte, error) {
 // rescanned per file.
 const maxBase64Candidates = 1000
 
-// extractBase64Strings extracts all potential base64 strings from content
+// extractBase64Strings extracts all potential base64 strings from content.
+// Matching runs on the raw bytes so the whole file never has to be copied
+// into a string first.
 func (d *Base64Detector) extractBase64Strings(content []byte) []string {
-	contentStr := string(content)
-	matches := d.base64Pattern.FindAllStringSubmatch(contentStr, maxBase64Candidates)
+	matches := d.base64Pattern.FindAllSubmatchIndex(content, maxBase64Candidates)
 
 	var results []string
 	for _, match := range matches {
-		if len(match) > 1 {
-			candidate := match[0]
+		if len(match) > 3 {
+			start, end := match[0], match[1]
+			if start == -1 || end == -1 {
+				continue
+			}
+			candidate := string(content[start:end])
 			// Verify it's actually valid base64
 			if isBase64(candidate) && len(candidate) >= d.minLength {
 				results = append(results, candidate)
@@ -128,7 +133,7 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 		}
 
 		// Check entropy of decoded content
-		entropy := calculateEntropy(decoded)
+		entropy := shannonEntropyBytes(decoded)
 		if entropy < 3.5 {
 			// Low entropy, probably not a secret
 			continue
@@ -175,30 +180,6 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	return fResults
-}
-
-// calculateEntropy calculates the Shannon entropy of a byte slice
-func calculateEntropy(data []byte) float64 {
-	if len(data) == 0 {
-		return 0
-	}
-
-	// Count frequency of each byte
-	freq := make(map[byte]int)
-	for _, b := range data {
-		freq[b]++
-	}
-
-	// Calculate entropy
-	entropy := 0.0
-	for _, count := range freq {
-		p := float64(count) / float64(len(data))
-		if p > 0 {
-			entropy -= p * math.Log2(p)
-		}
-	}
-
-	return entropy
 }
 
 // isBinaryContent is a simple check for binary content

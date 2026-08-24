@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -132,8 +133,8 @@ func TestGetDiffFilesSubdir(t *testing.T) {
 
 func TestTopLevel(t *testing.T) {
 	dir := t.TempDir()
-	if TopLevel(dir) != "" && IsGitRepo(dir) {
-		t.Error("TopLevel should be empty outside a repo")
+	if got := TopLevel(dir); got != "" {
+		t.Errorf("TopLevel outside repo = %q, want empty", got)
 	}
 	if err := runGitCmd(dir, "init"); err != nil {
 		t.Skip("git not available:", err)
@@ -252,7 +253,7 @@ func runGitCmd(dir string, args ...string) error {
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return &gitError{cmd: "git " + args[0], output: string(out), err: err}
+		return &gitError{cmd: "git " + strings.Join(args, " "), output: string(out), err: err}
 	}
 	return nil
 }

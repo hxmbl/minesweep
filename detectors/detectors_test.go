@@ -60,7 +60,7 @@ func TestRegexDetectorEdgeCases(t *testing.T) {
 	}{
 		{
 			name:    "fake JWT with invalid header",
-			content: `eyJmb28iOiAiYmFyIn0.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.ZnV6enkK`,
+			content: `eyJmb28iOiAiYmFyIn0.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.ZnV6enpLbW9ja3NpZw`,
 			wantMin: 1,
 		},
 		{

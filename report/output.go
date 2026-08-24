@@ -145,7 +145,21 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 	action := actionLabel(p, f.Action)
 	conf := fmt.Sprintf("%.0f%%", f.Confidence*findings.ConfidenceScale)
 	tw.writefmt("  %s %s\n", action, p.bold(f.Type))
-	tw.writeln(p.dim(fmt.Sprintf("          %s:%d · %s confident", f.File, f.Line, conf)))
+	loc := fmt.Sprintf("%s:%d · %s confident", f.File, f.Line, conf)
+	if len(f.Commit) >= 7 {
+		loc += fmt.Sprintf(" · commit %s", shortHash(f.Commit))
+	}
+	tw.writeln(p.dim(loc))
+	if f.Author != "" || f.Date != "" {
+		who := strings.TrimSpace(f.Author)
+		if who != "" {
+			who = "by " + who
+		}
+		tw.writeln(p.dim(fmt.Sprintf("          introduced %s %s", f.Date, who)))
+	}
+	if f.CommitSummary != "" {
+		tw.writefmt("          %s\n", p.dim(wrapText("\""+f.CommitSummary+"\"", 12)))
+	}
 
 	if opts.Verbose && f.Value != "" {
 		val := f.Value
@@ -245,11 +259,11 @@ func sectionHeader(p palette, sev findings.Severity, label string) string {
 	default:
 		colored = p.dim(title)
 	}
-	return colored + p.dim(" "+strings.Repeat("─", maxInt(3, 58-len(title))))
+	return colored + p.dim(" "+strings.Repeat("─", max(3, 58-len(title))))
 }
 
 func sectionTitle(p palette, title string) string {
-	return p.dim(strings.Repeat("─", 8) + " " + title + " " + strings.Repeat("─", maxInt(3, 50-len(title))))
+	return p.dim(strings.Repeat("─", 8) + " " + title + " " + strings.Repeat("─", max(3, 50-len(title))))
 }
 
 func actionLabel(p palette, a findings.Action) string {
@@ -290,18 +304,18 @@ func wrapText(s string, indent int) string {
 	return b.String()
 }
 
+func shortHash(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
 func pluralize(items []findings.Finding, noun string) string {
 	if len(items) == 1 {
 		return "Found 1 " + noun + "."
 	}
 	return fmt.Sprintf("Found %d %ss.", len(items), noun)
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 type textWriter struct {

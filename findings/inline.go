@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-var inlineIgnoreRe = regexp.MustCompile(`(?i)(?:minesweep|secret(?:s)?)\s*:\s*ignore(?:\s*\(([^)]+)\))?`)
-var inlineIgnoreAltRe = regexp.MustCompile(`(?i)(?:nosec|noscan|noqa)\s*(?:\([^)]*\))?\s*$`)
+var inlineIgnoreRe = regexp.MustCompile(`(?i)(?:#|//)\s*(?:minesweep|secret(?:s)?)\s*:\s*ignore(?:\s*\(([^)]+)\))?`)
+var inlineIgnoreAltRe = regexp.MustCompile(`(?i)(?:#|//)\s*(?:nosec|noscan|noqa)\s*(?:\([^)]*\))?\s*$`)
 
 type InlineSuppression struct {
 	RuleIDs []string

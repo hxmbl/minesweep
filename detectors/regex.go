@@ -29,14 +29,21 @@ type Rule struct {
 	Tags        []string    `yaml:"tags"`
 	Patterns    []Pattern   `yaml:"patterns,omitempty"`
 	FileFilter  *FileFilter `yaml:"file_filter,omitempty"`
+	// Allowlist holds gitleaks-style post-match suppression semantics for
+	// imported rules. Native rules use file_filter and inline ignores.
+	Allowlist *importedAllowlist `yaml:"-"`
 }
 
 type Pattern struct {
 	Regex        string  `yaml:"regex"`
 	Confidence   float64 `yaml:"confidence"`
 	CaptureGroup int     `yaml:"capture_group,omitempty"`
-	compiled     *regexp.Regexp
-	compiledErr  error
+	// MinEntropy, when > 0, requires the captured secret to have Shannon
+	// entropy above the threshold (gitleaks-style filtering).
+	MinEntropy  float64 `yaml:"min_entropy,omitempty"`
+	compiled    *regexp.Regexp
+	compiledErr error
+	gate        literalGate
 }
 
 type FileFilter struct {
@@ -45,11 +52,9 @@ type FileFilter struct {
 }
 
 type matchResult struct {
-	Value  string
-	Start  int
-	End    int
-	Line   int
-	Column int
+	Value string
+	Start int
+	End   int
 }
 
 // Maximum length of content to match against (to prevent memory exhaustion)
@@ -112,79 +117,58 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 
 	var fResults []findings.Finding
 
-	// Limit content length for regex matching to prevent memory issues
 	content, err := file.GetContent()
 	if err != nil {
 		return nil
 	}
+	lowered := file.LoweredContent()
 	if len(content) > maxMatchLength {
 		content = content[:maxMatchLength]
+		if lowered != nil && len(lowered) > maxMatchLength {
+			lowered = lowered[:maxMatchLength]
+		}
 	}
 
-	lines := strings.Split(string(content), "\n")
+	base := filepath.Base(file.Path)
+	var li *filesystem.LineIndex
 	for _, rule := range d.rules {
-		if !matchesFileFilter(rule.FileFilter, file.Path) {
+		if !matchesFileFilter(rule.FileFilter, base) {
 			continue
 		}
 		for _, pat := range rule.Patterns {
-			// Check if pattern compilation failed (invalid regex)
-			if pat.compiledErr != nil {
+			if pat.compiledErr != nil || pat.compiled == nil {
 				continue
 			}
-			if pat.compiled == nil {
-				continue
-			}
-
-			// Use safe matching with timeout
-			matches := pat.safeMatch(content)
-			for _, m := range matches {
+			for _, m := range pat.safeMatch(content, lowered) {
+				if li == nil {
+					li = file.Lines()
+				}
+				line, col := li.LineCol(m.Start)
+				sourceLine := strings.TrimSpace(li.LineText(line - 1))
+				if rule.Allowlist != nil &&
+					suppressedByAllowlist(rule.Allowlist, file.Path, m.Value, sourceLine) {
+					continue
+				}
 				tags := make([]string, len(rule.Tags))
 				copy(tags, rule.Tags)
-				context := extractContext(lines, m.Line-1, 2)
-				sourceLine := ""
-				if m.Line-1 >= 0 && m.Line-1 < len(lines) {
-					sourceLine = strings.TrimSpace(lines[m.Line-1])
-				}
 				fResults = append(fResults, findings.Finding{
 					Type:       rule.Name,
 					Severity:   findings.ParseSeverity(rule.Severity),
 					Confidence: pat.Confidence,
 					File:       file.Path,
-					Line:       m.Line,
-					Column:     m.Column,
+					Line:       line,
+					Column:     col,
 					Value:      m.Value,
 					Reason:     rule.Description,
 					RuleID:     rule.ID,
 					Tags:       tags,
-					Context:    context,
+					Context:    li.Context(line-1, 2),
 					SourceLine: sourceLine,
 				})
 			}
 		}
 	}
 	return fResults
-}
-
-func extractContext(lines []string, center, radius int) string {
-	start := center - radius
-	if start < 0 {
-		start = 0
-	}
-	end := center + radius + 1
-	if end > len(lines) {
-		end = len(lines)
-	}
-	var sb strings.Builder
-	for i := start; i < end; i++ {
-		prefix := "  "
-		if i == center {
-			prefix = "> "
-		}
-		sb.WriteString(prefix)
-		sb.WriteString(strings.TrimSpace(lines[i]))
-		sb.WriteString("\n")
-	}
-	return sb.String()
 }
 
 func (p *Pattern) compile() error {
@@ -205,6 +189,7 @@ func (p *Pattern) compile() error {
 		return fmt.Errorf("compile pattern %q: %w", p.Regex, err)
 	}
 	p.compiled = re
+	p.gate = extractLiteralGate(p.Regex)
 	return nil
 }
 
@@ -271,15 +256,21 @@ func isDangerousRegex(pattern string) bool {
 // safeMatch runs a regex match. Go's regexp uses RE2 (linear time), so a
 // wall-clock timeout is unnecessary and caused false negatives on large files
 // when timed-out match goroutines piled up and starved later patterns.
-func (p *Pattern) safeMatch(content []byte) []matchResult {
+//
+// Before scanning, the pattern's necessary-literal gate is evaluated; most
+// patterns require an anchor literal ("password", "AKIA", "postgres://"),
+// and files lacking it skip the NFA entirely.
+func (p *Pattern) safeMatch(content, lowered []byte) []matchResult {
 	if p.compiled == nil {
+		return nil
+	}
+	if p.gate != nil && !p.gate.satisfied(content, lowered) {
 		return nil
 	}
 
 	// Cap matches to avoid pathological memory use on large files with
 	// repetitive content that generates millions of submatches.
-	const maxMatches = 10000
-	matches := p.compiled.FindAllSubmatchIndex(content, maxMatches)
+	matches := p.compiled.FindAllSubmatchIndex(content, maxMatchesPerPattern)
 	if matches == nil {
 		return nil
 	}
@@ -294,12 +285,14 @@ func (p *Pattern) safeMatch(content []byte) []matchResult {
 		if start == -1 || end == -1 {
 			continue
 		}
+		value := content[start:end]
+		if p.MinEntropy > 0 && shannonEntropyBytes(value) < p.MinEntropy {
+			continue
+		}
 		results = append(results, matchResult{
-			Value:  string(content[start:end]),
-			Start:  start,
-			End:    end,
-			Line:   lineNumber(content, start),
-			Column: columnNumber(content, start),
+			Value: string(value),
+			Start: start,
+			End:   end,
 		})
 	}
 	return results
@@ -315,41 +308,61 @@ func loadRulesFS(rulesFS fs.FS, ruleType string) ([]Rule, error) {
 		return nil, fmt.Errorf("read rules dir: %w", err)
 	}
 	var allRules []Rule
+	var loadErrs []string
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-		if filepath.Ext(entry.Name()) != ".yml" && filepath.Ext(entry.Name()) != ".yaml" {
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if ext != ".yml" && ext != ".yaml" && ext != ".toml" {
 			continue
 		}
 		data, err := fs.ReadFile(rulesFS, entry.Name())
 		if err != nil {
-			return nil, fmt.Errorf("read rule file %q: %w", entry.Name(), err)
+			loadErrs = append(loadErrs, fmt.Sprintf("read %q: %v", entry.Name(), err))
+			continue
 		}
-		var rf RuleFile
-		if err := yaml.Unmarshal(data, &rf); err != nil {
-			return nil, fmt.Errorf("parse rule file %q: %w", entry.Name(), err)
+
+		var fileRules []Rule
+		switch ext {
+		case ".toml":
+			fileRules, err = LoadGitleaksRules(data, entry.Name())
+			if err != nil {
+				loadErrs = append(loadErrs, fmt.Sprintf("parse %q: %v", entry.Name(), err))
+				continue
+			}
+		default:
+			var rf RuleFile
+			if err := yaml.Unmarshal(data, &rf); err != nil {
+				loadErrs = append(loadErrs, fmt.Sprintf("parse %q: %v", entry.Name(), err))
+				continue
+			}
+			fileRules = rf.Rules
 		}
-		for i := range rf.Rules {
-			if rf.Rules[i].Type != ruleType {
+
+		for i := range fileRules {
+			if fileRules[i].Type != "regex" {
 				continue
 			}
 			failed := 0
-			for j := range rf.Rules[i].Patterns {
-				if err := rf.Rules[i].Patterns[j].compile(); err != nil {
+			for j := range fileRules[i].Patterns {
+				if err := fileRules[i].Patterns[j].compile(); err != nil {
 					// Warn loudly: a silently skipped pattern is silently
 					// missing coverage.
 					failed++
 					fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s): skipping pattern %d: %v\n",
-						rf.Rules[i].ID, entry.Name(), j+1, err)
+						fileRules[i].ID, entry.Name(), j+1, err)
 				}
 			}
-			if failed > 0 && failed == len(rf.Rules[i].Patterns) {
-				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q is disabled (all patterns failed to compile)\n", rf.Rules[i].ID)
+			if failed > 0 && failed == len(fileRules[i].Patterns) {
+				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q is disabled (all patterns failed to compile)\n", fileRules[i].ID)
 				continue
 			}
-			allRules = append(allRules, rf.Rules[i])
+			allRules = append(allRules, fileRules[i])
 		}
+	}
+	if len(loadErrs) > 0 {
+		fmt.Fprintf(os.Stderr, "minesweep: warning: %d rule file(s) had errors and were skipped\n", len(loadErrs))
 	}
 	return allRules, nil
 }
@@ -388,44 +401,34 @@ func mergeRules(defaultRules, userRules []Rule) []Rule {
 	return merged
 }
 
-func matchesFileFilter(f *FileFilter, path string) bool {
+func matchesFileFilter(f *FileFilter, base string) bool {
 	if f == nil {
 		return true
 	}
 	if len(f.Exclude) > 0 {
 		for _, pattern := range f.Exclude {
-			match, err := filepath.Match(pattern, filepath.Base(path))
-			if err == nil && match {
+			match, err := filepath.Match(pattern, base)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "minesweep: warning: invalid file filter pattern %q: %v\n", pattern, err)
+				continue
+			}
+			if match {
 				return false
 			}
 		}
 	}
 	if len(f.Include) > 0 {
 		for _, pattern := range f.Include {
-			match, err := filepath.Match(pattern, filepath.Base(path))
-			if err == nil && match {
+			match, err := filepath.Match(pattern, base)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "minesweep: warning: invalid file filter pattern %q: %v\n", pattern, err)
+				continue
+			}
+			if match {
 				return true
 			}
 		}
 		return false
 	}
 	return true
-}
-
-func lineNumber(content []byte, pos int) int {
-	line := 1
-	for i := 0; i < pos && i < len(content); i++ {
-		if content[i] == '\n' {
-			line++
-		}
-	}
-	return line
-}
-
-func columnNumber(content []byte, pos int) int {
-	col := 1
-	for i := pos - 1; i >= 0 && content[i] != '\n'; i-- {
-		col++
-	}
-	return col
 }

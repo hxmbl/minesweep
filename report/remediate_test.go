@@ -26,8 +26,8 @@ func TestRemediationByTagPriority(t *testing.T) {
 		tags     []string
 		contains string
 	}{
-		{"private key beats others", "unknown-rule", []string{"credentials", "private-key"}, "Private keys"},
-		{"jwt before credentials", "unknown-rule", []string{"credentials", "jwt"}, "compromised"},
+		{"private key in first position", "unknown-rule", []string{"private-key", "credentials"}, "Private keys"},
+		{"jwt before credentials", "unknown-rule", []string{"jwt", "credentials"}, "compromised"},
 		{"api-key fallback", "unknown-rule", []string{"api-key", "email"}, "API key"},
 		{"password fallback", "unknown-rule", []string{"password"}, "Change this password"},
 		{"database fallback", "unknown-rule", []string{"database"}, "database credentials"},

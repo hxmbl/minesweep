@@ -131,6 +131,25 @@ func TestIsBinaryMixedContent(t *testing.T) {
 	}
 }
 
+func TestIsBinarySampleWindow(t *testing.T) {
+	head := []byte(strings.Repeat("plain text line\n", 256))
+
+	nullWithinWindow := append(append([]byte{}, head...), make([]byte, 64)...)
+	if !IsBinary(nullWithinWindow) {
+		t.Fatal("NUL inside the sample window must be detected as binary")
+	}
+
+	textThenFarNull := make([]byte, 8192+4096)
+	for i := range textThenFarNull {
+		textThenFarNull[i] = 'x'
+	}
+	copy(textThenFarNull, head)
+	textThenFarNull[10000] = 0x00
+	if IsBinary(textThenFarNull) {
+		t.Fatal("NUL beyond the sample window should not flag the file (git/ripgrep convention)")
+	}
+}
+
 func TestIsUTF8(t *testing.T) {
 	tests := []struct {
 		name string
@@ -664,7 +683,7 @@ func TestNewFileHash(t *testing.T) {
 	if err := f.LoadContent(); err != nil {
 		t.Fatalf("LoadContent: %v", err)
 	}
-	if f.Hash == "" {
+	if f.ContentHash() == "" {
 		t.Fatal("expected non-empty hash")
 	}
 }
@@ -985,7 +1004,7 @@ func TestHashConsistency(t *testing.T) {
 	f2, _ := NewFile(path)
 	_ = f1.LoadContent()
 	_ = f2.LoadContent()
-	if f1.Hash != f2.Hash {
+	if f1.ContentHash() != f2.ContentHash() {
 		t.Fatal("same file should produce same hash")
 	}
 
@@ -993,7 +1012,7 @@ func TestHashConsistency(t *testing.T) {
 	os.WriteFile(path2, []byte("THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG"), 0644)
 	f3, _ := NewFile(path2)
 	_ = f3.LoadContent()
-	if f1.Hash == f3.Hash {
+	if f1.ContentHash() == f3.ContentHash() {
 		t.Fatal("different content should produce different hash")
 	}
 }
