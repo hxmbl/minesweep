@@ -88,7 +88,8 @@ func runInit(force bool) error {
 	if _, err := os.Stat(target); err == nil && !force {
 		return fmt.Errorf("%s already exists (use --force to overwrite)", target)
 	}
-	if err := os.WriteFile(target, []byte(configTemplate), 0644); err != nil {
+	//nolint:gosec // user-facing config file; restrictive 0600 permissions
+	if err := os.WriteFile(target, []byte(configTemplate), 0600); err != nil {
 		return fmt.Errorf("write %s: %w", target, err)
 	}
 	fmt.Printf("Created %s\n\n", target)

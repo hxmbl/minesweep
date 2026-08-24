@@ -72,12 +72,19 @@ func runBenchmark(scanPath string, jsonOut bool, runs int) error {
 		var after runtime.MemStats
 		runtime.ReadMemStats(&after)
 
+		var memDelta int64
+		if after.Alloc >= before.Alloc {
+			memDelta = int64(after.Alloc - before.Alloc)
+		} else {
+			memDelta = -int64(before.Alloc - after.Alloc)
+		}
+
 		results = append(results, benchRun{
 			Duration: elapsed,
 			Files:    rep.FilesScanned,
 			Bytes:    rep.BytesScanned,
 			Findings: len(rep.Findings),
-			MemBytes: int64(after.Alloc) - int64(before.Alloc),
+			MemBytes: memDelta,
 		})
 	}
 

@@ -11,14 +11,14 @@ import (
 // rescanning the file from the start for every match.
 type LineIndex struct {
 	content []byte
-	starts  []int32
+	starts  []int
 }
 
 func NewLineIndex(content []byte) *LineIndex {
-	starts := make([]int32, 1, 256)
+	starts := make([]int, 1, 256)
 	for i, b := range content {
 		if b == '\n' {
-			starts = append(starts, int32(i+1))
+			starts = append(starts, i+1)
 		}
 	}
 	return &LineIndex{content: content, starts: starts}
