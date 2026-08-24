@@ -13,6 +13,7 @@ import (
 	"minesweep/engine"
 	"minesweep/filesystem"
 	"minesweep/findings"
+	"minesweep/git"
 	"minesweep/report"
 )
 
@@ -22,6 +23,7 @@ var (
 	outputSARIF     bool
 	outputDashboard bool
 	showAnnotations bool
+	colorMode       string
 	// toolVersion is stamped at build time via
 	// -ldflags "-X main.toolVersion=x.y.z".
 	// It must NOT have a package-level constant initializer, otherwise the
@@ -32,15 +34,36 @@ var (
 	watchInterval time.Duration
 )
 
+const rootLongDesc = `MineSweep scans files for secrets, credentials, and sensitive data,
+evaluates them against policies, and produces a risk report.
+
+Quickstart:
+  minesweep .                    scan the current directory (sensible defaults)
+  minesweep -p developer .       relaxed policy for local development
+  minesweep init                 create a starter config file
+  minesweep install-hooks        block secrets before every commit
+  minesweep explain <rule-id>    learn what a rule detects and how to respond
+
+Typical workflows:
+  CI gate ............ minesweep --fail-on high .
+  Pull request ....... minesweep --diff --diff-base main .
+  SARIF for GitHub ... minesweep --sarif . > results.sarif
+  Known findings ..... minesweep --update-baseline --baseline .ms-baseline.json .
+
+Exit codes: 0 = clean (or below --fail-on), 1 = findings at or above threshold.`
+
 func main() {
 	root := &cobra.Command{
-		Use:   "minesweep [path]",
-		Short: "MineSweep - policy engine for secrets and sensitive data",
-		Long: `MineSweep scans files for secrets, credentials, and sensitive data,
-evaluates them against policies, and produces a risk report.`,
-		Args: cobra.ExactArgs(1),
+		Use:           "minesweep [path]",
+		Short:         "MineSweep - policy engine for secrets and sensitive data",
+		Long:          rootLongDesc,
+		Args:          cobra.ExactArgs(1),
+		Version:       displayVersion(),
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Name() == "install-hooks" || cmd.Name() == "uninstall-hooks" {
+			if cmd.Name() == "install-hooks" || cmd.Name() == "uninstall-hooks" ||
+				cmd.Name() == "init" || cmd.Name() == "version" || cmd.Name() == "explain" {
 				return nil
 			}
 			if cfg.FailOn != "" && !findings.IsValidSeverity(cfg.FailOn) {
@@ -54,6 +77,10 @@ evaluates them against policies, and produces a risk report.`,
 		RunE: runScan,
 	}
 
+	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		fmt.Fprint(cmd.OutOrStdout(), renderGroupedHelp(cmd))
+	})
+
 	root.Flags().StringVarP(&cfg.RulesDir, "rules", "r", "rules", "Directory containing rule YAML files")
 	root.Flags().StringVarP(&cfg.PolicyFile, "policy", "", "", "Policy file to evaluate against")
 	root.Flags().StringVarP(&cfg.Profile, "profile", "p", "", "Profile name (developer, enterprise, public-github)")
@@ -62,6 +89,7 @@ evaluates them against policies, and produces a risk report.`,
 	root.Flags().BoolVarP(&outputSARIF, "sarif", "", false, "Output as SARIF (for CI/CD)")
 	root.Flags().BoolVarP(&outputDashboard, "dashboard", "", false, "Show rule health dashboard")
 	root.Flags().BoolVarP(&showAnnotations, "annotations", "", false, "Show GitHub Actions annotations")
+	root.Flags().StringVarP(&colorMode, "color", "", "auto", "When to colorize output: auto, always, never")
 	root.Flags().StringVarP(&cfg.PolicyDir, "policy-dir", "", "policy", "Directory containing policy YAML files")
 	root.Flags().BoolVarP(&cfg.Verbose, "verbose", "v", false, "Verbose output")
 	root.Flags().StringVarP(&cfg.FailOn, "fail-on", "", "low", "Minimum severity that exits non-zero (info, low, medium, high, critical)")
@@ -97,7 +125,13 @@ evaluates them against policies, and produces a risk report.`,
 		RunE:  runUninstallHooks,
 	})
 
+	root.AddCommand(newInitCommand())
+	root.AddCommand(newVersionCommand())
+	root.AddCommand(newExplainCommand())
+
 	if err := root.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s %v\n", "error:", err)
+		fmt.Fprintf(os.Stderr, "\nRun 'minesweep --help' to see all commands and options.\n")
 		os.Exit(1)
 	}
 }
@@ -208,7 +242,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 	if _, err := os.Stat(scanPath); os.IsNotExist(err) {
-		return fmt.Errorf("path does not exist: %s", scanPath)
+		return fmt.Errorf("path does not exist: %s\n\nDouble-check the spelling, or run 'minesweep .' to scan the current directory", scanPath)
 	}
 
 	wd, err := os.Getwd()
@@ -308,7 +342,12 @@ func scanAndReport(scanPath string) (int, error) {
 			return 0, err
 		}
 	} else {
-		if err := report.WriteText(os.Stdout, reportData, cfg.Verbose); err != nil {
+		opts := report.TextOptions{
+			Verbose: cfg.Verbose,
+			Color:   report.ParseColorMode(colorMode),
+			Hints:   nextStepHints(scanPath, reportData),
+		}
+		if err := report.WriteText(os.Stdout, reportData, opts); err != nil {
 			return 0, err
 		}
 	}
@@ -322,6 +361,41 @@ func scanAndReport(scanPath string) (int, error) {
 		}
 	}
 	return 0, nil
+}
+
+// nextStepHints suggests beginner-friendly follow-up commands based on the
+// scan result and repo state.
+func nextStepHints(scanPath string, data *findings.RiskReport) []string {
+	var hints []string
+
+	hasFindings := data != nil && len(data.Findings) > 0
+	baselineConfigured := cfg.BaselineFile != "" && !cfg.UpdateBaseline
+
+	if hasFindings && !baselineConfigured {
+		hints = append(hints, "Already aware of these? Silence them with:\n      minesweep --update-baseline --baseline .minesweep-baseline.json .")
+	}
+
+	top := git.TopLevel(scanPath)
+	if top != "" && hasFindings && !hasPreCommitHook(top) {
+		hints = append(hints, "Block secrets before every commit:\n      minesweep install-hooks")
+	}
+
+	if !cfg.Verbose {
+		hints = append(hints, "Show matched values and context:\n      minesweep -v .")
+	}
+
+	if len(hints) > 3 {
+		hints = hints[:3]
+	}
+	return hints
+}
+
+func hasPreCommitHook(repoTop string) bool {
+	data, err := os.ReadFile(filepath.Join(repoTop, ".git", "hooks", "pre-commit"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "MineSweep")
 }
 
 const preCommitHook = `#!/bin/sh

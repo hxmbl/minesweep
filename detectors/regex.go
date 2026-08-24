@@ -100,6 +100,11 @@ func (d *RegexDetector) Name() string {
 	return "regex"
 }
 
+// Rules returns the loaded rule definitions, including any merged user rules.
+func (d *RegexDetector) Rules() []Rule {
+	return d.rules
+}
+
 func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 	if file.IsBinary {
 		return nil

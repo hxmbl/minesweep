@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"minesweep/detectors"
 	"minesweep/filesystem"
@@ -56,6 +57,8 @@ type Engine struct {
 	policies  []policy.PolicyRule
 	// Semaphore for limiting concurrent file reads
 	readSemaphore chan struct{}
+	// Number of files examined during the most recent Run
+	filesScanned int
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -236,6 +239,16 @@ func (e *Engine) updateBaseline(baseline *findings.Baseline, newFindings []findi
 }
 
 func (e *Engine) Run(path string) (*findings.RiskReport, error) {
+	start := time.Now()
+	rep, err := e.run(path)
+	if rep != nil {
+		rep.FilesScanned = e.filesScanned
+		rep.DurationMs = time.Since(start).Milliseconds()
+	}
+	return rep, err
+}
+
+func (e *Engine) run(path string) (*findings.RiskReport, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat path: %w", err)
@@ -291,6 +304,7 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 		files = append(files, file)
 	}
 
+	e.filesScanned = len(files)
 	allFindings := e.detectParallel(files)
 	return e.finalize(allFindings)
 }
@@ -304,6 +318,7 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 		return nil, err
 	}
 
+	e.filesScanned = 1
 	allFindings := e.detect(file)
 	return e.finalize(allFindings)
 }
@@ -330,6 +345,7 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 		fmt.Fprintf(os.Stderr, "warning: reached max files limit (%d), scanning first %d files\n", e.config.MaxFiles, e.config.MaxFiles)
 	}
 
+	e.filesScanned = len(files)
 	allFindings := e.detectParallel(files)
 	return e.finalize(allFindings)
 }

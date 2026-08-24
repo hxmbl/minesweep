@@ -15,18 +15,31 @@ go build -o minesweep ./cmd/minesweep
 ## Quick Start
 
 ```bash
-# Scan current directory
+# Scan current directory - sensible defaults, no config needed
 minesweep .
 
-# Scan with verbose output
-minesweep -v .
-
-# Output as JSON
-minesweep --json .
-
-# Output as SARIF (for CI/CD integration)
-minesweep --sarif .
+# Relaxed policy for local development
+minesweep -p developer .
 ```
+
+The default text report groups findings by severity, explains what each one
+means, and suggests next steps. A clean scan simply prints:
+
+```
+✓ No secrets or sensitive data detected.
+  Scanned 42 files in 0.8s.
+```
+
+### Getting started
+
+```bash
+minesweep init          # write a commented starter .minesweep.yml
+minesweep version       # print build information (also: minesweep --version)
+minesweep explain aws-access-key-id   # what a rule detects + how to respond
+```
+
+`minesweep explain` accepts exact IDs, unique prefixes, and name fragments;
+run it without arguments to list every rule.
 
 ## Usage
 
@@ -45,6 +58,8 @@ minesweep [path] [flags]
 | `--policy-dir` | | `policy` | Directory containing policy YAML files |
 | `--json` | | `false` | Output as JSON |
 | `--sarif` | | `false` | Output as SARIF (for CI/CD) |
+| `--dashboard` | | `false` | Show rule health dashboard |
+| `--annotations` | | `false` | Show GitHub Actions annotations |
 | `--verbose` | `-v` | `false` | Verbose output showing details |
 | `--fail-on` | | `low` | Minimum severity that exits non-zero |
 | `--min-confidence` | | `0` | Minimum confidence threshold (0.0-1.0) |
@@ -68,8 +83,17 @@ minesweep [path] [flags]
 
 ### Subcommands
 
+- `minesweep init` - Write a starter `.minesweep.yml` config file
+- `minesweep version` - Print version and build information
+- `minesweep explain [rule-id]` - Show what a rule detects, its patterns, and remediation guidance
 - `minesweep install-hooks` - Install a git pre-commit hook that scans staged files
 - `minesweep uninstall-hooks` - Remove the pre-commit hook
+
+### Output colors
+
+Text output is colorized on terminals only. Control it with `--color auto|always|never`;
+`NO_COLOR` and `TERM=dumb` also disable colors in `auto` mode (the default). Piped or
+redirected output is never colorized, so CI logs stay clean.
 
 ## Examples
 
@@ -134,32 +158,33 @@ minesweep --min-severity medium .
 ### Text (default)
 
 ```
-Risk Score: High (80)
+Risk score: HIGH (75/100) — not safe to share publicly or with AI tools
+Found 3 findings.
 
-Found 3 findings across 2 types.
+1 critical  ·  1 high  ·  1 medium
 
-Critical items detected:
-  • AWS Access Key ID
+block: must fix before sharing  ·  redact: value hidden  ·  warn: review recommended
 
-Safe to share publicly? No.
-Safe to send to AI? No.
-Review findings before sharing this file.
+CRITICAL ──────────────────────────────────────────────────
+  [block] AWS Access Key ID
+          .env:5 · 95% confident
+          ↳ Rotate this key in the AWS IAM console, remove it from the file, and purge it from
+            git history (e.g. git filter-repo). Consider switching to short-lived IAM roles.
 
-Files scanned: 42
-Findings: 3
+MEDIUM ────────────────────────────────────────────────────
+  [warn] Generic Password
+          config.yml:10 · 70% confident
+          ↳ Change this password and load it from an environment variable or secrets manager
+            instead of hardcoding it.
 
-  [HIGH] AWS Access Key ID
-    File: .env:5
-    Confidence: 95%
-    Reason: AWS access key pattern detected
-    Action: block
-
-  [MEDIUM] Generic Password
-    File: config.yml:10
-    Confidence: 70%
-    Reason: password pattern detected
-    Action: review
+──────── Next steps ────────────────────────────────────────
+  • Already aware of these? Silence them with:
+      minesweep --update-baseline --baseline .minesweep-baseline.json .
+  • Show matched values and context:
+      minesweep -v .
 ```
+
+Run with `-v` for matched values, context lines, boundary checks, and risk factors.
 
 ### JSON
 
@@ -238,7 +263,7 @@ tags:
 
 ```
 minesweep/
-├── cmd/minesweep/     # CLI entrypoint (cobra commands, flags, hook install)
+├── cmd/minesweep/     # CLI entrypoint (cobra commands, flags, hook install, init/version/explain)
 ├── config/            # .minesweep.yml config file discovery and loading
 ├── detectors/         # Detection implementations (regex, entropy, base64, ...)
 ├── engine/            # Orchestration: walk -> detect -> filter -> evaluate
@@ -247,7 +272,7 @@ minesweep/
 ├── git/               # Git operations (diff files, staged files, branch sanitization)
 ├── policy/            # Policy rules and profiles evaluation
 ├── profiles/          # Bundled policy profiles (developer, enterprise, ...)
-├── report/            # Output formats (text, JSON, SARIF, dashboard, annotations)
+├── report/            # Output formats (text, JSON, SARIF, dashboard, annotations) + color + remediation guidance
 └── rules/             # Built-in detection rule YAML files
 ```
 

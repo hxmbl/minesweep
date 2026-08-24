@@ -19,18 +19,22 @@ func TestWriteText(t *testing.T) {
 			Line:       1,
 			Value:      "AKIAIOSFODNN7EXAMPLE",
 			Reason:     "test",
+			RuleID:     "aws-access-key-id",
 			Tags:       []string{"aws", "cloud", "credentials"},
 		},
 	}, nil)
 
 	var buf bytes.Buffer
-	WriteText(&buf, &report, false)
+	WriteText(&buf, &report, TextOptions{})
 	output := buf.String()
 	if !strings.Contains(output, "AWS Access Key ID") {
 		t.Fatal("expected finding in output")
 	}
-	if !strings.Contains(output, "Risk Score") {
+	if !strings.Contains(output, "Risk score") {
 		t.Fatal("expected risk score in output")
+	}
+	if !strings.Contains(output, "Rotate this key") {
+		t.Fatal("expected remediation hint in output")
 	}
 }
 
@@ -40,7 +44,7 @@ func TestWriteTextEmptyReport(t *testing.T) {
 	report := findings.GenerateRiskReport(nil, nil)
 
 	var buf bytes.Buffer
-	WriteText(&buf, &report, false)
+	WriteText(&buf, &report, TextOptions{})
 	output := buf.String()
 	if !strings.Contains(output, "No secrets or sensitive data detected.") {
 		t.Fatal("expected clean summary in empty report")
@@ -63,7 +67,7 @@ func TestWriteTextVerbose(t *testing.T) {
 	}, nil)
 
 	var buf bytes.Buffer
-	WriteText(&buf, &report, true)
+	WriteText(&buf, &report, TextOptions{Verbose: true})
 	output := buf.String()
 	if !strings.Contains(output, "short_value") {
 		t.Fatal("expected value in verbose output")
@@ -86,7 +90,7 @@ func TestWriteTextVeryLongValue(t *testing.T) {
 	}, nil)
 
 	var buf bytes.Buffer
-	WriteText(&buf, &report, true)
+	WriteText(&buf, &report, TextOptions{Verbose: true})
 	output := buf.String()
 	// The value should be truncated to ~60 chars in verbose output
 	if strings.Contains(output, longValue) {
@@ -113,7 +117,7 @@ func TestWriteTextManyFindings(t *testing.T) {
 	report := findings.GenerateRiskReport(fs, nil)
 
 	var buf bytes.Buffer
-	WriteText(&buf, &report, false)
+	WriteText(&buf, &report, TextOptions{})
 	output := buf.String()
 	if !strings.Contains(output, "Finding 0") {
 		t.Fatal("expected first finding in output")
@@ -140,7 +144,7 @@ func TestWriteTextMultipleReasons(t *testing.T) {
 	}, nil)
 
 	var buf bytes.Buffer
-	WriteText(&buf, &report, false)
+	WriteText(&buf, &report, TextOptions{Verbose: true})
 	output := buf.String()
 	if !strings.Contains(output, "Risk factors") {
 		t.Fatal("expected risk factors section with multiple reasons")
