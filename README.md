@@ -4,6 +4,9 @@ A policy driven secrets and sensitive data scanner for code repositories. MineSw
 
 ## Installation
 
+> **Release cadence:** major versions only (v1.0.0, v2.0.0, …). Every release
+> is simply "the current MineSweep"; there are no patch trains.
+
 Homebrew (macOS/Linux):
 
 ```bash
