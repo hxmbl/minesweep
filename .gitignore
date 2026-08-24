@@ -4,3 +4,4 @@
 *.testbin
 .DS_Store
 audit.txt
+dist/
