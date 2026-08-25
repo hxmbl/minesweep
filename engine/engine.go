@@ -497,9 +497,7 @@ func relativizeFindings(root string, fs []findings.Finding) []findings.Finding {
 			fs[i].File = filepath.Base(fs[i].File)
 			continue
 		}
-		if strings.HasPrefix(fs[i].File, rootWithSep) {
-			fs[i].File = strings.TrimPrefix(fs[i].File, rootWithSep)
-		}
+		fs[i].File = strings.TrimPrefix(fs[i].File, rootWithSep)
 	}
 	return fs
 }

@@ -220,7 +220,7 @@ var configFields = []configField{
 			}
 			return ""
 		},
-		func(c *engine.Config, v string) { fmt.Sscanf(v, "%d", &c.Workers) },
+		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.Workers) },
 		func(f *config.FileConfig) bool { return f.Workers > 0 }),
 	numField("max_files", "max-files", false,
 		func(f *config.FileConfig) string {
@@ -229,7 +229,7 @@ var configFields = []configField{
 			}
 			return ""
 		},
-		func(c *engine.Config, v string) { fmt.Sscanf(v, "%d", &c.MaxFiles) },
+		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MaxFiles) },
 		func(f *config.FileConfig) bool { return f.MaxFiles > 0 }),
 	numField("memory_limit_mb", "memory-limit-mb", false,
 		func(f *config.FileConfig) string {
@@ -238,7 +238,7 @@ var configFields = []configField{
 			}
 			return ""
 		},
-		func(c *engine.Config, v string) { fmt.Sscanf(v, "%d", &c.MemoryLimitMB) },
+		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MemoryLimitMB) },
 		func(f *config.FileConfig) bool { return f.MemoryLimitMB > 0 }),
 	numField("max_file_size_mb", "max-file-size-mb", false,
 		func(f *config.FileConfig) string {
@@ -260,7 +260,7 @@ var configFields = []configField{
 			}
 			return ""
 		},
-		func(c *engine.Config, v string) { fmt.Sscanf(v, "%d", &c.MaxConcurrentReads) },
+		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MaxConcurrentReads) },
 		func(f *config.FileConfig) bool { return f.MaxConcurrentReads > 0 }),
 
 	// ---- security-relevant: ignored from discovered configs ----
@@ -312,7 +312,7 @@ var configFields = []configField{
 			}
 			return ""
 		},
-		func(c *engine.Config, v string) { fmt.Sscanf(v, "%g", &c.MinConfidence) },
+		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%g", &c.MinConfidence) },
 		func(f *config.FileConfig) bool { return f.MinConfidence > 0 }),
 	{label: "tags", flag: "tag", secure: true,
 		apply:   func(c *engine.Config, f *config.FileConfig, _ string) { c.Tags = f.Tags },
