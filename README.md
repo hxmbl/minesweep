@@ -103,6 +103,23 @@ minesweep [path] [flags]
 - `minesweep install-hooks` - Install a git pre-commit hook that scans staged files
 - `minesweep uninstall-hooks` - Remove the pre-commit hook
 
+### Config trust model
+
+`.minesweep.yml` discovered automatically from the scanned tree is treated as
+**untrusted**: performance keys (`workers`, `verbose`, limits…) apply, but
+security-relevant keys — `suppress_file`, `baseline_file`, `rules_dir`,
+`policy*`, `profile`, `fail_on`, `min_*`, `tags`, `skip_extensions`,
+`include_tests`, `diff_base`, `boundaries` — are ignored with a warning,
+because a scanned repo could otherwise weaken its own scan. To use them,
+opt in explicitly:
+
+```bash
+minesweep --config .minesweep.yml .
+```
+
+Relative paths inside an honored config resolve against the config file's
+directory. Explicit CLI flags always beat any config file.
+
 ### Paging
 
 Interactive terminal runs page colored output through `less -FRX`: colors are

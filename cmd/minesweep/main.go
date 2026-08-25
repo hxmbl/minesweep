@@ -3,14 +3,17 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"minesweep/config"
 	"minesweep/engine"
@@ -92,7 +95,7 @@ func main() {
 			if cfg.HistoryMode && (cfg.DiffMode || cfg.StagedOnly) {
 				return fmt.Errorf("--history scans all refs and cannot be combined with --diff or --staged")
 			}
-			return loadConfig(args[0])
+			return loadConfig(cmd, args[0])
 		},
 		RunE: runScan,
 	}
@@ -167,7 +170,219 @@ func main() {
 	}
 }
 
-func loadConfig(scanPath string) error {
+// configField describes one config-file key: how to detect its presence,
+// apply it, and whether it can weaken detection when sourced from an
+// auto-discovered (untrusted) .minesweep.yml.
+type configField struct {
+	label   string
+	flag    string // cobra flag name; empty = no CLI flag exists
+	secure  bool   // requires explicit trust (--config / CLI flag) when discovered
+	isPath  bool   // resolved relative to the config file's directory
+	apply   func(cfg *engine.Config, fc *config.FileConfig, dir string)
+	present func(fc *config.FileConfig) bool
+}
+
+func strField(label, flag string, secure bool,
+	get func(*config.FileConfig) string,
+	set func(*engine.Config, string),
+	present func(*config.FileConfig) bool,
+) configField {
+	return configField{label: label, flag: flag, secure: secure,
+		apply:   func(cfg *engine.Config, fc *config.FileConfig, _ string) { set(cfg, get(fc)) },
+		present: present}
+}
+
+func numField(label, flag string, secure bool,
+	get func(*config.FileConfig) string,
+	apply func(*engine.Config, string),
+	present func(*config.FileConfig) bool,
+) configField {
+	return configField{label: label, flag: flag, secure: secure,
+		apply:   func(cfg *engine.Config, fc *config.FileConfig, _ string) { apply(cfg, get(fc)) },
+		present: present}
+}
+
+var configFields = []configField{
+	// ---- safe: performance / verbosity only ----
+	strField("verbose", "verbose", false,
+		func(f *config.FileConfig) string {
+			if f.Verbose {
+				return "true"
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { c.Verbose = v == "true" },
+		func(f *config.FileConfig) bool { return f.Verbose }),
+	numField("workers", "workers", false,
+		func(f *config.FileConfig) string {
+			if f.Workers > 0 {
+				return fmt.Sprint(f.Workers)
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { fmt.Sscanf(v, "%d", &c.Workers) },
+		func(f *config.FileConfig) bool { return f.Workers > 0 }),
+	numField("max_files", "max-files", false,
+		func(f *config.FileConfig) string {
+			if f.MaxFiles > 0 {
+				return fmt.Sprint(f.MaxFiles)
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { fmt.Sscanf(v, "%d", &c.MaxFiles) },
+		func(f *config.FileConfig) bool { return f.MaxFiles > 0 }),
+	numField("memory_limit_mb", "memory-limit-mb", false,
+		func(f *config.FileConfig) string {
+			if f.MemoryLimitMB > 0 {
+				return fmt.Sprint(f.MemoryLimitMB)
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { fmt.Sscanf(v, "%d", &c.MemoryLimitMB) },
+		func(f *config.FileConfig) bool { return f.MemoryLimitMB > 0 }),
+	numField("max_file_size_mb", "max-file-size-mb", false,
+		func(f *config.FileConfig) string {
+			if f.MaxFileSizeMB > 0 {
+				return fmt.Sprint(f.MaxFileSizeMB)
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) {
+			var n int64
+			fmt.Sscanf(v, "%d", &n)
+			c.MaxFileSizeMB = n
+		},
+		func(f *config.FileConfig) bool { return f.MaxFileSizeMB > 0 }),
+	numField("max_concurrent_reads", "max-concurrent-reads", false,
+		func(f *config.FileConfig) string {
+			if f.MaxConcurrentReads > 0 {
+				return fmt.Sprint(f.MaxConcurrentReads)
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { fmt.Sscanf(v, "%d", &c.MaxConcurrentReads) },
+		func(f *config.FileConfig) bool { return f.MaxConcurrentReads > 0 }),
+
+	// ---- security-relevant: ignored from discovered configs ----
+	pathField("rules_dir", "rules", func(c *engine.Config, v string) { c.RulesDir = v }, func(f *config.FileConfig) bool { return f.RulesDir != "" }),
+	pathField("profiles_dir", "profiles", func(c *engine.Config, v string) { c.ProfilesDir = v }, func(f *config.FileConfig) bool { return f.ProfilesDir != "" }),
+	pathField("policy_dir", "policy-dir", func(c *engine.Config, v string) { c.PolicyDir = v }, func(f *config.FileConfig) bool { return f.PolicyDir != "" }),
+	pathField("policy_file", "policy", func(c *engine.Config, v string) { c.PolicyFile = v }, func(f *config.FileConfig) bool { return f.PolicyFile != "" }),
+	pathField("baseline_file", "baseline", func(c *engine.Config, v string) { c.BaselineFile = v }, func(f *config.FileConfig) bool { return f.BaselineFile != "" }),
+	pathField("suppress_file", "suppress", func(c *engine.Config, v string) { c.SuppressFile = v }, func(f *config.FileConfig) bool { return f.SuppressFile != "" }),
+
+	strField("profile", "profile", true,
+		func(f *config.FileConfig) string { return f.Profile },
+		func(c *engine.Config, v string) { c.Profile = v },
+		func(f *config.FileConfig) bool { return f.Profile != "" }),
+	strField("fail_on", "fail-on", true,
+		func(f *config.FileConfig) string { return f.FailOn },
+		func(c *engine.Config, v string) { c.FailOn = v },
+		func(f *config.FileConfig) bool { return f.FailOn != "" }),
+	strField("min_severity", "min-severity", true,
+		func(f *config.FileConfig) string { return f.MinSeverity },
+		func(c *engine.Config, v string) { c.MinSeverity = v },
+		func(f *config.FileConfig) bool { return f.MinSeverity != "" }),
+	strField("diff_base", "diff-base", true,
+		func(f *config.FileConfig) string { return f.DiffBase },
+		func(c *engine.Config, v string) { c.DiffBase = v },
+		func(f *config.FileConfig) bool { return f.DiffBase != "" }),
+	strField("include_tests", "include-tests", true,
+		func(f *config.FileConfig) string {
+			if f.IncludeTestFiles {
+				return "true"
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { c.IncludeTestFiles = v == "true" },
+		func(f *config.FileConfig) bool { return f.IncludeTestFiles }),
+	strField("update_baseline", "update-baseline", true,
+		func(f *config.FileConfig) string {
+			if f.UpdateBaseline {
+				return "true"
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { c.UpdateBaseline = v == "true" },
+		func(f *config.FileConfig) bool { return f.UpdateBaseline }),
+	numField("min_confidence", "min-confidence", true,
+		func(f *config.FileConfig) string {
+			if f.MinConfidence > 0 {
+				return fmt.Sprint(f.MinConfidence)
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { fmt.Sscanf(v, "%g", &c.MinConfidence) },
+		func(f *config.FileConfig) bool { return f.MinConfidence > 0 }),
+	{label: "tags", flag: "tag", secure: true,
+		apply:   func(c *engine.Config, f *config.FileConfig, _ string) { c.Tags = f.Tags },
+		present: func(f *config.FileConfig) bool { return len(f.Tags) > 0 }},
+	{label: "skip_extensions", flag: "", secure: true,
+		apply:   func(c *engine.Config, f *config.FileConfig, _ string) { c.SkipExtensions = f.SkipExtensions },
+		present: func(f *config.FileConfig) bool { return len(f.SkipExtensions) > 0 }},
+	{label: "boundaries", flag: "", secure: true,
+		apply:   func(c *engine.Config, f *config.FileConfig, _ string) { c.Boundaries = f.Boundaries },
+		present: func(f *config.FileConfig) bool { return len(f.Boundaries) > 0 }},
+}
+
+func pathField(label, flag string, set func(*engine.Config, string), present func(*config.FileConfig) bool) configField {
+	return configField{label: label, flag: flag, secure: true, isPath: true,
+		apply: func(cfg *engine.Config, fc *config.FileConfig, dir string) {
+			var path string
+			switch label {
+			case "rules_dir":
+				path = fc.RulesDir
+			case "profiles_dir":
+				path = fc.ProfilesDir
+			case "policy_dir":
+				path = fc.PolicyDir
+			case "policy_file":
+				path = fc.PolicyFile
+			case "baseline_file":
+				path = fc.BaselineFile
+			case "suppress_file":
+				path = fc.SuppressFile
+			}
+			if path != "" && !filepath.IsAbs(path) {
+				path = filepath.Join(dir, path)
+			}
+			set(cfg, path)
+		},
+		present: present}
+}
+
+// applyConfigValues merges a loaded config file into cfg. changed reports
+// explicitly-set CLI flags (they always win over any file). trusted=false
+// means the file was auto-discovered from the scanned tree: security fields
+// are skipped and their labels returned for the caller's warning.
+func applyConfigValues(cfg *engine.Config, fc *config.FileConfig, cfgDir string,
+	changed map[string]bool, trusted bool, warn io.Writer,
+) []string {
+	var ignored []string
+	for _, field := range configFields {
+		if !field.present(fc) {
+			continue
+		}
+		if field.flag != "" && changed[field.flag] {
+			continue // explicit CLI setting wins over any file
+		}
+		if field.secure && !trusted {
+			ignored = append(ignored, field.label)
+			continue
+		}
+		field.apply(cfg, fc, cfgDir)
+	}
+	if len(ignored) > 0 && warn != nil {
+		sort.Strings(ignored)
+		fmt.Fprintf(warn, "minesweep: warning: ignoring security-relevant settings from untrusted config:\n"+
+			"  %s\n"+
+			"  Discovered configs cannot weaken scans. Pass --config <file> to honor them explicitly.\n",
+			strings.Join(ignored, ", "))
+	}
+	return ignored
+}
+
+func loadConfig(cmd *cobra.Command, scanPath string) error {
 	var fileCfg *config.FileConfig
 	var cfgPath string
 	var err error
@@ -184,86 +399,20 @@ func loadConfig(scanPath string) error {
 			return fmt.Errorf("load config file: %w", err)
 		}
 	}
-
 	if fileCfg == nil {
 		return nil
 	}
 
+	trusted := configPath != ""
 	if cfg.Verbose {
-		fmt.Fprintf(os.Stderr, "Using config file: %s\n", cfgPath)
+		fmt.Fprintf(os.Stderr, "Using config file: %s (%s)\n", cfgPath,
+			map[bool]string{true: "trusted", false: "discovered"}[trusted])
 	}
 
-	applyDefaults(fileCfg)
+	changed := map[string]bool{}
+	cmd.Flags().Visit(func(f *pflag.Flag) { changed[f.Name] = true })
+	applyConfigValues(&cfg, fileCfg, filepath.Dir(cfgPath), changed, trusted, os.Stderr)
 	return nil
-}
-
-func applyDefaults(fileCfg *config.FileConfig) {
-	if cfg.RulesDir == "rules" && fileCfg.RulesDir != "" {
-		cfg.RulesDir = fileCfg.RulesDir
-	}
-	if cfg.ProfilesDir == "profiles" && fileCfg.ProfilesDir != "" {
-		cfg.ProfilesDir = fileCfg.ProfilesDir
-	}
-	if cfg.PolicyDir == "policy" && fileCfg.PolicyDir != "" {
-		cfg.PolicyDir = fileCfg.PolicyDir
-	}
-	if cfg.PolicyFile == "" && fileCfg.PolicyFile != "" {
-		cfg.PolicyFile = fileCfg.PolicyFile
-	}
-	if cfg.Profile == "" && fileCfg.Profile != "" {
-		cfg.Profile = fileCfg.Profile
-	}
-	if !cfg.Verbose && fileCfg.Verbose {
-		cfg.Verbose = fileCfg.Verbose
-	}
-	if cfg.FailOn == "low" && fileCfg.FailOn != "" {
-		cfg.FailOn = fileCfg.FailOn
-	}
-	if cfg.MinConfidence == 0 && fileCfg.MinConfidence > 0 {
-		cfg.MinConfidence = fileCfg.MinConfidence
-	}
-	if cfg.MinSeverity == "" && fileCfg.MinSeverity != "" {
-		cfg.MinSeverity = fileCfg.MinSeverity
-	}
-	if len(cfg.Tags) == 0 && len(fileCfg.Tags) > 0 {
-		cfg.Tags = fileCfg.Tags
-	}
-	if cfg.Workers == 0 && fileCfg.Workers > 0 {
-		cfg.Workers = fileCfg.Workers
-	}
-	if cfg.MaxFiles == 0 && fileCfg.MaxFiles > 0 {
-		cfg.MaxFiles = fileCfg.MaxFiles
-	}
-	if cfg.MemoryLimitMB == 0 && fileCfg.MemoryLimitMB > 0 {
-		cfg.MemoryLimitMB = fileCfg.MemoryLimitMB
-	}
-	if cfg.MaxFileSizeMB == 0 && fileCfg.MaxFileSizeMB > 0 {
-		cfg.MaxFileSizeMB = fileCfg.MaxFileSizeMB
-	}
-	if cfg.MaxConcurrentReads == 0 && fileCfg.MaxConcurrentReads > 0 {
-		cfg.MaxConcurrentReads = fileCfg.MaxConcurrentReads
-	}
-	if cfg.DiffBase == "main" && fileCfg.DiffBase != "" {
-		cfg.DiffBase = fileCfg.DiffBase
-	}
-	if len(cfg.Boundaries) == 0 && len(fileCfg.Boundaries) > 0 {
-		cfg.Boundaries = fileCfg.Boundaries
-	}
-	if len(cfg.SkipExtensions) == 0 && len(fileCfg.SkipExtensions) > 0 {
-		cfg.SkipExtensions = fileCfg.SkipExtensions
-	}
-	if cfg.BaselineFile == "" && fileCfg.BaselineFile != "" {
-		cfg.BaselineFile = fileCfg.BaselineFile
-	}
-	if !cfg.UpdateBaseline && fileCfg.UpdateBaseline {
-		cfg.UpdateBaseline = true
-	}
-	if cfg.SuppressFile == "" && fileCfg.SuppressFile != "" {
-		cfg.SuppressFile = fileCfg.SuppressFile
-	}
-	if !cfg.IncludeTestFiles && fileCfg.IncludeTestFiles {
-		cfg.IncludeTestFiles = true
-	}
 }
 
 func runScan(cmd *cobra.Command, args []string) error {
