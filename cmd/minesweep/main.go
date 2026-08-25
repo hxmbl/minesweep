@@ -249,7 +249,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) {
 			var n int64
-			fmt.Sscanf(v, "%d", &n)
+			_, _ = fmt.Sscanf(v, "%d", &n)
 			c.MaxFileSizeMB = n
 		},
 		func(f *config.FileConfig) bool { return f.MaxFileSizeMB > 0 }),
