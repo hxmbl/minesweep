@@ -672,8 +672,15 @@ func (e *Engine) evaluate(fs []findings.Finding) []findings.Finding {
 		action := policy.Evaluate(f, e.policies)
 		f.Action = action
 		f.Reason = string(action) + ": " + f.Reason
-		if action == findings.ActionRedact {
-			f.Value = findings.RedactValue(f.Value, f.Type)
+		if action == findings.ActionRedact && f.Value != "" {
+			raw := f.Value
+			f.Value = findings.RedactValue(raw, f.Type)
+			// The captured value also appears verbatim in the surrounding
+			// evidence; a redaction that leaves the secret sitting in
+			// source_line/context is not a redaction.
+			mask := findings.RedactValue("", "")
+			f.SourceLine = strings.ReplaceAll(f.SourceLine, raw, mask)
+			f.Context = strings.ReplaceAll(f.Context, raw, mask)
 		}
 		evaluated = append(evaluated, f)
 	}

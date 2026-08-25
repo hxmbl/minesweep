@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"minesweep/findings"
+	"minesweep/policy"
 )
 
 func gitRun(t *testing.T, dir string, args ...string) {
@@ -81,4 +82,39 @@ func TestHistoryModeScansDeletedSecrets(t *testing.T) {
 			t.Errorf("working-tree scan should not see the deleted secret: %+v", f)
 		}
 	}
+}
+
+func TestRedactMasksEvidenceFields(t *testing.T) {
+	const secret = "SG.abcdefghijklmnopqrstuv.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	e := &Engine{config: Config{}, policies: testRedactPolicies()}
+	out := e.evaluate([]findings.Finding{{
+		Type:       "SendGrid API Key",
+		RuleID:     "sendgrid-api-key",
+		Severity:   findings.SeverityHigh,
+		Action:     findings.ActionRedact,
+		File:       "sg.py",
+		Line:       1,
+		Value:      secret,
+		Context:    "> key = " + secret + "\n  other line\n",
+		SourceLine: "key = " + secret,
+	}})
+
+	if len(out) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(out))
+	}
+	f := out[0]
+	if f.Value != "<REDACTED>" {
+		t.Errorf("value = %q", f.Value)
+	}
+	if strings.Contains(f.SourceLine, secret) || strings.Contains(f.Context, secret) {
+		t.Errorf("redact leaked secret via evidence fields:\nsource_line=%q\ncontext=%q",
+			f.SourceLine, f.Context)
+	}
+	if !strings.Contains(f.SourceLine, "<REDACTED>") || !strings.Contains(f.Context, "<REDACTED>") {
+		t.Errorf("evidence should contain the mask marker:\n%q / %q", f.SourceLine, f.Context)
+	}
+}
+
+func testRedactPolicies() []policy.PolicyRule {
+	return []policy.PolicyRule{{Tags: []string{"*"}, Action: findings.ActionRedact}}
 }
