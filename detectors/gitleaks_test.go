@@ -107,16 +107,25 @@ func TestLoadGitleaksRulesTranslation(t *testing.T) {
 	}
 
 	// Global allowlist attaches to rules without their own.
-	if aws.Allowlist == nil {
-		t.Error("global allowlist not attached to aws rule")
+	if len(aws.Allowlist) != 1 {
+		t.Errorf("global allowlist not attached to aws rule: %d blocks", len(aws.Allowlist))
 	}
-	// Per-rule allowlist merges with global.
+	// Per-rule allowlist keeps its own block alongside the global one.
 	slug := byID["internal-slug"]
-	if slug.Allowlist == nil || len(slug.Allowlist.stopwords) == 0 {
-		t.Error("per-rule allowlist lost")
+	if len(slug.Allowlist) != 2 {
+		t.Fatalf("expected per-rule + global blocks, got %d", len(slug.Allowlist))
 	}
-	if slug.Allowlist != nil && len(slug.Allowlist.pathRes) == 0 {
-		t.Error("merged allowlist dropped path regexes")
+	var hasStops, hasPaths bool
+	for _, b := range slug.Allowlist {
+		if len(b.stopwords) > 0 {
+			hasStops = true
+		}
+		if len(b.pathRes) > 0 {
+			hasPaths = true
+		}
+	}
+	if !hasStops || !hasPaths {
+		t.Errorf("block set lost categories: %+v", slug.Allowlist)
 	}
 }
 
@@ -160,7 +169,7 @@ func TestAllowlistEnforcementMatrix(t *testing.T) {
 
 	compile := func(al *importedAllowlist) *Rule {
 		r := base
-		r.Allowlist = al
+		r.Allowlist = []*importedAllowlist{al}
 		return &r
 	}
 
@@ -250,4 +259,58 @@ func TestLoadRulesDirPicksUpToml(t *testing.T) {
 
 func mustRes(expr string) []*regexp.Regexp {
 	return []*regexp.Regexp{regexp.MustCompile(expr)}
+}
+
+// Regression for the bounty finding: multiple [[rules.allowlists]] tables
+// must be evaluated independently with their own conditions, never merged.
+func TestMultiAllowlistTablesIndependent(t *testing.T) {
+	rules, err := LoadGitleaksRules([]byte(`
+[[rules]]
+id = "x"
+description = "x"
+regex = '''secret_[a-z0-9]+'''
+
+[[rules.allowlists]]
+condition = "AND"
+paths = ['''^src/''']
+stopwords = ["nomatch"]
+
+[[rules.allowlists]]
+stopwords = ["zzzrealstop"]
+`), "audit.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := rules[0]
+	if len(rule.Allowlist) != 2 {
+		t.Fatalf("expected 2 independent blocks, got %d", len(rule.Allowlist))
+	}
+
+	detectAt := func(path, content string) int {
+		rule.Type = "regex"
+		for i := range rule.Patterns {
+			if err := rule.Patterns[i].compile(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		det := &RegexDetector{rules: []Rule{rule}}
+		f := &filesystem.File{Path: path, Content: []byte(content), Size: int64(len(content)), Mode: 0644}
+		return len(det.Detect(f))
+	}
+
+	// Case A: table1 AND unmet (stopword absent), table2 no match either.
+	// Gitleaks keeps this finding; flattened merge wrongly suppressed it.
+	if n := detectAt("src/a.go", "value = secret_abc123\n"); n == 0 {
+		t.Error("case A must survive: neither independent table matches fully")
+	}
+
+	// Case B: table2 stopword present anywhere -> suppressed regardless of path.
+	if n := detectAt("other/b.go", "value = secret_zzzrealstop42\n"); n != 0 {
+		t.Error("case B must be suppressed by the second table's stopword")
+	}
+
+	// Case C: full AND satisfaction on table1 -> suppressed.
+	if n := detectAt("src/c.go", "value = secret_nomatch99\n"); n != 0 {
+		t.Error("case C must be suppressed: AND table fully satisfied")
+	}
 }

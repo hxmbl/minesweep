@@ -91,7 +91,7 @@ func LoadGitleaksRules(data []byte, sourceName string) ([]Rule, error) {
 		return nil, fmt.Errorf("parse %s: %w", sourceName, err)
 	}
 
-	global := mergeGitleaksAllowlistSet(cfg.Allowlists, cfg.Allowlist, sourceName, "global")
+	global := buildAllowlistSet(cfg.Allowlists, cfg.Allowlist, sourceName, "global")
 
 	if cfg.Extend != nil && (cfg.Extend.UseDefault || cfg.Extend.Path != "") {
 		warnGitleaks(sourceName, "[extend]", "external config extension is not supported; only rules defined inline are loaded")
@@ -138,15 +138,10 @@ func LoadGitleaksRules(data []byte, sourceName string) ([]Rule, error) {
 			Patterns:    []Pattern{pattern},
 		}
 
-		if al := mergeGitleaksAllowlistSet(gr.Allowlists, gr.Allowlist, sourceName, gr.ID); al != nil {
-			rule.Allowlist = al
-		}
-		if global != nil {
-			if rule.Allowlist == nil {
-				rule.Allowlist = global
-			} else {
-				rule.Allowlist = orAllowlists(rule.Allowlist, global)
-			}
+		blocks := buildAllowlistSet(gr.Allowlists, gr.Allowlist, sourceName, gr.ID)
+		blocks = append(blocks, global...)
+		if len(blocks) > 0 {
+			rule.Allowlist = blocks
 		}
 
 		rules = append(rules, rule)
@@ -154,38 +149,24 @@ func LoadGitleaksRules(data []byte, sourceName string) ([]Rule, error) {
 	return rules, nil
 }
 
-// mergeGitleaksAllowlistSet compiles a set of allowlist tables (modern
-// plural and/or legacy singular) into one enforced block. Multiple tables
-// are OR-combined: gitleaks suppresses a finding when any allowlist matches.
-func mergeGitleaksAllowlistSet(set []GitleaksAllowlist, legacy *GitleaksAllowlist, source, subject string) *importedAllowlist {
+// buildAllowlistSet compiles every allowlist table (modern plural and/or
+// legacy singular) into an independent block. Gitleaks semantics: a finding
+// is suppressed when ANY block matches, and each block honors its own
+// condition internally — merging tables into one would corrupt their
+// individual AND/OR conditions.
+func buildAllowlistSet(set []GitleaksAllowlist, legacy *GitleaksAllowlist, source, subject string) []*importedAllowlist {
 	all := make([]GitleaksAllowlist, 0, len(set)+1)
 	all = append(all, set...)
 	if legacy != nil {
 		all = append(all, *legacy)
 	}
-	var merged *importedAllowlist
+	var blocks []*importedAllowlist
 	for i := range all {
-		compiled := compileGitleaksAllowlist(&all[i], source, subject)
-		if compiled == nil {
-			continue
+		if compiled := compileGitleaksAllowlist(&all[i], source, subject); compiled != nil {
+			blocks = append(blocks, compiled)
 		}
-		if merged == nil {
-			merged = compiled
-			continue
-		}
-		merged = orAllowlists(merged, compiled)
 	}
-	return merged
-}
-
-// orAllowlists combines two blocks so that either suppressing suppresses.
-func orAllowlists(a, b *importedAllowlist) *importedAllowlist {
-	return &importedAllowlist{
-		pathRes:    append(append([]*regexp.Regexp{}, a.pathRes...), b.pathRes...),
-		contentRes: append(append([]*regexp.Regexp{}, a.contentRes...), b.contentRes...),
-		stopwords:  append(append([]string{}, a.stopwords...), b.stopwords...),
-		targetLine: a.targetLine || b.targetLine,
-	}
+	return blocks
 }
 
 func warnGitleaks(source, subject, msg string) {
@@ -263,10 +244,22 @@ func compileGitleaksAllowlist(ga *GitleaksAllowlist, source, subject string) *im
 // suppressedByAllowlist applies gitleaks allowlist semantics: under OR, any
 // matching category suppresses; under AND, every populated category must
 // match. Categories that are empty are ignored entirely.
-func suppressedByAllowlist(al *importedAllowlist, filePath, value, line string) bool {
-	if al == nil {
-		return false
+func suppressedByAllowlist(blocks []*importedAllowlist, filePath, value, line string) bool {
+	for _, al := range blocks {
+		if al == nil {
+			continue
+		}
+		if suppressesBlock(al, filePath, value, line) {
+			return true
+		}
 	}
+	return false
+}
+
+// suppressesBlock applies one allowlist table's semantics: under OR (the
+// default), any matching category suppresses; under AND, every populated
+// category must match.
+func suppressesBlock(al *importedAllowlist, filePath, value, line string) bool {
 
 	pathHit := func() bool {
 		for _, re := range al.pathRes {

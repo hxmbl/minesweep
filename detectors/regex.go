@@ -31,7 +31,7 @@ type Rule struct {
 	FileFilter  *FileFilter `yaml:"file_filter,omitempty"`
 	// Allowlist holds gitleaks-style post-match suppression semantics for
 	// imported rules. Native rules use file_filter and inline ignores.
-	Allowlist *importedAllowlist `yaml:"-"`
+	Allowlist []*importedAllowlist `yaml:"-"`
 }
 
 type Pattern struct {
@@ -145,7 +145,7 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 				}
 				line, col := li.LineCol(m.Start)
 				sourceLine := strings.TrimSpace(li.LineText(line - 1))
-				if rule.Allowlist != nil &&
+				if len(rule.Allowlist) > 0 &&
 					suppressedByAllowlist(rule.Allowlist, file.Path, m.Value, sourceLine) {
 					continue
 				}
