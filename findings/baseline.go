@@ -5,9 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+// historyDisplaySuffix matches the "@sha12" suffix history mode appends to
+// file paths. Baselines must be namespace-agnostic: a working-tree baseline
+// entry has to match the same secret discovered through --history.
+var historyDisplaySuffix = regexp.MustCompile(`@[0-9a-f]{12}$`)
+
+func normalizeBaselineFile(file string) string {
+	return historyDisplaySuffix.ReplaceAllString(file, "")
+}
 
 type Baseline struct {
 	Version  string            `json:"version"`
@@ -54,7 +64,7 @@ func SaveBaseline(path string, b *Baseline) error {
 
 func FindingHash(f Finding) string {
 	entry := BaselineEntry{
-		File:   f.File,
+		File:   normalizeBaselineFile(f.File),
 		Line:   f.Line,
 		RuleID: f.RuleID,
 		Value:  f.Value,
@@ -88,7 +98,7 @@ func UpdateBaseline(baseline *Baseline, findings []Finding) {
 	}
 	for _, f := range findings {
 		hash := FindingHash(f)
-		baseline.Findings[hash] = fmt.Sprintf("%s:%d", f.File, f.Line)
+		baseline.Findings[hash] = fmt.Sprintf("%s:%d", normalizeBaselineFile(f.File), f.Line)
 	}
 }
 

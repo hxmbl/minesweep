@@ -1016,3 +1016,61 @@ func TestHashConsistency(t *testing.T) {
 		t.Fatal("different content should produce different hash")
 	}
 }
+
+// Regression: skip-dir names matched against FULL paths meant scanning
+// /tmp/myrepo (or any checkout under a directory named like a skip dir)
+// silently dropped every file. Ancestors outside the scan root must never
+// count; only directories inside it do.
+func TestWalkAncestorNamedLikeSkipDir(t *testing.T) {
+	outer := filepath.Join(t.TempDir(), "vendor") // ancestor named like a skip dir
+	root := filepath.Join(outer, "actual", "project")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "real.txt"), []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	innerVendor := filepath.Join(root, "vendor")
+	if err := os.MkdirAll(innerVendor, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(innerVendor, "dep.txt"), []byte("dep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var st WalkStats
+	files, err := WalkWithOptions(root, WalkOption{Stats: &st})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Path != filepath.Join(root, "real.txt") {
+		for _, f := range files {
+			t.Logf("kept: %s", f.Path)
+		}
+		t.Fatalf("ancestor name must not trigger skipping; kept=%d", len(files))
+	}
+	if st.SkippedVendor != 1 || st.Kept != 1 {
+		t.Errorf("stats = %+v; want vendor=1 kept=1", st)
+	}
+}
+
+func TestWalkStatsBuckets(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "a_test.go"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(root, "keep.txt"), []byte("x"), 0644)
+	vd := filepath.Join(root, "node_modules")
+	os.MkdirAll(vd, 0755)
+	os.WriteFile(filepath.Join(vd, "dep.js"), []byte("x"), 0644)
+
+	var st WalkStats
+	files, err := WalkWithOptions(root, WalkOption{Stats: &st})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || st.SkippedTest != 1 || st.SkippedVendor != 1 || st.Kept != 1 {
+		t.Errorf("files=%d stats=%+v", len(files), st)
+	}
+	if st.TotalSkipped() != 2 {
+		t.Errorf("TotalSkipped=%d, want 2", st.TotalSkipped())
+	}
+}

@@ -61,6 +61,7 @@ type Engine struct {
 	// Number of files and bytes examined during the most recent Run
 	filesScanned atomic.Int64
 	bytesScanned atomic.Int64
+	filesSkipped atomic.Int64
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -186,7 +187,8 @@ func dirOrEmbedded(dir, embeddedSubtree string) (fs.FS, bool) {
 // filtering, policy evaluation, and report generation. Filtering deliberately
 // happens BEFORE evaluation so that baselines and suppression patterns match
 // raw secret values, not redacted ones.
-func (e *Engine) finalize(allFindings []findings.Finding) (*findings.RiskReport, error) {
+func (e *Engine) finalize(root string, allFindings []findings.Finding) (*findings.RiskReport, error) {
+	allFindings = relativizeFindings(root, allFindings)
 	filtered, err := e.filterBaseline(allFindings)
 	if err != nil {
 		return nil, err
@@ -248,6 +250,7 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	if rep != nil {
 		rep.FilesScanned = int(e.filesScanned.Load())
 		rep.BytesScanned = e.bytesScanned.Load()
+		rep.FilesSkipped = int(e.filesSkipped.Load())
 		rep.DurationMs = time.Since(start).Milliseconds()
 	}
 	return rep, err
@@ -320,7 +323,7 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 	}
 	e.bytesScanned.Store(bytesTotal)
 	allFindings := e.detectParallel(files)
-	return e.finalize(allFindings)
+	return e.finalize(root, allFindings)
 }
 
 func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
@@ -335,7 +338,7 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 	e.filesScanned.Store(1)
 	e.bytesScanned.Store(file.Size)
 	allFindings := e.detect(file)
-	return e.finalize(allFindings)
+	return e.finalize(filepath.Dir(path), allFindings)
 }
 
 // runHistory scans every unique blob reachable from all refs. Cost scales
@@ -384,8 +387,10 @@ func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
 			return fetcher.Fetch(obj.SHA)
 		}))
 	}
-	if skippedOversize > 0 && e.config.Verbose {
-		fmt.Fprintf(os.Stderr, "minesweep: skipped %d history objects larger than %d MB\n", skippedOversize, maxFileSize/1024/1024)
+	if skippedOversize > 0 {
+		fmt.Fprintf(os.Stderr, "minesweep: note: %d history objects larger than %d MB were not scanned\n",
+			skippedOversize, maxFileSize/1024/1024)
+		e.filesSkipped.Add(int64(skippedOversize))
 	}
 
 	e.filesScanned.Store(int64(len(files)))
@@ -393,7 +398,7 @@ func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
 	allFindings := e.detectParallel(files)
 
 	attributed := e.attributeHistory(root, allFindings, displaySHA)
-	return e.finalize(attributed)
+	return e.finalize(root, attributed)
 }
 
 // attributeHistory resolves the introducing commit for each flagged blob.
@@ -451,14 +456,17 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 		maxFileSize = e.config.MaxFileSizeMB * 1024 * 1024
 	}
 
+	var stats filesystem.WalkStats
 	files, err := filesystem.WalkWithOptions(root, filesystem.WalkOption{
 		MaxFileSize:      maxFileSize,
 		SkipExtensions:   e.config.SkipExtensions,
 		IncludeTestFiles: e.config.IncludeTestFiles,
+		Stats:            &stats,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("walk directory: %w", err)
 	}
+	e.filesSkipped.Store(int64(stats.TotalSkipped()))
 
 	// Apply max files limit
 	if e.config.MaxFiles > 0 && len(files) > e.config.MaxFiles {
@@ -473,7 +481,27 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 	}
 	e.bytesScanned.Store(bytesTotal)
 	allFindings := e.detectParallel(files)
-	return e.finalize(allFindings)
+	return e.finalize(root, allFindings)
+}
+
+// relativizeFindings rewrites finding paths relative to the scanned root so
+// output is stable regardless of where the repository lives on disk, and so
+// baselines match across machines and across working-tree/history modes.
+func relativizeFindings(root string, fs []findings.Finding) []findings.Finding {
+	rootWithSep := root
+	if !strings.HasSuffix(root, string(filepath.Separator)) {
+		rootWithSep += string(filepath.Separator)
+	}
+	for i := range fs {
+		if fs[i].File == root {
+			fs[i].File = filepath.Base(fs[i].File)
+			continue
+		}
+		if strings.HasPrefix(fs[i].File, rootWithSep) {
+			fs[i].File = strings.TrimPrefix(fs[i].File, rootWithSep)
+		}
+	}
+	return fs
 }
 
 func (e *Engine) detect(file *filesystem.File) []findings.Finding {

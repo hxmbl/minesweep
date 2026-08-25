@@ -54,6 +54,10 @@ func WriteText(w io.Writer, report *findings.RiskReport, opts TextOptions) error
 
 func writeCleanReport(tw *textWriter, p palette, report *findings.RiskReport) error {
 	tw.writeln(p.green("✓") + " No secrets or sensitive data detected.")
+	if report.FilesSkipped > 0 {
+		tw.writeln(p.dim(fmt.Sprintf("  Note: %d %s skipped by filters and not scanned.",
+			report.FilesSkipped, pluralWord(report.FilesSkipped, "file"))))
+	}
 	if report.FilesScanned > 0 {
 		stats := fmt.Sprintf("%d file", report.FilesScanned)
 		if report.FilesScanned != 1 {
@@ -82,6 +86,11 @@ func writeHeader(tw *textWriter, p palette, report *findings.RiskReport) {
 	}
 	tw.writefmt("%s\n\n", pluralize(report.Findings, "finding"))
 	writeCounts(tw, p, groupBySeverity(report.Findings))
+	if report.FilesSkipped > 0 {
+		tw.writeln(p.dim(fmt.Sprintf(
+			"note: %d %s skipped by filters (size/test/vendor) and were not scanned",
+			report.FilesSkipped, pluralWord(report.FilesSkipped, "file"))))
+	}
 	tw.writeln("")
 }
 
@@ -302,6 +311,13 @@ func wrapText(s string, indent int) string {
 	}
 	b.WriteString(line)
 	return b.String()
+}
+
+func pluralWord(n int, noun string) string {
+	if n == 1 {
+		return noun
+	}
+	return noun + "s"
 }
 
 func shortHash(sha string) string {

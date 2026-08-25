@@ -118,3 +118,48 @@ func TestRedactMasksEvidenceFields(t *testing.T) {
 func testRedactPolicies() []policy.PolicyRule {
 	return []policy.PolicyRule{{Tags: []string{"*"}, Action: findings.ActionRedact}}
 }
+
+// Baselines recorded in working-tree mode must match the same secret found
+// through history mode (whose File carries an "@sha" suffix).
+func TestBaselineCrossModeMatching(t *testing.T) {
+	dir := t.TempDir()
+	gitRun(t, dir, "init", "-q", "--initial-branch=main", ".")
+	if err := os.WriteFile(filepath.Join(dir, "k.env"), []byte("aws_access_key_id = AKIAIOSFODNN7EXAMPLE\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", "k.env")
+	gitRun(t, dir, "commit", "-qm", "add key")
+
+	// Record baseline in working-tree mode.
+	baseDir := t.TempDir()
+	baselinePath := filepath.Join(baseDir, "b.json")
+	wtEng, err := New(Config{BaselineFile: baselinePath, UpdateBaseline: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wtRep, err := wtEng.Run(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wtRep.Findings) == 0 {
+		t.Fatal("expected working-tree findings to baseline")
+	}
+
+	// History scan with the same baseline: the key is old news.
+	histEng, err := New(Config{HistoryMode: true, BaselineFile: baselinePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	histRep, err := histEng.Run(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range histRep.Findings {
+		if f.RuleID == "aws-access-key-id" {
+			t.Errorf("baselined secret leaked through history mode: %+v", f.File)
+		}
+	}
+	if len(histRep.Findings) > 0 {
+		t.Errorf("unexpected non-baselined findings: %d", len(histRep.Findings))
+	}
+}
