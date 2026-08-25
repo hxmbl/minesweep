@@ -144,8 +144,8 @@ func writeGroups(tw *textWriter, p palette, opts TextOptions, groups []severityG
 func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Finding) {
 	action := actionLabel(p, f.Action)
 	conf := fmt.Sprintf("%.0f%%", f.Confidence*findings.ConfidenceScale)
-	tw.writefmt("  %s %s\n", action, p.bold(f.Type))
-	loc := fmt.Sprintf("%s:%d · %s confident", f.File, f.Line, conf)
+	tw.writefmt("  %s %s\n", action, p.bold(SanitizeTerminal(f.Type)))
+	loc := fmt.Sprintf("%s:%d · %s confident", SanitizeTerminal(f.File), f.Line, conf)
 	if len(f.Commit) >= 7 {
 		loc += fmt.Sprintf(" · commit %s", shortHash(f.Commit))
 	}
@@ -166,7 +166,7 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 		if len(val) > 60 {
 			val = val[:60] + "..."
 		}
-		tw.writefmt("          Value: %s\n", val)
+		tw.writefmt("          Value: %s\n", SanitizeTerminal(val))
 	}
 	if txt := remediationFor(f); txt != "" {
 		tw.writefmt("          %s %s\n", p.cyan("↳"), wrapText(txt, 12))
@@ -176,7 +176,7 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 	if opts.Verbose && f.Context != "" {
 		tw.writeln(p.dim("          Context:"))
 		for _, line := range splitLines(f.Context) {
-			tw.writefmt("            %s\n", p.dim(line))
+			tw.writefmt("            %s\n", p.dim(SanitizeTerminal(line)))
 		}
 	}
 }
@@ -196,7 +196,7 @@ func writeBoundaries(tw *textWriter, p palette, report *findings.RiskReport, opt
 		if report.SafeToShare[b] {
 			status = p.green("✓ Safe")
 		}
-		tw.writefmt("  %-20s %s\n", b+":", status)
+		tw.writefmt("  %-20s %s\n", SanitizeTerminal(b)+":", status)
 	}
 	tw.writeln("")
 }

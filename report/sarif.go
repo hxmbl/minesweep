@@ -98,12 +98,12 @@ func WriteSARIF(w io.Writer, report *findings.RiskReport, toolVersion string) er
 			RuleID: f.RuleID,
 			Level:  severityToSARIFLevel(f.Severity),
 			Message: SARIFMessage{
-				Text: fmt.Sprintf("%s: %s (confidence: %.0f%%)", f.Type, f.Reason, f.Confidence*findings.ConfidenceScale),
+				Text: fmt.Sprintf("%s: %s (confidence: %.0f%%)", SanitizeTerminal(f.Type), SanitizeTerminal(f.Reason), f.Confidence*findings.ConfidenceScale),
 			},
 			Locations: []SARIFLocation{
 				{
 					PhysicalLocation: SARIFPhysicalLocation{
-						ArtifactLocation: SARIFArtifactLocation{URI: f.File},
+						ArtifactLocation: SARIFArtifactLocation{URI: SanitizeTerminal(f.File)},
 						Region: SARIFRegion{
 							StartLine:   f.Line,
 							StartColumn: f.Column,

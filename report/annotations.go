@@ -46,8 +46,8 @@ func GenerateAnnotations(findingsList []findings.Finding, minSeverity findings.S
 func WriteGitHubAnnotations(w io.Writer, annotations []GitHubAnnotation) error {
 	for _, a := range annotations {
 		// Sanitize to prevent log injection
-		safePath := unsafeChars.ReplaceAllString(a.Path, "_")
-		safeMsg := unsafeChars.ReplaceAllString(a.Message, " ")
+		safePath := unsafeChars.ReplaceAllString(SanitizeTerminal(a.Path), "_")
+		safeMsg := unsafeChars.ReplaceAllString(SanitizeTerminal(a.Message), " ")
 		// Sanitize level to only valid GitHub Actions annotation levels
 		level := "warning"
 		if a.Level == "error" {
