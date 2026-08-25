@@ -595,31 +595,31 @@ func hasPreCommitHook(repoTop string) bool {
 
 const preCommitHook = `#!/bin/sh
 # MineSweep pre-commit hook
-# Scans staged files for secrets before commit
+# Scans staged files for secrets before every commit.
 
-# Find minesweep binary
-MINESWEEP=""
-for candidate in minesweep "$(git rev-parse --show-toplevel)/minesweep" "$(which minesweep 2>/dev/null)"; do
-    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-        MINESWEEP="$candidate"
-        break
+# Resolve the scanner binary. We deliberately never execute a minesweep
+# binary from inside the repository: a malicious checkout could ship one.
+if [ -n "$MINESWEEP_BIN" ] && [ -x "$MINESWEEP_BIN" ]; then
+    MINESWEEP="$MINESWEEP_BIN"
+elif command -v minesweep >/dev/null 2>&1; then
+    MINESWEEP="$(command -v minesweep)"
+else
+    if [ "$MINESWEEP_HOOK_ALLOW_MISSING" = "1" ]; then
+        echo "minesweep: not found on PATH; skipping pre-commit scan (MINESWEEP_HOOK_ALLOW_MISSING=1)" >&2
+        exit 0
     fi
-done
-
-if [ -z "$MINESWEEP" ]; then
-    echo "minesweep: binary not found, skipping pre-commit hook"
-    exit 0
+    echo "minesweep: not found on PATH - commit blocked (fail-closed)." >&2
+    echo "  install:      brew install hxmbl/tap/minesweep" >&2
+    echo "  or point at:  export MINESWEEP_BIN=/path/to/minesweep" >&2
+    echo "  soft-skip:    export MINESWEEP_HOOK_ALLOW_MISSING=1" >&2
+    exit 1
 fi
 
-# Get staged files
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
-if [ -z "$STAGED_FILES" ]; then
-    exit 0
-fi
+[ -z "$STAGED_FILES" ] && exit 0
 
 echo "minesweep: scanning staged files..."
 
-# Create temp directory with staged files
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -628,12 +628,11 @@ while IFS= read -r file; do
         mkdir -p "$TMPDIR/$(dirname "$file")"
         git show ":$file" > "$TMPDIR/$file" 2>/dev/null
     fi
-done <<EOF
+done <<GITFILES
 $STAGED_FILES
-EOF
+GITFILES
 
-# Run minesweep on extracted staged files
-"$MINESWEEP" --fail-on medium "$TMPDIR"
+"$MINESWEEP" --fail-on medium --no-pager --color never "$TMPDIR"
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then
