@@ -83,7 +83,7 @@ jobs:
           name: minesweep-linux-amd64
           path: minesweep
 
-build-macos:
+  build-macos:
     name: Build (macOS)
     runs-on: macos-latest
     needs: [test, lint]
