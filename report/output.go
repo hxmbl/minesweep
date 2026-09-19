@@ -17,9 +17,10 @@ func WriteJSON(w io.Writer, report *findings.RiskReport) error {
 }
 
 type TextOptions struct {
-	Verbose bool
-	Color   ColorMode
-	Hints   []string
+	Verbose  bool
+	Color    ColorMode
+	Hints    []string
+	Snippets bool
 }
 
 type severityGroup struct {
@@ -177,6 +178,62 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 	}
 	if f.CommitSummary != "" {
 		tw.writefmt("          %s\n", p.dim(wrapText("\""+f.CommitSummary+"\"", 12)))
+	}
+
+	if opts.Snippets && f.SourceLine != "" {
+		tw.writeln(p.dim("          Snippet:"))
+		// Show context if available, otherwise just the source line
+		if f.Context != "" {
+			lines := splitLines(f.Context)
+			// Find the line with "> " prefix to identify the matching line
+			matchingLineIndex := -1
+			for i, line := range lines {
+				if strings.HasPrefix(line, "> ") {
+					matchingLineIndex = i
+					break
+				}
+			}
+			// Calculate starting line number based on the finding's line and matching line index
+			startLine := f.Line - matchingLineIndex
+			if startLine < 1 {
+				startLine = 1
+			}
+			for i, line := range lines {
+				// Remove the existing prefix and censor the line
+				trimmedLine := strings.TrimPrefix(line, "> ")
+				trimmedLine = strings.TrimPrefix(trimmedLine, "  ")
+				censoredLine := censorAllValues(trimmedLine, f.Value)
+				lineNum := startLine + i
+				prefix := "  "
+				if i == matchingLineIndex {
+					prefix = "> "
+				}
+				// Sanitize first to remove any malicious escape sequences
+				sanitizedLine := SanitizeTerminal(censoredLine)
+				// Then apply syntax highlighting if color is enabled
+				var highlightedLine string
+				if opts.Color != ColorNever {
+					highlightedLine = HighlightSyntax(sanitizedLine, f.File)
+				} else {
+					highlightedLine = sanitizedLine
+				}
+				tw.writefmt("            %s%4d: %s\n", p.dim(prefix), lineNum, highlightedLine)
+			}
+		} else {
+			// No context available, just show the source line
+			snippet := f.SourceLine
+			snippet = censorAllValues(snippet, f.Value)
+			// Sanitize first to remove any malicious escape sequences
+			sanitizedLine := SanitizeTerminal(snippet)
+			// Then apply syntax highlighting if color is enabled
+			var highlightedLine string
+			if opts.Color != ColorNever {
+				highlightedLine = HighlightSyntax(sanitizedLine, f.File)
+			} else {
+				highlightedLine = sanitizedLine
+			}
+			tw.writefmt("            >%4d: %s\n", f.Line, highlightedLine)
+		}
 	}
 
 	if opts.Verbose && f.Value != "" {

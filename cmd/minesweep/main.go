@@ -39,6 +39,7 @@ var (
 	outputSARIF     bool
 	outputDashboard bool
 	showAnnotations bool
+	showSnippets    bool
 	colorMode       string
 	benchMode       bool
 	benchRuns       int
@@ -114,6 +115,7 @@ func main() {
 	root.Flags().BoolVarP(&outputSARIF, "sarif", "", false, "Output as SARIF (for CI/CD)")
 	root.Flags().BoolVarP(&outputDashboard, "dashboard", "", false, "Show rule health dashboard")
 	root.Flags().BoolVarP(&showAnnotations, "annotations", "", false, "Show GitHub Actions annotations")
+	root.Flags().BoolVarP(&showSnippets, "snippets", "", false, "Show code snippets with censored sensitive values")
 	root.Flags().StringVarP(&colorMode, "color", "", "auto", "When to colorize output: auto, always, never")
 	root.Flags().BoolVarP(&noPager, "no-pager", "", false, "Print text reports directly instead of paging")
 	root.Flags().BoolVarP(&benchMode, "benchmark", "", false, "Time full scans instead of writing a report")
@@ -538,9 +540,10 @@ func scanAndReport(scanPath string) (int, error) {
 		}
 	} else {
 		opts := report.TextOptions{
-			Verbose: cfg.Verbose,
-			Color:   report.ParseColorMode(colorMode),
-			Hints:   nextStepHints(scanPath, reportData),
+			Verbose:  cfg.Verbose,
+			Color:    report.ParseColorMode(colorMode),
+			Hints:    nextStepHints(scanPath, reportData),
+			Snippets: showSnippets,
 		}
 		if err := renderTextInteractive(reportData, &opts); err != nil {
 			return 0, err
@@ -577,6 +580,10 @@ func nextStepHints(scanPath string, data *findings.RiskReport) []string {
 
 	if !cfg.Verbose {
 		hints = append(hints, "Show matched values and context:\n      minesweep -v .")
+	}
+
+	if hasFindings && !showSnippets && len(hints) < 3 {
+		hints = append(hints, "Show code snippets with censored values:\n      minesweep --snippets .")
 	}
 
 	if len(hints) > 3 {

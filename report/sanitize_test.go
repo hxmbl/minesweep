@@ -82,3 +82,48 @@ func TestSARIFEscapesMessageAndURI(t *testing.T) {
 		t.Fatalf("raw ESC reached SARIF output:\n%q", out)
 	}
 }
+
+func TestCensorValue(t *testing.T) {
+	cases := []struct{ line, value, want string }{
+		{
+			line:  "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+			value: "AKIAIOSFODNN7EXAMPLE",
+			want:  "export AWS_ACCESS_KEY_ID=AKIAIOSF.._[CENSORED]",
+		},
+		{
+			line:  "api_key=sk_1234567890abcdefghijklmnop",
+			value: "sk_1234567890abcdefghijklmnop",
+			want:  "api_key=sk_12345.._[CENSORED]",
+		},
+		{
+			line:  "password=hunter2",
+			value: "hunter2",
+			want:  "password=hunt.._[CENSORED]",
+		},
+		{
+			line:  "key=ab",
+			value: "ab",
+			want:  "key=ab.._[CENSORED]",
+		},
+		{
+			line:  "export KEY=value",
+			value: "notfound",
+			want:  "export KEY=value",
+		},
+		{
+			line:  "",
+			value: "secret",
+			want:  "",
+		},
+		{
+			line:  "line",
+			value: "",
+			want:  "line",
+		},
+	}
+	for _, c := range cases {
+		if got := CensorValue(c.line, c.value); got != c.want {
+			t.Errorf("CensorValue(%q, %q) = %q, want %q", c.line, c.value, got, c.want)
+		}
+	}
+}
