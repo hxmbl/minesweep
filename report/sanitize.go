@@ -21,16 +21,27 @@ func SanitizeTerminal(s string) string {
 	}
 
 	var b strings.Builder
-	// escape characters into b...
+	b.Grow(len(s))
+
+	for _, r := range s {
+		switch {
+		case r == 0x1b:
+			b.WriteString(`\e`)
+		case r == 0x7f:
+			b.WriteString("^?")
+		case r < 0x20 && r != '\n' && r != '\t':
+			b.WriteByte('^')
+			b.WriteByte(byte(r) + '@')
+		default:
+			b.WriteRune(r)
+		}
+	}
 
 	return b.String()
 }
 
 func needsEscape(r rune) bool {
-	if r == 0x1b || r == 0x7f {
-		return true
-	}
-	return false
+	return (r >= 0 && r < 0x20 && r != '\n' && r != '\t') || r == 0x7f
 }
 
 // CensorValue replaces every occurrence of a sensitive value in a source
@@ -40,15 +51,15 @@ func CensorValue(line, value string) string {
 		return line
 	}
 
-	return strings.ReplaceAll(line, value, "[REDACTED]")
+	return strings.ReplaceAll(line, value, censoredValue(value))
 }
 
 func censoredValue(value string) string {
 	switch {
 	case len(value) > 8:
-		return value[:8] + "..*[CENSORED]"
+		return value[:8] + ".._[CENSORED]"
 	case len(value) > 4:
-		return value[:4] + "..*[CENSORED]"
+		return value[:4] + ".._[CENSORED]"
 	default:
 		return value[:2] + ".._[CENSORED]"
 	}
