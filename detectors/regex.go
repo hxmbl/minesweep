@@ -65,27 +65,28 @@ type RegexDetector struct {
 }
 
 func NewRegexDetector(rulesDir string) (*RegexDetector, error) {
-	var (
-		rules []Rule
-		err   error
-	)
+	var rules []Rule
+
+	// Embedded defaults are the base signal: a partial on-disk or user rules
+	// directory must extend them, not replace them wholesale — dropping a
+	// file could silently remove coverage the user never asked to remove.
+	// Overrides (on-disk, then user) replace rules that share an ID.
+	embeddedRules, embeddedErr := loadEmbeddedRules()
+	if embeddedErr != nil {
+		return nil, embeddedErr
+	}
 	if rulesDir != "" {
 		if info, statErr := os.Stat(rulesDir); statErr == nil && info.IsDir() {
-			rules, err = loadRules(rulesDir, "regex")
-			if err != nil {
-				return nil, err
+			diskRules, diskErr := loadRules(rulesDir, "regex")
+			if diskErr != nil {
+				return nil, diskErr
 			}
+			rules = mergeRules(embeddedRules, diskRules)
 		} else {
-			// No on-disk rules directory: fall back to the embedded defaults.
-			fsys, subErr := fs.Sub(minesweep.Assets, "rules")
-			if subErr != nil {
-				return nil, subErr
-			}
-			rules, err = loadRulesFS(fsys, "regex")
-			if err != nil {
-				return nil, fmt.Errorf("load embedded rules: %w", err)
-			}
+			rules = embeddedRules
 		}
+	} else {
+		rules = embeddedRules
 	}
 
 	userRulesDir := getUserRulesDir()
@@ -99,6 +100,18 @@ func NewRegexDetector(rulesDir string) (*RegexDetector, error) {
 	}
 
 	return &RegexDetector{rules: rules}, nil
+}
+
+func loadEmbeddedRules() ([]Rule, error) {
+	fsys, err := fs.Sub(minesweep.Assets, "rules")
+	if err != nil {
+		return nil, fmt.Errorf("embedded rules: %w", err)
+	}
+	rules, err := loadRulesFS(fsys, "regex")
+	if err != nil {
+		return nil, fmt.Errorf("load embedded rules: %w", err)
+	}
+	return rules, nil
 }
 
 func (d *RegexDetector) Name() string {
@@ -179,11 +192,6 @@ func (p *Pattern) compile() error {
 		return fmt.Errorf("negative capture_group (%d) is not allowed", p.CaptureGroup)
 	}
 
-	// Check for potentially dangerous regex patterns that could cause ReDoS
-	if isDangerousRegex(p.Regex) {
-		return fmt.Errorf("regex pattern %q appears to be vulnerable to ReDoS (catastrophic backtracking)", p.Regex)
-	}
-
 	re, err := regexp.Compile(p.Regex)
 	if err != nil {
 		return fmt.Errorf("compile pattern %q: %w", p.Regex, err)
@@ -193,65 +201,11 @@ func (p *Pattern) compile() error {
 	return nil
 }
 
-// isDangerousRegex checks for patterns that are known to cause ReDoS
-func isDangerousRegex(pattern string) bool {
-	// Patterns that can cause catastrophic backtracking:
-	// 1. Nested quantifiers like (a+)+ or (a*)*a
-	// 2. Overlapping alternations with quantifiers
-	// 3. Multiple adjacent quantifiers
-
-	dangerousPatterns := []string{
-		`\(\s*[^)]+\s*\+\s*\)\s*\+`, // (a+)+
-		`\(\s*[^)]+\s*\*\s*\)\s*\*`, // (a*)*
-		`\(\s*[^)]+\s*\+\s*\)\s*\{`, // (a+){n,m}
-		`\(\s*[^)]+\s*\*\s*\)\s*\+`, // (a*)+
-		`\+\s*\+`,                   // ++
-		`\*\s*\*`,                   // **
-		`\?\s*\+`,                   // ?+
-		`\+\s*\?`,                   // +?
-		`\*\s*\+`,                   // *+
-		`\+\s*\*`,                   // +*
-	}
-
-	for _, dangerous := range dangerousPatterns {
-		if matched, _ := regexp.MatchString(dangerous, pattern); matched {
-			return true
-		}
-	}
-
-	// Check for excessive quantifier nesting.
-	// Count the depth of nested groups/character classes, ignoring escaped
-	// characters and quantifier braces (e.g. {2,3}), which otherwise inflate
-	// the depth for perfectly sane patterns like AKIA[0-9A-Z]{16}.
-	depth := 0
-	maxDepth := 0
-	escaped := false
-	for i := 0; i < len(pattern); i++ {
-		c := pattern[i]
-		if escaped {
-			escaped = false
-			continue
-		}
-		switch c {
-		case '\\':
-			escaped = true
-		case '(', '[':
-			depth++
-			if depth > maxDepth {
-				maxDepth = depth
-			}
-		case ')', ']':
-			depth--
-		}
-	}
-
-	// If we have deeply nested patterns with quantifiers, flag as potentially dangerous
-	if maxDepth > 5 {
-		return true
-	}
-
-	return false
-}
+// isDangerousRegex has been removed. Go's regexp package uses RE2, which runs
+// in linear time and space for every input, so "catastrophic backtracking"
+// cannot occur; the old heuristic also rejected valid rules ((a+)+$ etc.).
+// Invalid patterns such as possessive quantifiers (a++) are still caught by
+// regexp.Compile itself, which fails on unsupported constructs.
 
 // safeMatch runs a regex match. Go's regexp uses RE2 (linear time), so a
 // wall-clock timeout is unnecessary and caused false negatives on large files
@@ -343,6 +297,12 @@ func loadRulesFS(rulesFS fs.FS, ruleType string) ([]Rule, error) {
 		for i := range fileRules {
 			if fileRules[i].Type != "regex" {
 				continue
+			}
+			// A typo'd severity is a silent downgrade in policy terms; make
+			// it visible while still defaulting to info at scan time.
+			if !findings.IsValidSeverity(fileRules[i].Severity) {
+				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s) has invalid severity %q, treating as info\n",
+					fileRules[i].ID, entry.Name(), fileRules[i].Severity)
 			}
 			failed := 0
 			for j := range fileRules[i].Patterns {

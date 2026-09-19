@@ -92,7 +92,10 @@ func isSuppressed(f Finding, s Suppression, re *regexp.Regexp) bool {
 	}
 	if s.File != "" {
 		constrained = true
-		if f.File != s.File {
+		// Normalize both sides so a suppression recorded against the
+		// working-tree path also matches a history-mode finding whose path
+		// carries an "@sha12" suffix.
+		if normalizeBaselineFile(f.File) != normalizeBaselineFile(s.File) {
 			return false
 		}
 	}
@@ -104,7 +107,8 @@ func isSuppressed(f Finding, s Suppression, re *regexp.Regexp) bool {
 	}
 	if s.Pattern != "" {
 		constrained = true
-		if re == nil || !(re.MatchString(f.Value) || re.MatchString(f.File)) {
+		if re == nil ||
+			!(re.MatchString(f.Value) || re.MatchString(normalizeBaselineFile(f.File))) {
 			return false
 		}
 	}

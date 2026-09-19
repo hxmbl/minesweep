@@ -9,8 +9,10 @@ import (
 	"minesweep/filesystem"
 )
 
-// TestRegression_ReDoS tests that dangerous regex patterns are rejected
-// (Issue 4.4)
+// TestRegression_ReDoS verifies ReDoS-prone-looking patterns are handled
+// safely. Go's regexp runs on RE2 (linear time), so nested quantifiers like
+// (a+)+ compile and match in linear time; only genuinely invalid constructs
+// (possessive quantifiers) fail compilation. (Issue 4.4)
 func TestRegression_ReDoS(t *testing.T) {
 	testCases := []struct {
 		name       string
@@ -20,14 +22,14 @@ func TestRegression_ReDoS(t *testing.T) {
 		{"safe pattern", `[a-z]+`, false},
 		{"safe pattern with quantifier", `[a-z]{5,10}`, false},
 		{"safe pattern with star", `[a-z]*`, false},
-		{"ReDoS pattern 1", `(a+)+$`, true},
-		{"ReDoS pattern 2", `(a*)*a`, true},
-		{"ReDoS pattern 3", `(a+){1,}`, true},
-		{"ReDoS pattern 4", `(a*)+`, true},
-		{"ReDoS pattern 5", `a++`, true},
-		{"ReDoS pattern 6", `a**`, true},
-		{"ReDoS pattern 7", `a*+`, true},
-		{"ReDoS pattern 8", `a+*`, true},
+		{"nested quantifier 1", `(a+)+$`, false},
+		{"nested quantifier 2", `(a*)*a`, false},
+		{"nested quantifier 3", `(a+){1,}`, false},
+		{"nested quantifier 4", `(a*)+`, false},
+		{"possessive plus", `a++`, true},
+		{"double star", `a**`, true},
+		{"possessive star-plus", `a*+`, true},
+		{"plus then star", `a+*`, true},
 	}
 
 	for _, tc := range testCases {

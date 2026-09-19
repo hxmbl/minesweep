@@ -16,6 +16,7 @@ type RiskReport struct {
 	DurationMs   int64           `yaml:"duration_ms,omitempty" json:"duration_ms,omitempty"`
 	BytesScanned int64           `yaml:"bytes_scanned,omitempty" json:"bytes_scanned,omitempty"`
 	FilesSkipped int             `yaml:"files_skipped,omitempty" json:"files_skipped,omitempty"`
+	FilesFailed  int             `yaml:"files_failed,omitempty" json:"files_failed,omitempty"`
 }
 
 func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {

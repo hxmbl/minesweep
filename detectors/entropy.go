@@ -92,6 +92,13 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 			if entropy < entropyMedium {
 				continue
 			}
+			// Keywordless strings in the medium band are mostly UUIDs,
+			// hashes, and diff noise — high entropy but not secrets. Only
+			// report them once they are unambiguously high, or carry a
+			// secret-ish keyword.
+			if !hasKeyword && entropy < entropyHigh {
+				continue
+			}
 
 			confidence := computeEntropyConfidence(entropy, len(word), hasKeyword)
 			if confidence < scoreMinConfidence {

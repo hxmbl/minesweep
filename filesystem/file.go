@@ -164,6 +164,21 @@ func (f *File) GetContent() ([]byte, error) {
 	return f.contentLocked()
 }
 
+// UseLoader replaces the on-disk content source with loader (used to serve
+// staged index blobs instead of the working tree). The loader runs lazily, at
+// most once, when a detector first requests content.
+func (f *File) UseLoader(loader func() ([]byte, error)) {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+	f.loader = loader
+	f.Content = nil
+	f.contentErr = nil
+	f.contentLoaded = false
+	f.Hash = ""
+	f.lowered = nil
+	f.lineIdx = nil
+}
+
 // NewBlobFile creates a File whose content is produced by loader rather than
 // read from disk — used for git history blobs. The loader runs lazily, at
 // most once, when a detector first requests content.

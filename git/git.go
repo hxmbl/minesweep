@@ -63,11 +63,27 @@ func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 		return nil, fmt.Errorf("not a git repository: %s", root)
 	}
 
-	cmd := exec.Command("git", "diff", "--name-only", sanitizedBranch+"...HEAD") //nolint:gosec // branch name sanitized by SanitizeBranchName
-	cmd.Dir = top
-	out, err := cmd.Output()
-	if err != nil {
-		cmd = exec.Command("git", "diff", "--name-only", sanitizedBranch) //nolint:gosec // branch name sanitized by SanitizeBranchName
+	// `git diff <branch>...HEAD` exits 0 with EMPTY output when the base
+	// branch does not exist, silently scanning nothing; that default must be
+	// distinguishable from a real empty diff.
+	probe := exec.Command("git", "rev-parse", "--verify", "--quiet", sanitizedBranch+"^{commit}") //nolint:gosec // branch name sanitized by SanitizeBranchName
+	probe.Dir = top
+	baseExists := probe.Run() == nil
+
+	var out []byte
+	if baseExists {
+		cmd := exec.Command("git", "diff", "--name-only", sanitizedBranch+"...HEAD") //nolint:gosec // branch name sanitized by SanitizeBranchName
+		cmd.Dir = top
+		out, err = cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("git diff --name-only %q: %w", sanitizedBranch, err)
+		}
+	} else {
+		// No base branch exists (single-commit checkout, unborn main):
+		// diff from the empty tree so the whole HEAD is scanned as
+		// "changed". The empty-tree object hash is a git constant.
+		const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+		cmd := exec.Command("git", "diff", "--name-only", emptyTree, "HEAD")
 		cmd.Dir = top
 		out, err = cmd.Output()
 		if err != nil {
@@ -86,7 +102,7 @@ func GetStagedFiles(root string) ([]string, error) {
 		return nil, fmt.Errorf("not a git repository: %s", root)
 	}
 
-	cmd := exec.Command("git", "diff", "--cached", "--name-only")
+	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--diff-filter=ACM")
 	cmd.Dir = top
 	out, err := cmd.Output()
 	if err != nil {
@@ -94,6 +110,37 @@ func GetStagedFiles(root string) ([]string, error) {
 	}
 
 	return parseFileList(string(out)), nil
+}
+
+// GetIndexContent returns the staged content of the named path from the git
+// index. This is what a pre-commit scan must read: the working tree may hold
+// edits that are not part of the commit.
+func GetIndexContent(root, path string) ([]byte, error) {
+	return GetFileContent(root, path, "")
+}
+
+// GetFileContent returns the content of path as recorded at rev, where rev is
+// "" for the index (":path"), "HEAD", or a branch/tag. Used by diff/staged
+// scans so they examine exactly what would be committed instead of whatever
+// sits in the working tree.
+func GetFileContent(root, path, rev string) ([]byte, error) {
+	top := TopLevel(root)
+	if top == "" {
+		return nil, fmt.Errorf("not a git repository: %s", root)
+	}
+	p := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+	if p == "" || p == "." || filepath.IsAbs(path) ||
+		p == ".." || strings.HasPrefix(p, "../") {
+		return nil, fmt.Errorf("refusing index path outside the repository: %q", path)
+	}
+	show := rev + ":" + p
+	cmd := exec.Command("git", "show", show) //nolint:gosec // path and rev validated above; rev is a fixed internal value
+	cmd.Dir = top
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git show %s: %w", show, err)
+	}
+	return out, nil
 }
 
 func parseFileList(out string) []string {

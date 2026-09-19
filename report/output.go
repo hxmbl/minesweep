@@ -58,6 +58,10 @@ func writeCleanReport(tw *textWriter, p palette, report *findings.RiskReport) er
 		tw.writeln(p.dim(fmt.Sprintf("  Note: %d %s skipped by filters and not scanned.",
 			report.FilesSkipped, pluralWord(report.FilesSkipped, "file"))))
 	}
+	if report.FilesFailed > 0 {
+		tw.writeln(p.yellow(fmt.Sprintf("  Warning: %d %s could not be read and were not scanned.",
+			report.FilesFailed, pluralWord(report.FilesFailed, "file"))))
+	}
 	if report.FilesScanned > 0 {
 		stats := fmt.Sprintf("%d file", report.FilesScanned)
 		if report.FilesScanned != 1 {
@@ -90,6 +94,11 @@ func writeHeader(tw *textWriter, p palette, report *findings.RiskReport) {
 		tw.writeln(p.dim(fmt.Sprintf(
 			"note: %d %s skipped by filters (size/test/vendor) and were not scanned",
 			report.FilesSkipped, pluralWord(report.FilesSkipped, "file"))))
+	}
+	if report.FilesFailed > 0 {
+		tw.writeln(p.yellow(fmt.Sprintf(
+			"note: %d %s could not be read and may be unscanned",
+			report.FilesFailed, pluralWord(report.FilesFailed, "file"))))
 	}
 	tw.writeln("")
 }

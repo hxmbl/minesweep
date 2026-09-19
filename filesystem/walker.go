@@ -345,11 +345,6 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 		// Content is loaded lazily by the scan workers so that file reads,
 		// binary detection, and any hashing happen concurrently instead of
 		// serializing the entire walk on disk I/O.
-		if f.IsSymlink && f.SymlinkTarget != "" && strings.Contains(f.SymlinkTarget, "(") {
-			if opts.Stats != nil {
-				opts.Stats.SkippedSymlink++
-			}
-		}
 		if opts.Stats != nil {
 			opts.Stats.Kept++
 		}
@@ -366,6 +361,112 @@ func isTestFile(path string) bool {
 	base := filepath.Base(path)
 	name := strings.TrimSuffix(base, filepath.Ext(base))
 	return strings.HasSuffix(name, "_test") || strings.HasSuffix(name, ".test") || strings.HasSuffix(name, ".spec")
+}
+
+// SkipChecker applies the same filters a directory walk uses to individual
+// files, so diff and staged scans honor identical coverage rules. It is not
+// a traversal; callers resolve each path and ask.
+type SkipChecker struct {
+	root       string
+	ignore     *IgnorePattern
+	skipExtSet map[string]bool
+	skipSfx    []string
+	skipDirs   []string
+	includeT   bool
+	maxSize    int64
+}
+
+// NewSkipChecker builds a per-file filter mirroring WalkWithOptions defaults,
+// including the repository's .minesweepignore file at root.
+func NewSkipChecker(root string, opts WalkOption) *SkipChecker {
+	ip := opts.Ignore
+	if ip == nil {
+		ip = NewIgnorePattern(nil)
+		if fileIgnore, err := LoadMinesweepIgnore(filepath.Join(root, ".minesweepignore")); err == nil {
+			ip = mergeIgnorePatterns(ip, fileIgnore)
+		}
+	}
+	skipDirs := opts.SkipDirs
+	if skipDirs == nil {
+		skipDirs = DefaultSkipDirs
+	}
+	skipExts := opts.SkipExtensions
+	if skipExts == nil {
+		skipExts = DefaultSkipExtensions
+	}
+	sc := &SkipChecker{root: root, ignore: ip, skipDirs: skipDirs, includeT: opts.IncludeTestFiles}
+	sc.maxSize = opts.MaxFileSize
+	if sc.maxSize <= 0 {
+		sc.maxSize = DefaultMaxFileSize
+	}
+	sc.skipExtSet = make(map[string]bool, len(skipExts))
+	for _, e := range skipExts {
+		if strings.Contains(e[1:], ".") {
+			sc.skipSfx = append(sc.skipSfx, e)
+		} else {
+			sc.skipExtSet[e] = true
+		}
+	}
+	return sc
+}
+
+// ShouldSkip reports whether the file at absPath should be excluded from a
+// scoped scan. Mirror of the traversal filters: prune .git/.svn/.hg contents,
+// skip-dir nesting, ignore patterns, extensions, and test files.
+func (sc *SkipChecker) ShouldSkip(absPath string) bool {
+	// Resolve both paths: git reports the toplevel with symlinks resolved
+	// (e.g. /private/var/... for /var/... on macOS), so comparisons must
+	// happen on a canonical form or every file looks external to the root.
+	if rp, err := filepath.EvalSymlinks(sc.root); err == nil {
+		sc.root = rp
+	} else if rp, err := filepath.Abs(sc.root); err == nil {
+		sc.root = rp
+	}
+	if rp, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = rp
+	}
+	if strings.HasPrefix(absPath, filepath.Join(sc.root, ".git")+string(filepath.Separator)) ||
+		strings.HasPrefix(absPath, filepath.Join(sc.root, ".svn")+string(filepath.Separator)) ||
+		strings.HasPrefix(absPath, filepath.Join(sc.root, ".hg")+string(filepath.Separator)) {
+		return true
+	}
+	rel, err := filepath.Rel(sc.root, absPath)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return true
+	}
+	segs := strings.Split(rel, string(filepath.Separator))
+	skipDirSet := make(map[string]bool)
+	for _, d := range sc.skipDirs {
+		skipDirSet[d] = true
+	}
+	for _, seg := range segs[:len(segs)-1] {
+		if skipDirSet[seg] {
+			return true
+		}
+	}
+	if sc.ignore.Ignored(rel) {
+		return true
+	}
+	if sc.skipExtSet[filepath.Ext(absPath)] {
+		return true
+	}
+	if len(sc.skipSfx) > 0 {
+		base := filepath.Base(absPath)
+		for _, sfx := range sc.skipSfx {
+			if strings.HasSuffix(base, sfx) {
+				return true
+			}
+		}
+	}
+	if !sc.includeT && isTestFile(absPath) {
+		return true
+	}
+	return false
+}
+
+// ShouldSkipSize reports whether the file exceeds the scan's size ceiling.
+func (sc *SkipChecker) ShouldSkipSize(size int64) bool {
+	return size > sc.maxSize
 }
 
 func mergeIgnorePatterns(a, b *IgnorePattern) *IgnorePattern {

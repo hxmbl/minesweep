@@ -620,19 +620,11 @@ STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
 
 echo "minesweep: scanning staged files..."
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
-
-while IFS= read -r file; do
-    if [ -f "$file" ]; then
-        mkdir -p "$TMPDIR/$(dirname "$file")"
-        git show ":$file" > "$TMPDIR/$file" 2>/dev/null
-    fi
-done <<GITFILES
-$STAGED_FILES
-GITFILES
-
-"$MINESWEEP" --fail-on medium --no-pager --color never "$TMPDIR"
+# Scan the staged index directly. Materializing staged blobs into a temp
+# directory read the working tree for present files, missing staged data on
+# renames/extensions, and skipped deletions entirely — a file trickily added
+# then removed from disk would never be flagged.
+"$MINESWEEP" --fail-on medium --no-pager --color never --staged .
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then

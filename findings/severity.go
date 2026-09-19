@@ -1,8 +1,6 @@
 package findings
 
 import (
-	"fmt"
-	"os"
 	"strings"
 )
 
@@ -48,9 +46,6 @@ func ParseSeverity(s string) Severity {
 	case "critical":
 		return SeverityCritical
 	default:
-		if trimmed := strings.TrimSpace(s); trimmed != "" {
-			fmt.Fprintf(os.Stderr, "minesweep: warning: unknown severity %q, defaulting to info\n", trimmed)
-		}
 		return SeverityInfo
 	}
 }

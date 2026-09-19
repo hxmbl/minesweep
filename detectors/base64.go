@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"bytes"
 	"encoding/base64"
 	"regexp"
 	"strings"
@@ -32,7 +33,12 @@ func NewBase64Detector(rulesDir string) (*Base64Detector, error) {
 // NewBase64DetectorWithRegex creates a base64 detector that reuses an existing
 // RegexDetector, so rules are compiled and held only once per scan.
 func NewBase64DetectorWithRegex(regexDetector *RegexDetector) *Base64Detector {
-	pattern := regexp.MustCompile(`\b([A-Za-z0-9+/]{4}){3,}([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})\b`)
+	// Trailing \b fails for padded tokens ("...TEU=" ends with "="), so the end
+	// boundary is a required non-base64 terminator (or end of input) instead
+	// of a word edge. Leading \b also misses tokens that start with "+" or
+	// "/", so the start boundary is an explicit non-base64 anchor. Group 1 is
+	// the whole token.
+	pattern := regexp.MustCompile(`(^|[^A-Za-z0-9+/=])((?:[A-Za-z0-9+/]{4}){3,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4}))($|[^A-Za-z0-9+/=])`)
 	return &Base64Detector{
 		base64Pattern: pattern,
 		minLength:     16, // Minimum 16 chars (decodes to at least 12 bytes)
@@ -77,23 +83,38 @@ func decodeBase64(s string) ([]byte, error) {
 // rescanned per file.
 const maxBase64Candidates = 1000
 
-// extractBase64Strings extracts all potential base64 strings from content.
-// Matching runs on the raw bytes so the whole file never has to be copied
-// into a string first.
-func (d *Base64Detector) extractBase64Strings(content []byte) []string {
+// base64Candidate is a decoded-able token plus its byte span in the original
+// file content, so findings about the decoded payload can be traced back to a
+// line and column the user can actually open.
+type base64Candidate struct {
+	value string
+	start int
+	end   int
+}
+
+// extractBase64Strings extracts all potential base64 strings from content,
+// retaining their offsets. Matching runs on the raw bytes so the whole file
+// never has to be copied into a string first.
+func (d *Base64Detector) extractBase64Strings(content []byte) []base64Candidate {
 	matches := d.base64Pattern.FindAllSubmatchIndex(content, maxBase64Candidates)
 
-	var results []string
+	var results []base64Candidate
 	for _, match := range matches {
-		if len(match) > 3 {
-			start, end := match[0], match[1]
+		if len(match) > 5 {
+			// Group 2 is the token itself; group 0 additionally includes the
+			// leading anchor and trailing terminator characters.
+			start, end := match[4], match[5]
 			if start == -1 || end == -1 {
 				continue
 			}
-			candidate := string(content[start:end])
+			candidate := content[start:end]
 			// Verify it's actually valid base64
-			if isBase64(candidate) && len(candidate) >= d.minLength {
-				results = append(results, candidate)
+			if isBase64(string(candidate)) && len(candidate) >= d.minLength {
+				results = append(results, base64Candidate{
+					value: string(candidate),
+					start: start,
+					end:   end,
+				})
 			}
 		}
 	}
@@ -112,15 +133,41 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 	if err != nil {
 		return nil
 	}
-	base64Strings := d.extractBase64Strings(content)
+	candidates := d.extractBase64Strings(content)
+
+	var li *filesystem.LineIndex
+	// remap carries a finding produced against the decoded payload back to
+	// the original file, using the decoded value's position inside the token.
+	// Without this, findings pointed at "<path> (base64 decoded)" with
+	// decoded-only line numbers the user cannot open.
+	remap := func(f findings.Finding, decoded []byte, cand base64Candidate) findings.Finding {
+		if li == nil {
+			li = file.Lines()
+		}
+		decodedOffset := bytes.Index(decoded, []byte(f.Value))
+		if decodedOffset < 0 {
+			decodedOffset = 0
+		}
+		origOffset := decodedOffsetToOrig(decodedOffset, cand.start)
+		if origOffset > cand.end {
+			origOffset = cand.end
+		}
+		line, col := li.LineCol(origOffset)
+		f.File = file.Path
+		f.Line = line
+		f.Column = col
+		f.SourceLine = strings.TrimSpace(li.LineText(line - 1))
+		f.Context = li.Context(line-1, 2)
+		return f
+	}
 
 	// For each base64 string, try to decode and scan
-	for _, b64Str := range base64Strings {
+	for _, cand := range candidates {
 		// Decode the base64 string
-		decoded, err := decodeBase64(b64Str)
+		decoded, err := decodeBase64(cand.value)
 		if err != nil {
 			// If decoding fails, try with URL encoding
-			decoded, err = base64.URLEncoding.DecodeString(b64Str)
+			decoded, err = base64.URLEncoding.DecodeString(cand.value)
 			if err != nil {
 				continue
 			}
@@ -139,21 +186,19 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 			continue
 		}
 
-		// Create a temporary file-like structure for scanning
-		// We'll create a mock file with the decoded content
-		decodedFile := &filesystem.File{
-			Path:     file.Path + " (base64 decoded)",
-			Content:  decoded,
-			Size:     int64(len(decoded)),
-			Mode:     file.Mode,
-			IsBinary: isBinaryContent(decoded),
-		}
-
 		// If we have a regex detector, use it to scan the decoded content
 		if d.regexDetector != nil {
+			decodedFile := &filesystem.File{
+				Path:     file.Path + " (base64 decoded)",
+				Content:  decoded,
+				Size:     int64(len(decoded)),
+				Mode:     file.Mode,
+				IsBinary: isBinaryContent(decoded),
+			}
 			decodedFindings := d.regexDetector.Detect(decodedFile)
 			// Adjust the findings to indicate they were found in base64
 			for i := range decodedFindings {
+				decodedFindings[i] = remap(decodedFindings[i], decoded, cand)
 				decodedFindings[i].Type = "base64_" + decodedFindings[i].Type
 				decodedFindings[i].Reason = "Base64 encoded secret detected: " + decodedFindings[i].Reason
 				// Add context about the base64 string
@@ -162,24 +207,37 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 			fResults = append(fResults, decodedFindings...)
 		} else {
 			// Without regex detector, just report the base64 string as a finding
+			if li == nil {
+				li = file.Lines()
+			}
+			line, col := li.LineCol(cand.start)
 			fResults = append(fResults, findings.Finding{
 				Type:       "base64_encoded_secret",
 				Severity:   findings.SeverityMedium,
 				Confidence: 0.7,
 				File:       file.Path,
-				Line:       0, // We don't have line info for base64 content
-				Column:     0,
-				Value:      b64Str,
+				Line:       line,
+				Column:     col,
+				Value:      cand.value,
 				Reason:     "Base64 encoded content with high entropy detected",
 				RuleID:     "base64-high-entropy",
 				Tags:       []string{"base64", "encoded", "secret"},
-				Context:    "Base64 string: " + truncateString(b64Str, 50) + "...",
-				SourceLine: "",
+				Context:    "Base64 string: " + truncateString(cand.value, 50) + "...",
+				SourceLine: strings.TrimSpace(li.LineText(line - 1)),
 			})
 		}
 	}
 
 	return fResults
+}
+
+// decodedOffsetToOrig maps a byte offset within a decoded base64 payload back
+// to an offset within the original content. Base64 packs 3 bytes into 4
+// characters, so decoded byte d is carried by base64 character (d/3)*4+(d%3);
+// final padding truncating the last group makes this approximate by at most a
+// couple of columns, which is fine for line/column reporting.
+func decodedOffsetToOrig(decodedOffset, candStart int) int {
+	return candStart + (decodedOffset/3)*4 + (decodedOffset % 3)
 }
 
 // isBinaryContent is a simple check for binary content

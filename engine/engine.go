@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,6 +64,7 @@ type Engine struct {
 	filesScanned atomic.Int64
 	bytesScanned atomic.Int64
 	filesSkipped atomic.Int64
+	filesFailed  atomic.Int64
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -183,12 +186,16 @@ func dirOrEmbedded(dir, embeddedSubtree string) (fs.FS, bool) {
 	return sub, true
 }
 
-// finalize runs the post-detection pipeline: baseline filtering, suppression
-// filtering, policy evaluation, and report generation. Filtering deliberately
-// happens BEFORE evaluation so that baselines and suppression patterns match
-// raw secret values, not redacted ones.
+// finalize runs the post-detection pipeline: deduplication, baseline
+// filtering, suppression filtering, policy evaluation, and report generation.
+// Filtering deliberately happens BEFORE evaluation so that baselines and
+// suppression patterns match raw secret values, not redacted ones.
 func (e *Engine) finalize(root string, allFindings []findings.Finding) (*findings.RiskReport, error) {
 	allFindings = relativizeFindings(root, allFindings)
+	// Several detectors can independently raise the same finding (regex,
+	// entropy, decoded base64 wrapping the same rule). Collapse identical
+	// ones before baselines and suppression so counts and hashes stay stable.
+	allFindings = dedupFindings(allFindings)
 	filtered, err := e.filterBaseline(allFindings)
 	if err != nil {
 		return nil, err
@@ -200,8 +207,47 @@ func (e *Engine) finalize(root string, allFindings []findings.Finding) (*finding
 	}
 
 	evaluated := e.evaluate(filtered)
+	sortFindings(evaluated)
 	rep := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
 	return &rep, nil
+}
+
+// dedupFindings removes duplicate findings sharing the same location, rule,
+// and value, keeping the first (detectors run in a stable order).
+func dedupFindings(fs []findings.Finding) []findings.Finding {
+	seen := make(map[string]struct{}, len(fs))
+	out := make([]findings.Finding, 0, len(fs))
+	for _, f := range fs {
+		key := f.File + "\x00" + strconv.Itoa(f.Line) + "\x00" + strconv.Itoa(f.Column) +
+			"\x00" + f.RuleID + "\x00" + f.Value
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, f)
+	}
+	return out
+}
+
+// sortFindings orders findings deterministically so identical scans produce
+// byte-identical reports regardless of worker scheduling.
+func sortFindings(fs []findings.Finding) {
+	sort.SliceStable(fs, func(i, j int) bool {
+		a, b := fs[i], fs[j]
+		if a.File != b.File {
+			return a.File < b.File
+		}
+		if a.Line != b.Line {
+			return a.Line < b.Line
+		}
+		if a.Column != b.Column {
+			return a.Column < b.Column
+		}
+		if a.RuleID != b.RuleID {
+			return a.RuleID < b.RuleID
+		}
+		return a.Value < b.Value
+	})
 }
 
 // filterBaseline removes findings already recorded in the baseline file.
@@ -245,12 +291,15 @@ func (e *Engine) updateBaseline(baseline *findings.Baseline, newFindings []findi
 func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	e.filesScanned.Store(0)
 	e.bytesScanned.Store(0)
+	e.filesSkipped.Store(0)
+	e.filesFailed.Store(0)
 	start := time.Now()
 	rep, err := e.run(path)
 	if rep != nil {
 		rep.FilesScanned = int(e.filesScanned.Load())
 		rep.BytesScanned = e.bytesScanned.Load()
 		rep.FilesSkipped = int(e.filesSkipped.Load())
+		rep.FilesFailed = int(e.filesFailed.Load())
 		rep.DurationMs = time.Since(start).Milliseconds()
 	}
 	return rep, err
@@ -282,9 +331,10 @@ func (e *Engine) run(path string) (*findings.RiskReport, error) {
 }
 
 func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
+	isStaged := e.config.StagedOnly
 	var diffFiles []string
 	var err error
-	if e.config.StagedOnly {
+	if isStaged {
 		diffFiles, err = git.GetStagedFiles(root)
 	} else {
 		diffFiles, err = git.GetDiffFiles(root, e.config.DiffBase)
@@ -300,30 +350,88 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 		top = root
 	}
 
+	maxFileSize := filesystem.DefaultMaxFileSize
+	if e.config.MaxFileSizeMB > 0 {
+		maxFileSize = e.config.MaxFileSizeMB * 1024 * 1024
+	}
+	// Diff/staged scans apply the exact same filters as a directory walk:
+	// skip dirs, extensions, test files (unless enabled), .minesweepignore,
+	// and the file-size ceiling. Loading every changed file regardless made
+	// scoped scans diverge from full scans.
+	checker := filesystem.NewSkipChecker(root, filesystem.WalkOption{
+		SkipExtensions:   e.config.SkipExtensions,
+		IncludeTestFiles: e.config.IncludeTestFiles,
+		MaxFileSize:      maxFileSize,
+	})
+
 	var files []*filesystem.File
+	var skipped int
 	for _, relPath := range diffFiles {
 		absPath := filepath.Join(top, relPath)
 		if !withinDir(absPath, root) {
 			continue // changed file outside the requested scan root
 		}
+		if e.config.MaxFiles > 0 && len(files) >= e.config.MaxFiles {
+			break
+		}
+		rev := "HEAD"
+		if isStaged {
+			rev = ""
+		}
+		contentLoader := func(rp, r string) func() ([]byte, error) {
+			return func() ([]byte, error) {
+				return git.GetFileContent(top, filepath.ToSlash(rp), r)
+			}
+		}(relPath, rev)
+
 		file, err := filesystem.NewFileWithRoot(absPath, root)
 		if err != nil {
+			// Path added to the index/HEAD but removed from the working
+			// tree: the stat fails, yet the blob still exists and must be
+			// scanned. A fresh loader-backed file has no on-disk state.
+			file = filesystem.NewBlobFile(absPath, 0, contentLoader)
+			if checker.ShouldSkip(absPath) {
+				skipped++
+				continue
+			}
+			files = append(files, file)
 			continue
 		}
-		if err := file.LoadContent(); err != nil {
+		if checker.ShouldSkip(absPath) || checker.ShouldSkipSize(file.Size) {
+			skipped++
 			continue
 		}
+		// Serve committed or staged content, never the working tree: a
+		// pre-commit scan must flag exactly what would be committed,
+		// including deletions and unstaged edits.
+		file.UseLoader(contentLoader)
 		files = append(files, file)
+	}
+	if skipped > 0 {
+		e.filesSkipped.Add(int64(skipped))
 	}
 
 	e.filesScanned.Store(int64(len(files)))
-	var bytesTotal int64
-	for _, file := range files {
-		bytesTotal += file.Size
-	}
+	bytesTotal, failed := e.countContent(files)
 	e.bytesScanned.Store(bytesTotal)
+	e.filesFailed.Add(failed)
 	allFindings := e.detectParallel(files)
 	return e.finalize(root, allFindings)
+}
+
+// countContent sums the loaded content bytes and counts files whose content
+// could not be produced (deleted between walk and read, failed blob fetch),
+// so coverage gaps surface in the report instead of vanishing silently.
+func (e *Engine) countContent(files []*filesystem.File) (bytesTotal int64, failed int64) {
+	for _, file := range files {
+		content, err := file.GetContent()
+		if err != nil {
+			failed++
+			continue
+		}
+		bytesTotal += int64(len(content))
+	}
+	return bytesTotal, failed
 }
 
 func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
@@ -356,8 +464,28 @@ func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
 		return nil, fmt.Errorf("list history objects: %w", err)
 	}
 	if e.config.MaxFiles > 0 && len(objects) > e.config.MaxFiles {
-		objects = objects[:e.config.MaxFiles]
-		fmt.Fprintf(os.Stderr, "warning: reached max files limit (%d), scanning first %d objects\n", e.config.MaxFiles, e.config.MaxFiles)
+		// rev-list ordering is tied to git internals and unrelated to secret
+		// density, so scanning the first N would systematically miss blobs.
+		// Sort by object name and stride evenly: every run and every machine
+		// scans the same deterministic, representative sample.
+		sort.Slice(objects, func(i, j int) bool {
+			if objects[i].SHA != objects[j].SHA {
+				return objects[i].SHA < objects[j].SHA
+			}
+			return objects[i].Path < objects[j].Path
+		})
+		step := float64(len(objects)) / float64(e.config.MaxFiles)
+		sampled := make([]git.HistoryObject, 0, e.config.MaxFiles)
+		for i := 0; i < e.config.MaxFiles; i++ {
+			idx := int(float64(i) * step)
+			if idx >= len(objects) {
+				idx = len(objects) - 1
+			}
+			sampled = append(sampled, objects[idx])
+		}
+		objects = sampled
+		fmt.Fprintf(os.Stderr, "warning: reached max files limit (%d), scanning a deterministic sample of %d history objects\n",
+			e.config.MaxFiles, e.config.MaxFiles)
 	}
 
 	fetcher, err := git.NewBlobFetcher(root)
@@ -396,6 +524,16 @@ func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
 	e.filesScanned.Store(int64(len(files)))
 	e.bytesScanned.Store(bytesTotal)
 	allFindings := e.detectParallel(files)
+
+	// Blob fetches can fail mid-scan (pack corruption, torn object database);
+	// those files silently produced zero findings, so surface the gap.
+	fetchFailed := int64(0)
+	for _, file := range files {
+		if _, err := file.GetContent(); err != nil {
+			fetchFailed++
+		}
+	}
+	e.filesFailed.Add(fetchFailed)
 
 	attributed := e.attributeHistory(root, allFindings, displaySHA)
 	return e.finalize(root, attributed)
@@ -475,11 +613,9 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 	}
 
 	e.filesScanned.Store(int64(len(files)))
-	var bytesTotal int64
-	for _, file := range files {
-		bytesTotal += file.Size
-	}
+	bytesTotal, failed := e.countContent(files)
 	e.bytesScanned.Store(bytesTotal)
+	e.filesFailed.Add(failed)
 	allFindings := e.detectParallel(files)
 	return e.finalize(root, allFindings)
 }
@@ -575,23 +711,49 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 
 	totalFiles := int64(len(files))
 
-	// Track memory usage if limit is set. Each worker keeps its own
-	// MemStats scratch: sharing one struct between goroutines would race.
-	var memStats runtime.MemStats
-	if e.config.MemoryLimitMB > 0 {
-		runtime.ReadMemStats(&memStats)
-	}
-	initialAlloc := memStats.Alloc
-
 	// Cancelling ctx stops processing of remaining files without closing fileCh,
 	// which is owned by the producer below (closing it from a worker would risk
 	// a send-on-closed-channel panic).
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	const memCheckInterval = 64
-
 	var memCancelWarned atomic.Bool
+	if e.config.MemoryLimitMB > 0 {
+		// One coordinator measures heap growth on a slow ticker. Measuring
+		// from inside each worker forced runtime.ReadMemStats (a full
+		// stop-the-world) on every worker on every interval. Reading it once
+		// here is both cheaper and equally accurate for a soft early-exit.
+		initialAlloc := e.allocBytes()
+		monitorStop := make(chan struct{})
+		var monitorWG sync.WaitGroup
+		monitorWG.Add(1)
+		go func() {
+			defer monitorWG.Done()
+			limit := uint64(e.config.MemoryLimitMB) * 1024 * 1024 //nolint:gosec // guarded by > 0 check above
+			ticker := time.NewTicker(250 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if e.allocBytes() > initialAlloc+limit {
+						if memCancelWarned.CompareAndSwap(false, true) {
+							fmt.Fprintf(os.Stderr, "warning: memory limit (%d MB) reached; stopping scan early, results are incomplete\n", e.config.MemoryLimitMB)
+						}
+						cancel()
+						return
+					}
+				case <-ctx.Done():
+					return
+				case <-monitorStop:
+					return
+				}
+			}
+		}()
+		defer func() {
+			close(monitorStop)
+			monitorWG.Wait()
+		}()
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -603,22 +765,7 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 				}
 			}()
 			defer wg.Done()
-			var localMem runtime.MemStats
-			processed := 0
 			for file := range fileCh {
-				// Check memory limit periodically
-				if e.config.MemoryLimitMB > 0 && processed%memCheckInterval == 0 {
-					runtime.ReadMemStats(&localMem)
-					limit := uint64(e.config.MemoryLimitMB) * 1024 * 1024 //nolint:gosec // guarded by > 0 check above
-					if localMem.Alloc > initialAlloc+limit {
-						if memCancelWarned.CompareAndSwap(false, true) {
-							fmt.Fprintf(os.Stderr, "warning: memory limit (%d MB) reached; stopping scan early, results are incomplete\n", e.config.MemoryLimitMB)
-						}
-						cancel()
-					}
-				}
-				processed++
-
 				if ctx.Err() != nil {
 					continue // drain the channel without processing
 				}
@@ -627,6 +774,7 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 					defer func() {
 						if r := recover(); r != nil {
 							fmt.Fprintf(os.Stderr, "panic in detector for %s: %v\n", file.Path, r)
+							e.filesFailed.Add(1)
 						}
 					}()
 					fResults := e.detect(file)
@@ -662,6 +810,14 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 	}
 
 	return allFindings
+}
+
+// allocBytes reads the current heap allocation, used by the coordinated
+// memory-limit monitor.
+func (e *Engine) allocBytes() uint64 {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.Alloc
 }
 
 // withinDir reports whether absPath is located inside (or equal to) dir.
