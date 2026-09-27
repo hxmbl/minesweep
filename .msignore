@@ -1,0 +1,20 @@
+# Ignore rule definition files (they contain example patterns)
+rules/
+
+# Ignore detector test files with example patterns
+detectors/database.go
+
+# Ignore documentation with examples
+README.md
+
+# Ignore test files (though --include-tests flag controls this)
+*_test.go
+
+# Ignore the compiled binary
+minesweep
+
+# Ignore distribution artifacts
+dist/
+
+# Ignore git constant (empty tree hash)
+git/git.go

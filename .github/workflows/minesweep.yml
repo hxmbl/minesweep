@@ -1,0 +1,53 @@
+name: minesweep
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write  # for SARIF upload
+
+jobs:
+  minesweep:
+    name: Scan for secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # needed for --diff
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Build minesweep
+        run: go build -o minesweep ./cmd/minesweep
+
+      - name: Run minesweep (diff mode for PRs)
+        if: github.event_name == 'pull_request'
+        run: |
+          ./minesweep --diff --diff-base ${{ github.base_ref }} --fail-on high .
+
+      - name: Run minesweep (full scan on main)
+        if: github.event_name == 'push'
+        run: |
+          ./minesweep --fail-on high .
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always()
+        run: |
+          ./minesweep --sarif . > results.sarif
+        continue-on-error: true
+
+      - name: Upload SARIF results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+        continue-on-error: true
