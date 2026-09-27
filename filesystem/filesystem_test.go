@@ -988,14 +988,14 @@ func TestIgnorePatternConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			cases := map[string]bool{
-"debug.log":          true,
-		"build/output.o":     true,
-		"important.log":      false,
-		"vendor/pkg":         true,
-		"vendor/pkg/file.go": true, // verified against git: subdirectories inherit the exclusion
-		"main.go":            false,
-		"src/main.go":        false,
-	}
+				"debug.log":          true,
+				"build/output.o":     true,
+				"important.log":      false,
+				"vendor/pkg":         true,
+				"vendor/pkg/file.go": true, // verified against git: subdirectories inherit the exclusion
+				"main.go":            false,
+				"src/main.go":        false,
+			}
 			for path, want := range cases {
 				if got := ip.Ignored(path); got != want {
 					t.Errorf("concurrent Ignored(%q) = %v, want %v", path, got, want)

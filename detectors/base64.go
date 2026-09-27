@@ -259,11 +259,3 @@ func isBinaryContent(data []byte) bool {
 	}
 	return false
 }
-
-// truncateString truncates a string to maxLen characters
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen]
-}
