@@ -1,9 +1,13 @@
 package report
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"regexp"
 	"sort"
 	"strings"
+
+	"minesweep/findings"
 )
 
 // SanitizeTerminal neutralizes terminal control sequences embedded in
@@ -45,24 +49,85 @@ func needsEscape(r rune) bool {
 }
 
 // CensorValue replaces every occurrence of a sensitive value in a source
-// line with a shortened, visibly censored version.
+// line with a stable, non-reversible token.
+//
+// The token is a hash rather than a truncated prefix. A prefix such as
+// "AKIA1234.." is still a partial credential: it narrows a brute force, it
+// identifies the secret to anyone holding a candidate list, and for short
+// values the "prefix" is most of the secret. A hash leaks nothing, is
+// identical for the same secret everywhere it appears, and therefore still
+// lets findings be correlated across files, runs, and baselines.
 func CensorValue(line, value string) string {
 	if line == "" || value == "" {
 		return line
 	}
-
-	return strings.ReplaceAll(line, value, censoredValue(value))
+	return strings.ReplaceAll(line, value, SecretToken(value))
 }
 
-func censoredValue(value string) string {
-	switch {
-	case len(value) > 8:
-		return value[:8] + ".._[CENSORED]"
-	case len(value) > 4:
-		return value[:4] + ".._[CENSORED]"
-	default:
-		return value[:2] + ".._[CENSORED]"
+// SecretToken returns a stable, non-reversible identifier for value.
+// Equal values always produce equal tokens; the original cannot be recovered
+// from the token.
+func SecretToken(value string) string {
+	if value == "" {
+		return ""
 	}
+	sum := sha256.Sum256([]byte(value))
+	return tokenPrefix + hex.EncodeToString(sum[:])[:tokenLength]
+}
+
+const (
+	tokenPrefix = "sha256:"
+	tokenLength = 12
+)
+
+// isCensoredToken reports whether s is already a censorship token, so
+// censoring is not applied twice and tokens survive round-tripping.
+func isCensoredToken(s string) bool {
+	if !strings.HasPrefix(s, tokenPrefix) {
+		return false
+	}
+	digest := s[len(tokenPrefix):]
+	if len(digest) != tokenLength {
+		return false
+	}
+	for _, c := range digest {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// CensorFinding returns a copy of f with the secret value replaced by its
+// token everywhere it appears: in the value itself, the reported source line,
+// and the surrounding context block.
+func CensorFinding(f findings.Finding) findings.Finding {
+	value := f.Value
+	if value == "" || isCensoredToken(value) {
+		return f
+	}
+	token := SecretToken(value)
+	f.SourceLine = censorAllValues(f.SourceLine, value)
+	f.Context = censorAllValues(f.Context, value)
+	f.Value = token
+	return f
+}
+
+// CensorReport returns a copy of rep with every finding censored. Reports are
+// censored once, at the output boundary, so no output format can be the one
+// that forgets.
+func CensorReport(rep *findings.RiskReport) *findings.RiskReport {
+	if rep == nil {
+		return nil
+	}
+	out := *rep
+	if len(rep.Findings) > 0 {
+		out.Findings = make([]findings.Finding, len(rep.Findings))
+		for i, f := range rep.Findings {
+			out.Findings[i] = CensorFinding(f)
+		}
+	}
+	return &out
 }
 
 // censorAllValues censors the primary finding value and other values that
@@ -102,7 +167,7 @@ func censorSecretSubstrings(line string) string {
 	for _, match := range matches {
 		value := line[match[0]:match[1]]
 
-		if strings.Contains(value, "[CENSORED]") || !looksLikeSecret(value) {
+		if isCensoredToken(value) || strings.Contains(value, "[CENSORED]") || !looksLikeSecret(value) {
 			continue
 		}
 
@@ -135,7 +200,7 @@ func censorSecretSubstrings(line string) string {
 			continue
 		}
 
-		replacement := censoredValue(candidate.value)
+		replacement := SecretToken(candidate.value)
 		result = result[:candidate.start] + replacement + result[candidate.end:]
 	}
 

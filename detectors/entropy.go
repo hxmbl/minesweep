@@ -104,6 +104,12 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 			if confidence < scoreMinConfidence {
 				continue
 			}
+			// Entropy is line-based, so a large file can emit one finding
+			// per line indefinitely. The budget stops that; the engine
+			// reports the file as incompletely scanned.
+			if !file.ClaimFinding() {
+				return fResults
+			}
 
 			// Column should be relative to the original line. Only
 			// leading whitespace separates raw from trimmed, so the
@@ -122,7 +128,6 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 				Reason:     "High-entropy string detected (potential secret)",
 				RuleID:     "entropy-high",
 				Tags:       []string{"entropy", "potential-secret"},
-				SourceLine: string(bytes.TrimRight(raw, "\r")),
 			})
 		}
 	}

@@ -17,6 +17,19 @@ type RiskReport struct {
 	BytesScanned int64           `yaml:"bytes_scanned,omitempty" json:"bytes_scanned,omitempty"`
 	FilesSkipped int             `yaml:"files_skipped,omitempty" json:"files_skipped,omitempty"`
 	FilesFailed  int             `yaml:"files_failed,omitempty" json:"files_failed,omitempty"`
+
+	// Incomplete reports that this scan is not a complete answer to the
+	// question asked — it hit a limit, a budget, or a crash. A clean result
+	// from an incomplete scan is worse than no result, so this is surfaced
+	// in every output format and forces a distinct exit code.
+	Incomplete        bool     `yaml:"incomplete,omitempty" json:"incomplete,omitempty"`
+	IncompleteReasons []string `yaml:"incomplete_reasons,omitempty" json:"incomplete_reasons,omitempty"`
+	// FindingsDropped counts findings removed by the finding cap.
+	FindingsDropped int `yaml:"findings_dropped,omitempty" json:"findings_dropped,omitempty"`
+	// SkippedBy is a per-cause breakdown of files that were NOT inspected.
+	// A file that was skipped is a coverage gap, and the user is entitled to
+	// know which ones and why.
+	SkippedBy []string `yaml:"skipped_by,omitempty" json:"skipped_by,omitempty"`
 }
 
 func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {

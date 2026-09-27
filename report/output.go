@@ -55,14 +55,7 @@ func WriteText(w io.Writer, report *findings.RiskReport, opts TextOptions) error
 
 func writeCleanReport(tw *textWriter, p palette, report *findings.RiskReport) error {
 	tw.writeln(p.green("✓") + " No secrets or sensitive data detected.")
-	if report.FilesSkipped > 0 {
-		tw.writeln(p.dim(fmt.Sprintf("  Note: %d %s skipped by filters and not scanned.",
-			report.FilesSkipped, pluralWord(report.FilesSkipped, "file"))))
-	}
-	if report.FilesFailed > 0 {
-		tw.writeln(p.yellow(fmt.Sprintf("  Warning: %d %s could not be read and were not scanned.",
-			report.FilesFailed, pluralWord(report.FilesFailed, "file"))))
-	}
+	writeCoverageNotes(tw, p, report, "  ")
 	if report.FilesScanned > 0 {
 		stats := fmt.Sprintf("%d file", report.FilesScanned)
 		if report.FilesScanned != 1 {
@@ -73,6 +66,7 @@ func writeCleanReport(tw *textWriter, p palette, report *findings.RiskReport) er
 		}
 		tw.writeln(p.dim("  Scanned " + stats + "."))
 	}
+	writeIncomplete(tw, p, report)
 	return tw.err
 }
 
@@ -91,17 +85,40 @@ func writeHeader(tw *textWriter, p palette, report *findings.RiskReport) {
 	}
 	tw.writefmt("%s\n\n", pluralize(report.Findings, "finding"))
 	writeCounts(tw, p, groupBySeverity(report.Findings))
+	writeCoverageNotes(tw, p, report, "")
+	writeIncomplete(tw, p, report)
+	tw.writeln("")
+}
+
+// writeCoverageNotes prints how many files were skipped and why, naming
+// examples so a dropped secret in yarn.lock is visible rather than summarized
+// away as "vendor".
+func writeCoverageNotes(tw *textWriter, p palette, report *findings.RiskReport, indent string) {
 	if report.FilesSkipped > 0 {
-		tw.writeln(p.dim(fmt.Sprintf(
-			"note: %d %s skipped by filters (size/test/vendor) and were not scanned",
-			report.FilesSkipped, pluralWord(report.FilesSkipped, "file"))))
+		tw.writeln(p.dim(fmt.Sprintf("%snote: %d %s skipped by filters and not scanned",
+			indent, report.FilesSkipped, pluralWord(report.FilesSkipped, "file"))))
+		for _, line := range report.SkippedBy {
+			tw.writeln(p.dim(fmt.Sprintf("%s  - %s", indent, line)))
+		}
 	}
 	if report.FilesFailed > 0 {
-		tw.writeln(p.yellow(fmt.Sprintf(
-			"note: %d %s could not be read and may be unscanned",
-			report.FilesFailed, pluralWord(report.FilesFailed, "file"))))
+		tw.writeln(p.yellow(fmt.Sprintf("%snote: %d %s could not be read and may be unscanned",
+			indent, report.FilesFailed, pluralWord(report.FilesFailed, "file"))))
 	}
-	tw.writeln("")
+}
+
+func writeIncomplete(tw *textWriter, p palette, report *findings.RiskReport) {
+	if !report.Incomplete {
+		return
+	}
+	tw.writeln(p.boldRed("INCOMPLETE SCAN — results do not cover the whole target."))
+	for _, reason := range report.IncompleteReasons {
+		tw.writeln(p.yellow("  - " + reason))
+	}
+	if report.FindingsDropped > 0 {
+		tw.writeln(p.yellow(fmt.Sprintf("  - %d findings dropped by the --max-findings cap",
+			report.FindingsDropped)))
+	}
 }
 
 func writeCounts(tw *textWriter, p palette, groups []severityGroup) {
@@ -236,12 +253,19 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 		}
 	}
 
+	// f.Value has already been through report.CensorReport, so it is a token
+	// unless the user explicitly asked for raw values. Verbosity is not a
+	// licence to print secrets: it only widens what is shown, not what is
+	// disclosed.
 	if opts.Verbose && f.Value != "" {
 		val := f.Value
-		if len(val) > 60 {
+		label := "Value"
+		if isCensoredToken(val) {
+			label = "Value (hashed; --dangerously-show-secrets to reveal)"
+		} else if len(val) > 60 {
 			val = val[:60] + "..."
 		}
-		tw.writefmt("          Value: %s\n", SanitizeTerminal(val))
+		tw.writefmt("          %s: %s\n", label, SanitizeTerminal(val))
 	}
 	if txt := remediationFor(f); txt != "" {
 		tw.writefmt("          %s %s\n", p.cyan("↳"), wrapText(txt, 12))

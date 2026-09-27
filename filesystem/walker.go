@@ -2,110 +2,190 @@ package filesystem
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
-type IgnorePattern struct {
-	patterns []ignoreRule
+// IgnoreFileNames are the accepted ignore-file names. The two are fully
+// equivalent; when both exist in one directory their rules are merged, and
+// rules later in the merged order win, so a tie is broken deterministically.
+var IgnoreFileNames = []string{".minesweepignore", ".msignore"}
+
+// ignoreRule is one normalized line of an ignore file.
+type ignoreRule struct {
+	pattern string // no leading or trailing separator
+	negate  bool   // "!pattern" — re-include
+	dirOnly bool   // trailing "/" — directories only
+	// anchored means the pattern must match from the base directory rather
+	// than any basename at any depth. A pattern is anchored if it carried a
+	// leading or interior separator.
+	anchored bool
 }
 
-type ignoreRule struct {
-	pattern  string
-	negate   bool
-	dirMatch bool
+// IgnorePattern is an ordered rule set. Last match wins, so a later rule
+// overrides an earlier one and a later negation re-includes.
+type IgnorePattern struct {
+	rules []ignoreRule
 }
 
 func NewIgnorePattern(patterns []string) *IgnorePattern {
 	ip := &IgnorePattern{}
 	for _, line := range patterns {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		rule, ok := parseIgnoreRule(line)
+		if !ok {
 			continue
 		}
-		rule := ignoreRule{}
-		if strings.HasPrefix(line, "!") {
-			rule.negate = true
-			line = strings.TrimSpace(line[1:])
-		}
-		if strings.HasSuffix(line, "/") {
-			rule.dirMatch = true
-			line = strings.TrimSuffix(line, "/")
-		}
-		rule.pattern = line
-		ip.patterns = append(ip.patterns, rule)
+		ip.rules = append(ip.rules, rule)
 	}
 	return ip
 }
 
-func LoadMinesweepIgnore(path string) (*IgnorePattern, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return NewIgnorePattern(nil), nil
-		}
-		return nil, fmt.Errorf("open ignore file %q: %w", path, err)
+func parseIgnoreRule(line string) (ignoreRule, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return ignoreRule{}, false
 	}
-	defer f.Close()
-
-	var lines []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
+	var rule ignoreRule
+	if strings.HasPrefix(line, "!") {
+		rule.negate = true
+		line = strings.TrimSpace(line[1:])
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read ignore file %q: %w", path, err)
+	// A trailing separator marks a directory-only pattern.
+	if strings.HasSuffix(line, "/") {
+		rule.dirOnly = true
+		line = strings.TrimSuffix(line, "/")
 	}
-	return NewIgnorePattern(lines), nil
+	// A leading separator anchors the pattern to the base directory. Any
+	// other interior separator anchors it too, matching git.
+	anchored := strings.HasPrefix(line, "/") || strings.Contains(line, "/")
+	line = strings.TrimPrefix(line, "/")
+	if line == "" {
+		return ignoreRule{}, false
+	}
+	rule.pattern = filepath.ToSlash(line)
+	rule.anchored = anchored
+	return rule, true
 }
 
-func (ip *IgnorePattern) Ignored(path string) bool {
-	base := filepath.Base(path)
-	ignored := false
+func (r ignoreRule) String() string {
+	s := r.pattern
+	if r.negate {
+		s = "!" + s
+	}
+	if r.dirOnly {
+		s += "/"
+	}
+	return s
+}
 
-	for _, rule := range ip.patterns {
-		if rule.pattern == "" {
-			continue
+// matches reports whether the rule excludes the given slash-separated path,
+// which is relative to the directory the rule was declared in.
+func (r ignoreRule) matches(rel string) bool {
+	if r.anchored {
+		// Either the path itself, or any ancestor directory: a rule that
+		// matches a directory covers everything beneath it, which is what
+		// makes `test/fixtures` exclude `test/fixtures/e.env`.
+		if !r.dirOnly && globMatch(r.pattern, rel) {
+			return true
 		}
-
-		matched := false
-
-		if rule.dirMatch {
-			if strings.HasPrefix(path, rule.pattern+"/") || strings.Contains(path, "/"+rule.pattern+"/") {
-				matched = true
-			}
-			if base == rule.pattern {
-				matched = true
-			}
-		}
-
-		if !matched && (strings.Contains(rule.pattern, "/") || strings.Contains(rule.pattern, "**")) {
-			matched = matchPath(rule.pattern, path)
-		}
-
-		if !matched {
-			if m, _ := filepath.Match(rule.pattern, base); m {
-				matched = true
-			}
-			if m, _ := filepath.Match(rule.pattern, path); m {
-				matched = true
+		for _, anc := range ancestorDirs(rel) {
+			if globMatch(r.pattern, anc) {
+				return true
 			}
 		}
-
-		if matched {
-			ignored = !rule.negate
+		return false
+	}
+	// Unanchored: match the basename of the path or of any ancestor, so
+	// `node_modules` covers `a/node_modules/pkg.js`.
+	if !r.dirOnly && globMatch(r.pattern, pathBase(rel)) {
+		return true
+	}
+	for _, anc := range ancestorDirs(rel) {
+		if globMatch(r.pattern, pathBase(anc)) {
+			return true
 		}
 	}
+	return false
+}
+
+// decide returns whether rel is ignored and whether any rule matched at all.
+// The second value lets a nested ignore file override a shallower one, which
+// is what git does for files below a subdirectory.
+func (ip *IgnorePattern) decide(rel string) (ignored bool, matched bool) {
+	if ip == nil || len(ip.rules) == 0 {
+		return false, false
+	}
+	rel = filepath.ToSlash(rel)
+	for _, r := range ip.rules {
+		if r.matches(rel) {
+			ignored = !r.negate
+			matched = true
+		}
+	}
+	return ignored, matched
+}
+
+// Ignored reports whether rel is excluded by this rule set.
+func (ip *IgnorePattern) Ignored(rel string) bool {
+	ignored, _ := ip.decide(rel)
 	return ignored
 }
 
-func matchPath(pattern, path string) bool {
-	parts := strings.Split(pattern, "/")
-	pathParts := strings.Split(path, string(filepath.Separator))
+// Rules exposes the parsed rules, for diagnostics.
+func (ip *IgnorePattern) Rules() []string {
+	if ip == nil {
+		return nil
+	}
+	out := make([]string, 0, len(ip.rules))
+	for _, r := range ip.rules {
+		out = append(out, r.String())
+	}
+	return out
+}
 
-	return matchGlobParts(parts, pathParts)
+// ancestorDirs returns every proper ancestor of a slash-separated path,
+// shallowest first: "a/b/c.env" yields "a", "a/b".
+func ancestorDirs(rel string) []string {
+	var out []string
+	for i := 0; i < len(rel); i++ {
+		if rel[i] == '/' {
+			out = append(out, rel[:i])
+		}
+	}
+	return out
+}
+
+func pathBase(rel string) string {
+	if i := strings.LastIndex(rel, "/"); i >= 0 {
+		return rel[i+1:]
+	}
+	return rel
+}
+
+// relUnder returns the portion of rel below dir, and whether rel is inside
+// dir at all.
+func relUnder(dir, rel string) (string, bool) {
+	if dir == "" {
+		return rel, true
+	}
+	if rel == dir {
+		return "", false
+	}
+	if strings.HasPrefix(rel, dir+"/") {
+		return rel[len(dir)+1:], true
+	}
+	return "", false
+}
+
+// globMatch matches a slash-separated pattern against a slash-separated path,
+// with `**` spanning any number of path segments.
+func globMatch(pattern, path string) bool {
+	return matchGlobParts(strings.Split(pattern, "/"), strings.Split(path, "/"))
 }
 
 func matchGlobParts(pattern, path []string) bool {
@@ -128,6 +208,246 @@ func matchGlobParts(pattern, path []string) bool {
 		return false
 	}
 	return matchGlobParts(pattern[1:], path[1:])
+}
+
+// IgnoreSet is the complete ignore configuration for a scan: the rule set
+// discovered from the scan root and its ancestors, plus any rule sets found
+// in subdirectories during traversal. Nested sets are applied after the base
+// set, shallowest first, so the nearest declaration wins.
+type IgnoreSet struct {
+	base   *IgnorePattern
+	nested map[string]*IgnorePattern
+}
+
+// NewIgnoreSet builds a set from an explicit base rule set.
+func NewIgnoreSet(base *IgnorePattern) *IgnoreSet {
+	if base == nil {
+		base = NewIgnorePattern(nil)
+	}
+	return &IgnoreSet{base: base}
+}
+
+// EmptyIgnoreSet is a set that excludes nothing.
+func EmptyIgnoreSet() *IgnoreSet { return NewIgnoreSet(NewIgnorePattern(nil)) }
+
+// LoadIgnoreFile reads one ignore file's lines. A missing file yields no
+// lines and no error; an unreadable or malformed one is an error, because
+// silently scanning with fewer rules than the user wrote is a false negative
+// wearing a success message.
+func LoadIgnoreFile(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open ignore file %q: %w", path, err)
+	}
+	defer f.Close() //nolint:errcheck // read-only handle
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read ignore file %q: %w", path, err)
+	}
+	return lines, nil
+}
+
+// LoadIgnoreForDir merges every ignore file present in dir. It returns nil
+// when the directory has none.
+func LoadIgnoreForDir(dir string) (*IgnorePattern, error) {
+	var lines []string
+	found := false
+	for _, name := range IgnoreFileNames {
+		ls, err := LoadIgnoreFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, err
+		}
+		if len(ls) > 0 {
+			found = true
+			lines = append(lines, ls...)
+		}
+	}
+	if !found {
+		return nil, nil
+	}
+	return NewIgnorePattern(lines), nil
+}
+
+// LoadMinesweepIgnore loads a single ignore file by path. It is the
+// single-file form of LoadIgnoreForDir; a missing file yields an empty rule
+// set rather than an error.
+func LoadMinesweepIgnore(path string) (*IgnorePattern, error) {
+	lines, err := LoadIgnoreFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return NewIgnorePattern(lines), nil
+}
+
+// ignoreSearchDirs lists the directories to search for ignore files when
+// discovering configuration for start, outermost first.
+//
+// Discovery stops at the enclosing git repository root, or at the filesystem
+// root when start is not in a repository. Bounding the walk at the repository
+// keeps a stray ~/.minesweepignore from silently narrowing every scan on the
+// machine, which would remove coverage nobody asked to remove.
+func ignoreSearchDirs(start string) []string {
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return nil
+	}
+	// Walk up to the repository root, if any.
+	stop := ""
+	if top, err := runGitTopLevel(dir); err == nil && top != "" {
+		stop = top
+	}
+	var chain []string
+	for {
+		chain = append(chain, dir)
+		if stop != "" && sameDir(dir, stop) {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		if stop != "" && !isWithin(parent, stop) {
+			// Reached the filesystem root without hitting the repo root.
+			chain = append(chain, parent)
+			break
+		}
+		dir = parent
+	}
+	// Reverse to outermost-first.
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain
+}
+
+func sameDir(a, b string) bool {
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	if err1 != nil {
+		ra = a
+	}
+	if err2 != nil {
+		rb = b
+	}
+	return filepath.Clean(ra) == filepath.Clean(rb)
+}
+
+func isWithin(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func runGitTopLevel(dir string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// DiscoverIgnore builds the ignore set for a scan rooted at root: every
+// ignore file from the outermost relevant ancestor down to root, merged in
+// that order so nearer declarations win.
+func DiscoverIgnore(root string) (*IgnoreSet, error) {
+	var lines []string
+	seen := make(map[string]bool)
+	for _, dir := range ignoreSearchDirs(root) {
+		for _, name := range IgnoreFileNames {
+			p := filepath.Join(dir, name)
+			key := p
+			if abs, err := filepath.Abs(p); err == nil {
+				key = abs
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			ls, err := LoadIgnoreFile(p)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, ls...)
+		}
+	}
+	return NewIgnoreSet(NewIgnorePattern(lines)), nil
+}
+
+// AddNested registers the rule set found in a subdirectory, so it applies to
+// paths beneath it. dir is relative to the scan root.
+func (s *IgnoreSet) AddNested(dir string, p *IgnorePattern) {
+	if p == nil || len(p.rules) == 0 {
+		return
+	}
+	if s.nested == nil {
+		s.nested = make(map[string]*IgnorePattern)
+	}
+	key := strings.Trim(filepath.ToSlash(dir), "/")
+	if key == "" {
+		// An ignore file at the scan root is already the base set.
+		s.base = mergePatterns(s.base, p)
+		return
+	}
+	if existing := s.nested[key]; existing != nil {
+		s.nested[key] = mergePatterns(existing, p)
+		return
+	}
+	s.nested[key] = p
+}
+
+// Ignored reports whether rel (relative to the scan root) is excluded. Base
+// rules are applied first, then each nested rule set from shallowest to
+// deepest, so the nearest declaration has the final say.
+func (s *IgnoreSet) Ignored(rel string) bool {
+	if s == nil {
+		return false
+	}
+	rel = filepath.ToSlash(rel)
+	ignored, _ := s.base.decide(rel)
+	if len(s.nested) == 0 {
+		return ignored
+	}
+	for _, dir := range ancestorDirs(rel) {
+		p := s.nested[dir]
+		if p == nil {
+			continue
+		}
+		sub, ok := relUnder(dir, rel)
+		if !ok {
+			continue
+		}
+		if v, matched := p.decide(sub); matched {
+			ignored = v
+		}
+	}
+	return ignored
+}
+
+// Base exposes the root-level rule set.
+func (s *IgnoreSet) Base() *IgnorePattern {
+	if s == nil {
+		return nil
+	}
+	return s.base
+}
+
+func mergePatterns(a, b *IgnorePattern) *IgnorePattern {
+	combined := make([]ignoreRule, 0, len(a.rules)+len(b.rules))
+	combined = append(combined, a.rules...)
+	combined = append(combined, b.rules...)
+	return &IgnorePattern{rules: combined}
 }
 
 var DefaultSkipExtensions = []string{
@@ -156,6 +476,30 @@ var DefaultSkipDirs = []string{
 
 const DefaultMaxFileSize int64 = 50 * 1024 * 1024 // 50MB
 
+// SkipReason names why a file was excluded from a scan. Every reason is
+// reported back to the user: a file that was not inspected is a coverage gap,
+// and a security scanner should make "clean" hard to reach by accident.
+type SkipReason string
+
+const (
+	SkipReasonIgnore  SkipReason = "ignore-file"
+	SkipReasonExt     SkipReason = "extension"
+	SkipReasonTest    SkipReason = "test-file"
+	SkipReasonLarge   SkipReason = "size"
+	SkipReasonSkipDir SkipReason = "skip-dir"
+	SkipReasonVCS     SkipReason = "vcs-internals"
+)
+
+// SkipReasons is the fixed reporting order, most- to least-common by default.
+var SkipReasons = []SkipReason{
+	SkipReasonExt,
+	SkipReasonSkipDir,
+	SkipReasonIgnore,
+	SkipReasonTest,
+	SkipReasonLarge,
+	SkipReasonVCS,
+}
+
 // WalkStats records what the walk chose not to include, so callers can
 // surface coverage gaps instead of skipping silently.
 type WalkStats struct {
@@ -166,6 +510,78 @@ type WalkStats struct {
 	SkippedSymlink int
 	SkippedVendor  int // files under pruned dirs (node_modules, vendor, ...)
 	Kept           int
+
+	// ByReason breaks the counts above down by cause, and Examples keeps a
+	// bounded sample of the actual paths so a report can name what was
+	// dropped rather than only counting it. MaxExamples caps the sample
+	// (default 8); set to -1 to retain every path (--show-ignored).
+	ByReason    map[SkipReason]int
+	Examples    map[SkipReason][]string
+	MaxExamples int
+}
+
+const skipExampleLimit = 8
+
+func (ws *WalkStats) exampleLimit() int {
+	if ws.MaxExamples < 0 {
+		return int(^uint(0) >> 1) // unlimited
+	}
+	if ws.MaxExamples > 0 {
+		return ws.MaxExamples
+	}
+	return skipExampleLimit
+}
+
+// Note records that path was skipped for the given reason, keeping a bounded
+// sample of examples.
+func (ws *WalkStats) Note(reason SkipReason, path string) {
+	if ws.ByReason == nil {
+		ws.ByReason = make(map[SkipReason]int)
+		ws.Examples = make(map[SkipReason][]string)
+	}
+	ws.ByReason[reason]++
+	ex := ws.Examples[reason]
+	if len(ex) < ws.exampleLimit() {
+		ws.Examples[reason] = append(ex, path)
+	}
+}
+
+// Total returns the number of files excluded, by reason.
+func (ws *WalkStats) Total() int {
+	n := 0
+	for _, r := range SkipReasons {
+		n += ws.ByReason[r]
+	}
+	if n == 0 {
+		return ws.TotalSkipped()
+	}
+	return n
+}
+
+// Summary renders a one-line-per-cause breakdown suitable for a report, with
+// example paths. Only causes that actually dropped something are listed.
+func (ws *WalkStats) Summary() []string {
+	if len(ws.ByReason) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(SkipReasons))
+	for _, r := range SkipReasons {
+		n := ws.ByReason[r]
+		if n == 0 {
+			continue
+		}
+		line := fmt.Sprintf("%d %s", n, r)
+		if ex := ws.Examples[r]; len(ex) > 0 {
+			joined := strings.Join(ex, ", ")
+			if len(ex) < n {
+				line += " (e.g. " + joined + ")"
+			} else {
+				line += ": " + joined
+			}
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 func (ws *WalkStats) TotalSkipped() int {
@@ -182,6 +598,13 @@ type WalkOption struct {
 	SkipExtensions   []string
 	SkipDirs         []string
 	IncludeTestFiles bool
+	// NoIgnore disables .minesweepignore/.msignore entirely, including
+	// nested files. It is the deliberate override, not the default.
+	NoIgnore bool
+	// ignoreRoot is where ignore-file discovery starts. It is set
+	// internally so the walker and SkipChecker resolve configuration
+	// identically.
+	ignoreRoot string
 }
 
 func Walk(root string, ignore *IgnorePattern, ignoreFilePath string) ([]*File, error) {
@@ -199,73 +622,60 @@ func WalkWithOptions(root string, opts WalkOption) ([]*File, error) {
 	return walkWithOptions(root, opts)
 }
 
-func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
-	ip := opts.Ignore
-	if ip == nil {
-		ip = NewIgnorePattern(nil)
-		ignoreFilePath := opts.IgnoreFilePath
-		if ignoreFilePath == "" {
-			ignoreFilePath = filepath.Join(root, ".minesweepignore")
-		}
-		if fileIgnore, err := LoadMinesweepIgnore(ignoreFilePath); err == nil {
-			ip = mergeIgnorePatterns(ip, fileIgnore)
-		}
+// resolveIgnoreSet produces the ignore set for a scan. An explicit Ignore in
+// the options is honored as-is; otherwise the set is discovered from the scan
+// root and its ancestors. A malformed or unreadable ignore file is an error:
+// proceeding with fewer rules than the user wrote would report a clean scan
+// while silently skipping what they asked to skip, which is the failure mode
+// this tool exists to prevent.
+func resolveIgnoreSet(root string, opts WalkOption) (*IgnoreSet, error) {
+	if opts.NoIgnore {
+		return EmptyIgnoreSet(), nil
 	}
+	if opts.Ignore != nil {
+		return NewIgnoreSet(opts.Ignore), nil
+	}
+	if opts.IgnoreFilePath != "" {
+		lines, err := LoadIgnoreFile(opts.IgnoreFilePath)
+		if err != nil {
+			return nil, err
+		}
+		return NewIgnoreSet(NewIgnorePattern(lines)), nil
+	}
+	return DiscoverIgnore(root)
+}
 
-	skipDirs := opts.SkipDirs
-	if skipDirs == nil {
-		skipDirs = DefaultSkipDirs
+func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
+	opts.ignoreRoot = root
+	fs, err := newFilterSet(opts)
+	if err != nil {
+		return nil, err
 	}
+	ip := fs.ignore
+
 	// .git alone is pruned during traversal (its contents are not project
 	// data); other skip-dirs are DESCENDED so their files can be counted,
 	// keeping the skipped-coverage number honest.
-	var gitDir string
-	if root != "." && !strings.HasSuffix(root, string(filepath.Separator)) {
-		gitDir = filepath.Join(root, ".git") + string(filepath.Separator)
-	} else {
-		gitDir = filepath.Join(root, ".git") + string(filepath.Separator)
-	}
-	skipDirSet := make(map[string]bool)
-	for _, d := range skipDirs {
-		skipDirSet[d] = true
-	}
+	gitDir := filepath.Join(root, ".git") + string(filepath.Separator)
+
 	// Only directories WITHIN the scan root count: an ancestor segment
 	// that happens to share a name with a skip dir (/tmp scanning, a
 	// ~/go/src checkout, ...) must not nuke the whole walk.
-	isInSkipDir := func(path string) bool {
-		rel, err := filepath.Rel(root, path)
-		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+	isInSkipDir := func(rel string) bool {
+		segs := strings.Split(rel, string(filepath.Separator))
+		if len(segs) < 2 {
 			return false
 		}
-		segs := strings.Split(rel, string(filepath.Separator))
 		for _, seg := range segs[:len(segs)-1] {
-			if skipDirSet[seg] {
+			if fs.skipDirSet[seg] {
 				return true
 			}
 		}
 		return false
 	}
 
-	// Split extension rules into exact matches and suffix matches once per
-	// walk instead of re-scanning the slice for every file. Entries with an
-	// inner dot (".min.js") must be suffix-matched against the base name.
-	skipExts := opts.SkipExtensions
-	if skipExts == nil {
-		skipExts = DefaultSkipExtensions
-	}
-	skipExtSet := make(map[string]bool, len(skipExts))
-	var skipSuffixes []string
-	for _, e := range skipExts {
-		if strings.Contains(e[1:], ".") {
-			skipSuffixes = append(skipSuffixes, e)
-		} else {
-			skipExtSet[e] = true
-		}
-	}
-	includeTests := opts.IncludeTestFiles
-
 	var files []*File
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if opts.OnError != nil {
 				opts.OnError(path, err)
@@ -278,6 +688,30 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 			if name := d.Name(); name == ".git" || name == ".hg" || name == ".svn" {
 				return filepath.SkipDir
 			}
+			// Attempt to open the directory; if we cannot, this is a genuine
+			// coverage gap, not a config error.
+			if _, err := os.ReadDir(path); err != nil {
+				if opts.OnError != nil {
+					opts.OnError(path, err)
+				}
+				return nil // Skip this subtree entirely
+			}
+			// A nested ignore file scopes to its own directory, so record
+			// it against the path relative to the scan root. The root's own
+			// file is already part of the discovered base set.
+			if !opts.NoIgnore {
+				if nested, nerr := LoadIgnoreForDir(path); nerr != nil {
+					// An unreadable ignore file is a real source of confusion
+					// (it claims to exist but cannot be parsed), so treat it as
+					// an error that aborts the whole scan.
+					return nerr
+				} else if nested != nil {
+					relDir, rerr := filepath.Rel(root, path)
+					if rerr == nil {
+						ip.AddNested(relDir, nested)
+					}
+				}
+			}
 			return nil
 		}
 
@@ -285,55 +719,40 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 			return nil
 		}
 
-		if isInSkipDir(path) {
+		rel, _ := filepath.Rel(root, path)
+
+		// Directory-component check first, then the rest of the shared
+		// filter set. isInSkipDir and fs.reason both work off the relative
+		// path, so the walker and SkipChecker stay in lockstep.
+		if isInSkipDir(rel) {
 			if opts.Stats != nil {
 				opts.Stats.SkippedVendor++
+				opts.Stats.Note(SkipReasonSkipDir, rel)
 			}
 			return nil
 		}
 
-		rel, _ := filepath.Rel(root, path)
-		if ip.Ignored(rel) {
+		if reason, skip := fs.reasonExcludingSkipDir(rel); skip {
 			if opts.Stats != nil {
-				opts.Stats.SkippedIgnore++
-			}
-			return nil
-		}
-
-		ext := filepath.Ext(path)
-		if skipExtSet[ext] {
-			if opts.Stats != nil {
-				opts.Stats.SkippedExt++
-			}
-			return nil
-		}
-		if len(skipSuffixes) > 0 {
-			base := filepath.Base(path)
-			for _, sfx := range skipSuffixes {
-				if strings.HasSuffix(base, sfx) {
-					if opts.Stats != nil {
-						opts.Stats.SkippedExt++
-					}
-					return nil
+				switch reason {
+				case SkipReasonIgnore:
+					opts.Stats.SkippedIgnore++
+				case SkipReasonExt:
+					opts.Stats.SkippedExt++
+				case SkipReasonTest:
+					opts.Stats.SkippedTest++
 				}
-			}
-		}
-
-		if !includeTests && isTestFile(path) {
-			if opts.Stats != nil {
-				opts.Stats.SkippedTest++
+				opts.Stats.Note(reason, rel)
 			}
 			return nil
 		}
 
-		info, err := d.Info()
-		if err == nil && info.Size() > opts.MaxFileSize {
-			if opts.Stats != nil {
-				opts.Stats.SkippedLarge++
-			}
-			return nil
-		}
-
+		// Build the File before deciding on size. For a symlink, f.Size is
+		// the RESOLVED target size, not the length of the link path — so
+		// checking d.Info().Size() here let a symlink to an arbitrarily
+		// large file walk straight through the ceiling and then get read in
+		// full. Constructing first also means a d.Info() failure is reported
+		// rather than silently admitting an unchecked file.
 		f, err := newFileFromDirEntry(path, d, root)
 		if err != nil {
 			if opts.OnError != nil {
@@ -341,6 +760,18 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 			}
 			return nil
 		}
+
+		if f.Size > fs.maxSize {
+			if opts.Stats != nil {
+				opts.Stats.SkippedLarge++
+				opts.Stats.Note(SkipReasonLarge, rel)
+			}
+			return nil
+		}
+		// Re-assert the ceiling on the read itself. A file can grow between
+		// the directory read and the content load, and the ceiling is only
+		// real if it holds against the bytes actually delivered.
+		f.MaxContentBytes = fs.maxSize
 
 		// Content is loaded lazily by the scan workers so that file reads,
 		// binary detection, and any hashing happen concurrently instead of
@@ -363,57 +794,145 @@ func isTestFile(path string) bool {
 	return strings.HasSuffix(name, "_test") || strings.HasSuffix(name, ".test") || strings.HasSuffix(name, ".spec")
 }
 
-// SkipChecker applies the same filters a directory walk uses to individual
-// files, so diff and staged scans honor identical coverage rules. It is not
-// a traversal; callers resolve each path and ask.
-type SkipChecker struct {
-	root       string
-	ignore     *IgnorePattern
+// filterSet holds the resolved per-file filters shared by the walker and the
+// SkipChecker, so a scoped scan cannot drift from a full one.
+type filterSet struct {
+	ignore     *IgnoreSet
 	skipExtSet map[string]bool
 	skipSfx    []string
-	skipDirs   []string
+	skipDirSet map[string]bool
 	includeT   bool
 	maxSize    int64
 }
 
-// NewSkipChecker builds a per-file filter mirroring WalkWithOptions defaults,
-// including the repository's .minesweepignore file at root.
-func NewSkipChecker(root string, opts WalkOption) *SkipChecker {
-	ip := opts.Ignore
-	if ip == nil {
-		ip = NewIgnorePattern(nil)
-		if fileIgnore, err := LoadMinesweepIgnore(filepath.Join(root, ".minesweepignore")); err == nil {
-			ip = mergeIgnorePatterns(ip, fileIgnore)
-		}
+func newFilterSet(opts WalkOption) (*filterSet, error) {
+	fs := &filterSet{includeT: opts.IncludeTestFiles}
+	var err error
+	fs.ignore, err = resolveIgnoreSet(opts.ignoreRoot, opts)
+	if err != nil {
+		return nil, err
 	}
 	skipDirs := opts.SkipDirs
 	if skipDirs == nil {
 		skipDirs = DefaultSkipDirs
 	}
+	fs.skipDirSet = make(map[string]bool, len(skipDirs))
+	for _, d := range skipDirs {
+		fs.skipDirSet[d] = true
+	}
 	skipExts := opts.SkipExtensions
 	if skipExts == nil {
 		skipExts = DefaultSkipExtensions
 	}
-	sc := &SkipChecker{root: root, ignore: ip, skipDirs: skipDirs, includeT: opts.IncludeTestFiles}
-	sc.maxSize = opts.MaxFileSize
-	if sc.maxSize <= 0 {
-		sc.maxSize = DefaultMaxFileSize
+	fs.maxSize = opts.MaxFileSize
+	if fs.maxSize <= 0 {
+		fs.maxSize = DefaultMaxFileSize
 	}
-	sc.skipExtSet = make(map[string]bool, len(skipExts))
+	fs.skipExtSet = make(map[string]bool, len(skipExts))
 	for _, e := range skipExts {
 		if strings.Contains(e[1:], ".") {
-			sc.skipSfx = append(sc.skipSfx, e)
+			fs.skipSfx = append(fs.skipSfx, e)
 		} else {
-			sc.skipExtSet[e] = true
+			fs.skipExtSet[e] = true
 		}
 	}
+	return fs, nil
+}
+
+// reason reports why rel is excluded, or ok=false when it is not. Directory,
+// extension, ignore-file, and test-file reasons are all considered.
+func (fs *filterSet) reason(rel string) (SkipReason, bool) {
+	rel = filepath.ToSlash(rel)
+	segs := strings.Split(rel, "/")
+	if len(segs) > 1 {
+		for _, seg := range segs[:len(segs)-1] {
+			if fs.skipDirSet[seg] {
+				return SkipReasonSkipDir, true
+			}
+		}
+	}
+	return fs.reasonExcludingSkipDir(rel)
+}
+
+// reasonExcludingSkipDir is reason() without the skip-dir component check, so
+// the walker can account for that bucket separately without double-counting.
+func (fs *filterSet) reasonExcludingSkipDir(rel string) (SkipReason, bool) {
+	base := pathBase(filepath.ToSlash(rel))
+	if fs.ignore.Ignored(filepath.ToSlash(rel)) {
+		return SkipReasonIgnore, true
+	}
+	if fs.skipExtSet[filepath.Ext(base)] {
+		return SkipReasonExt, true
+	}
+	for _, sfx := range fs.skipSfx {
+		if strings.HasSuffix(base, sfx) {
+			return SkipReasonExt, true
+		}
+	}
+	if !fs.includeT && isTestFile(base) {
+		return SkipReasonTest, true
+	}
+	return "", false
+}
+
+// SkipChecker applies the same filters a directory walk uses to individual
+// files, so diff, staged, and history scans honor identical coverage rules —
+// including .minesweepignore/.msignore. It is not a traversal; callers resolve
+// each path and ask.
+type SkipChecker struct {
+	root  string
+	fs    *filterSet
+	stats *WalkStats
+}
+
+// NewSkipChecker builds a per-file filter mirroring WalkWithOptions defaults.
+// It returns an error when an ignore file cannot be read: an unreadable
+// .minesweepignore must not degrade into "scan everything and call it clean".
+func NewSkipChecker(root string, opts WalkOption) (*SkipChecker, error) {
+	opts.ignoreRoot = root
+	fs, err := newFilterSet(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &SkipChecker{root: root, fs: fs}, nil
+}
+
+// WithStats attaches skip accounting, so a scoped scan reports the same
+// coverage gaps a full scan does.
+func (sc *SkipChecker) WithStats(stats *WalkStats) *SkipChecker {
+	sc.stats = stats
 	return sc
 }
 
+// Classify reports why absPath is excluded, without recording stats.
+func (sc *SkipChecker) Classify(absPath string) (SkipReason, bool) {
+	return sc.classify(absPath)
+}
+
+// ClassifyRel is Classify for a path already relative to the checker's root.
+// It is how history mode filters repository-relative object paths, which have
+// no filesystem entry to resolve.
+func (sc *SkipChecker) ClassifyRel(rel string) (SkipReason, bool) {
+	rel = filepath.ToSlash(rel)
+	for _, vcs := range []string{".git", ".svn", ".hg"} {
+		if rel == vcs || strings.HasPrefix(rel, vcs+"/") {
+			return SkipReasonVCS, true
+		}
+	}
+	return sc.fs.reason(rel)
+}
+
 // ShouldSkip reports whether the file at absPath should be excluded from a
-// scoped scan. Mirror of the traversal filters: prune .git/.svn/.hg contents,
-// skip-dir nesting, ignore patterns, extensions, and test files.
+// scoped scan.
 func (sc *SkipChecker) ShouldSkip(absPath string) bool {
+	reason, skip := sc.classify(absPath)
+	if skip && sc.stats != nil {
+		sc.stats.Note(reason, sc.relLabel(absPath))
+	}
+	return skip
+}
+
+func (sc *SkipChecker) classify(absPath string) (SkipReason, bool) {
 	// Resolve both paths: git reports the toplevel with symlinks resolved
 	// (e.g. /private/var/... for /var/... on macOS), so comparisons must
 	// happen on a canonical form or every file looks external to the root.
@@ -425,53 +944,45 @@ func (sc *SkipChecker) ShouldSkip(absPath string) bool {
 	if rp, err := filepath.EvalSymlinks(absPath); err == nil {
 		absPath = rp
 	}
-	if strings.HasPrefix(absPath, filepath.Join(sc.root, ".git")+string(filepath.Separator)) ||
-		strings.HasPrefix(absPath, filepath.Join(sc.root, ".svn")+string(filepath.Separator)) ||
-		strings.HasPrefix(absPath, filepath.Join(sc.root, ".hg")+string(filepath.Separator)) {
-		return true
+	for _, vcs := range []string{".git", ".svn", ".hg"} {
+		if strings.HasPrefix(absPath, filepath.Join(sc.root, vcs)+string(filepath.Separator)) {
+			return SkipReasonVCS, true
+		}
 	}
 	rel, err := filepath.Rel(sc.root, absPath)
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
-		return true
+		return SkipReasonVCS, true
 	}
-	segs := strings.Split(rel, string(filepath.Separator))
-	skipDirSet := make(map[string]bool)
-	for _, d := range sc.skipDirs {
-		skipDirSet[d] = true
-	}
-	for _, seg := range segs[:len(segs)-1] {
-		if skipDirSet[seg] {
-			return true
-		}
-	}
-	if sc.ignore.Ignored(rel) {
-		return true
-	}
-	if sc.skipExtSet[filepath.Ext(absPath)] {
-		return true
-	}
-	if len(sc.skipSfx) > 0 {
-		base := filepath.Base(absPath)
-		for _, sfx := range sc.skipSfx {
-			if strings.HasSuffix(base, sfx) {
-				return true
-			}
-		}
-	}
-	if !sc.includeT && isTestFile(absPath) {
-		return true
-	}
-	return false
+	return sc.fs.reason(filepath.ToSlash(rel))
 }
 
 // ShouldSkipSize reports whether the file exceeds the scan's size ceiling.
-func (sc *SkipChecker) ShouldSkipSize(size int64) bool {
-	return size > sc.maxSize
+// path is recorded in stats when non-empty so size skips show up in the
+// coverage breakdown the same way every other filter does.
+func (sc *SkipChecker) ShouldSkipSize(size int64, path string) bool {
+	if size <= sc.fs.maxSize {
+		return false
+	}
+	if sc.stats != nil {
+		label := sc.relLabel(path)
+		if label == "" || label == "." {
+			label = "(unknown)"
+		}
+		sc.stats.Note(SkipReasonLarge, label)
+	}
+	return true
 }
 
-func mergeIgnorePatterns(a, b *IgnorePattern) *IgnorePattern {
-	combined := make([]ignoreRule, 0, len(a.patterns)+len(b.patterns))
-	combined = append(combined, a.patterns...)
-	combined = append(combined, b.patterns...)
-	return &IgnorePattern{patterns: combined}
+// MaxSize exposes the resolved size ceiling.
+func (sc *SkipChecker) MaxSize() int64 { return sc.fs.maxSize }
+
+// IgnoreSet exposes the resolved ignore configuration.
+func (sc *SkipChecker) IgnoreSet() *IgnoreSet { return sc.fs.ignore }
+
+// relLabel returns a stable, root-relative path for skip examples.
+func (sc *SkipChecker) relLabel(absPath string) string {
+	if rel, err := filepath.Rel(sc.root, absPath); err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.Base(absPath)
 }

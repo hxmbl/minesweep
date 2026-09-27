@@ -2,7 +2,6 @@ package detectors
 
 import (
 	"regexp"
-	"strings"
 
 	"minesweep/filesystem"
 	"minesweep/findings"
@@ -118,6 +117,11 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 			}
 			lineNum, col := li.LineCol(start)
 
+			// Evidence is attached by the engine to findings that survive
+			// filtering, not here — see the note in regex.go.
+			if !file.ClaimFinding() {
+				return fResults
+			}
 			fResults = append(fResults, findings.Finding{
 				Type:       pattern.name,
 				Severity:   pattern.severity,
@@ -129,8 +133,6 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 				Reason:     pattern.description,
 				RuleID:     pattern.name,
 				Tags:       pattern.tags,
-				Context:    li.Context(lineNum-1, 2),
-				SourceLine: strings.TrimSpace(li.LineText(lineNum - 1)),
 			})
 		}
 	}

@@ -23,6 +23,29 @@ import (
 	"minesweep"
 )
 
+// DefaultConfidenceFloor is the minimum confidence a finding must reach to be
+// reported. Detectors emit speculative low-confidence hits, and almost all of
+// them are noise; dropping them at the source also means they never occupy
+// memory. Override with --min-confidence, or set it to 0 to keep everything.
+const DefaultConfidenceFloor = 0.05
+
+// DefaultMaxFindings bounds how many findings a single scan retains. Four
+// megabytes of a repeated key pattern used to produce a hundred thousand
+// findings and hundreds of megabytes of heap; safety beats pathological
+// completeness here, and the truncation is reported rather than hidden.
+// Override with --max-findings; 0 disables the cap.
+const DefaultMaxFindings = 25000
+
+// Reasons a scan may be incomplete. Every one of these must reach the report
+// and the exit code: a scan that did not finish must never read as clean.
+const (
+	ReasonMemoryLimit = "memory limit reached; scan stopped early"
+	ReasonFindingCap  = "finding cap reached; some findings were dropped"
+	ReasonFileBudget  = "a file produced more findings than its budget allowed"
+	ReasonWorkerPanic = "a detector panicked; files it had not reached were not scanned"
+	ReasonMaxFiles    = "max files limit reached; only part of the tree was scanned"
+)
+
 type Config struct {
 	RulesDir                 string
 	ProfilesDir              string
@@ -46,10 +69,26 @@ type Config struct {
 	SuppressFile             string
 	IncludeTestFiles         bool
 	DisableInlineSuppression bool
+	// IncludeLowConfidence disables the DefaultConfidenceFloor, reporting
+	// even the speculative hits detectors emit.
+	IncludeLowConfidence bool
+	// NoIgnore disables .minesweepignore/.msignore in every scan mode. It is
+	// the deliberate override; the default is to honor the ignore files.
+	NoIgnore bool
 	// Resource limits
 	MaxFiles      int   // Maximum number of files to scan (0 = unlimited)
 	MemoryLimitMB int   // Maximum memory usage in MB (0 = unlimited)
 	MaxFileSizeMB int64 // Maximum file size in MB to scan (0 = use default)
+	// MaxFindings bounds retained findings (0 = unlimited). Defaults to
+	// DefaultMaxFindings when unset; use -1 to mean "unlimited" explicitly.
+	MaxFindings int
+
+	// DangerouslyShowSecrets keeps raw secret values in the report. It is
+	// presentation-only and deliberately not honoured from a config file.
+	DangerouslyShowSecrets bool
+	// ShowIgnored retains every skipped path in the report breakdown instead
+	// of a bounded sample. Useful when hunting for a dropped secret.
+	ShowIgnored bool
 	// Concurrency limits
 	MaxConcurrentReads int // Maximum concurrent file reads (0 = use Workers)
 }
@@ -65,6 +104,76 @@ type Engine struct {
 	bytesScanned atomic.Int64
 	filesSkipped atomic.Int64
 	filesFailed  atomic.Int64
+	// findingsKept tracks the running total so the per-file budget can be
+	// derived from what is actually left, rather than a guess up front.
+	findingsKept    atomic.Int64
+	findingsDropped atomic.Int64
+	// incompleteReasons records why a scan did not finish. Guarded by mu
+	// because workers and the memory monitor both append.
+	mu                sync.Mutex
+	incompleteReasons []string
+	// skipStats mirrors the walker's coverage accounting into the report.
+	skipStatsMu sync.Mutex
+	skipStats   *filesystem.WalkStats
+}
+
+// maxFindings returns the effective finding cap, or 0 for unlimited.
+func (e *Engine) maxFindings() int {
+	switch {
+	case e.config.MaxFindings < 0:
+		return 0
+	case e.config.MaxFindings == 0:
+		return DefaultMaxFindings
+	default:
+		return e.config.MaxFindings
+	}
+}
+
+// noteIncomplete records why the scan is not a complete answer. Repeated calls
+// with the same reason collapse to one entry.
+func (e *Engine) noteIncomplete(reason string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, r := range e.incompleteReasons {
+		if r == reason {
+			return
+		}
+	}
+	e.incompleteReasons = append(e.incompleteReasons, reason)
+}
+
+func (e *Engine) incomplete() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.incompleteReasons) == 0 {
+		return nil
+	}
+	out := make([]string, len(e.incompleteReasons))
+	copy(out, e.incompleteReasons)
+	return out
+}
+
+// prepareSkipStats returns a WalkStats configured for this scan's reporting
+// preferences (full path retention when --show-ignored is set).
+func (e *Engine) prepareSkipStats() *filesystem.WalkStats {
+	st := &filesystem.WalkStats{}
+	if e.config.ShowIgnored {
+		st.MaxExamples = -1
+	}
+	e.setSkipStats(st)
+	return st
+}
+
+func (e *Engine) setSkipStats(s *filesystem.WalkStats) {
+	e.skipStatsMu.Lock()
+	defer e.skipStatsMu.Unlock()
+	e.skipStats = s
+}
+
+func (e *Engine) getSkipStats() *filesystem.WalkStats {
+	e.skipStatsMu.Lock()
+	defer e.skipStatsMu.Unlock()
+	return e.skipStats
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -206,10 +315,50 @@ func (e *Engine) finalize(root string, allFindings []findings.Finding) (*finding
 		return nil, err
 	}
 
+	// The per-file budget can overshoot the global cap by up to one file's
+	// worth per worker, so trim here too. When a scan is truncated, the
+	// highest-confidence findings are the ones worth keeping.
+	filtered, dropped := trimToConfidenceCap(filtered, e.maxFindings())
+	if dropped > 0 {
+		e.findingsDropped.Add(int64(dropped))
+		e.noteIncomplete(ReasonFindingCap)
+	}
+
 	evaluated := e.evaluate(filtered)
 	sortFindings(evaluated)
 	rep := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
 	return &rep, nil
+}
+
+// trimToConfidenceCap keeps the cap highest-confidence findings, preserving
+// input order among equal confidences so the result stays deterministic.
+// Returns the kept findings and how many were dropped.
+func trimToConfidenceCap(fs []findings.Finding, cap int) ([]findings.Finding, int) {
+	if cap <= 0 || len(fs) <= cap {
+		return fs, 0
+	}
+	order := make([]int, len(fs))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		ia, ib := order[a], order[b]
+		if fs[ia].Confidence != fs[ib].Confidence {
+			return fs[ia].Confidence > fs[ib].Confidence
+		}
+		return ia < ib
+	})
+	keep := make(map[int]struct{}, cap)
+	for _, i := range order[:cap] {
+		keep[i] = struct{}{}
+	}
+	out := make([]findings.Finding, 0, cap)
+	for i, f := range fs {
+		if _, ok := keep[i]; ok {
+			out = append(out, f)
+		}
+	}
+	return out, len(fs) - cap
 }
 
 // dedupFindings removes duplicate findings sharing the same location, rule,
@@ -293,14 +442,29 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	e.bytesScanned.Store(0)
 	e.filesSkipped.Store(0)
 	e.filesFailed.Store(0)
+	e.findingsKept.Store(0)
+	e.findingsDropped.Store(0)
+	e.mu.Lock()
+	e.incompleteReasons = nil
+	e.mu.Unlock()
+	e.setSkipStats(nil)
+
 	start := time.Now()
 	rep, err := e.run(path)
 	if rep != nil {
+		// Counters are incremented where the work actually happened, so
+		// these are measurements, not predictions.
 		rep.FilesScanned = int(e.filesScanned.Load())
 		rep.BytesScanned = e.bytesScanned.Load()
 		rep.FilesSkipped = int(e.filesSkipped.Load())
 		rep.FilesFailed = int(e.filesFailed.Load())
 		rep.DurationMs = time.Since(start).Milliseconds()
+		rep.FindingsDropped = int(e.findingsDropped.Load())
+		rep.IncompleteReasons = e.incomplete()
+		rep.Incomplete = len(rep.IncompleteReasons) > 0
+		if st := e.getSkipStats(); st != nil {
+			rep.SkippedBy = st.Summary()
+		}
 	}
 	return rep, err
 }
@@ -350,19 +514,20 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 		top = root
 	}
 
-	maxFileSize := filesystem.DefaultMaxFileSize
-	if e.config.MaxFileSizeMB > 0 {
-		maxFileSize = e.config.MaxFileSizeMB * 1024 * 1024
-	}
 	// Diff/staged scans apply the exact same filters as a directory walk:
-	// skip dirs, extensions, test files (unless enabled), .minesweepignore,
-	// and the file-size ceiling. Loading every changed file regardless made
-	// scoped scans diverge from full scans.
-	checker := filesystem.NewSkipChecker(root, filesystem.WalkOption{
+	// skip dirs, extensions, test files (unless enabled), .minesweepignore
+	// and .msignore, and the file-size ceiling.
+	checker, err := filesystem.NewSkipChecker(root, filesystem.WalkOption{
 		SkipExtensions:   e.config.SkipExtensions,
 		IncludeTestFiles: e.config.IncludeTestFiles,
-		MaxFileSize:      maxFileSize,
+		MaxFileSize:      e.maxFileSize(),
+		NoIgnore:         e.config.NoIgnore,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("load ignore configuration: %w", err)
+	}
+	stats := e.prepareSkipStats()
+	checker.WithStats(stats)
 
 	var files []*filesystem.File
 	var skipped int
@@ -372,6 +537,7 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 			continue // changed file outside the requested scan root
 		}
 		if e.config.MaxFiles > 0 && len(files) >= e.config.MaxFiles {
+			e.noteIncomplete(ReasonMaxFiles)
 			break
 		}
 		rev := "HEAD"
@@ -394,10 +560,11 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 				skipped++
 				continue
 			}
+			file.MaxContentBytes = checker.MaxSize()
 			files = append(files, file)
 			continue
 		}
-		if checker.ShouldSkip(absPath) || checker.ShouldSkipSize(file.Size) {
+		if checker.ShouldSkip(absPath) || checker.ShouldSkipSize(file.Size, absPath) {
 			skipped++
 			continue
 		}
@@ -405,48 +572,52 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 		// pre-commit scan must flag exactly what would be committed,
 		// including deletions and unstaged edits.
 		file.UseLoader(contentLoader)
+		file.MaxContentBytes = checker.MaxSize()
 		files = append(files, file)
 	}
 	if skipped > 0 {
 		e.filesSkipped.Add(int64(skipped))
 	}
 
-	e.filesScanned.Store(int64(len(files)))
-	bytesTotal, failed := e.countContent(files)
-	e.bytesScanned.Store(bytesTotal)
-	e.filesFailed.Add(failed)
 	allFindings := e.detectParallel(files)
 	return e.finalize(root, allFindings)
 }
 
-// countContent sums the loaded content bytes and counts files whose content
-// could not be produced (deleted between walk and read, failed blob fetch),
-// so coverage gaps surface in the report instead of vanishing silently.
-func (e *Engine) countContent(files []*filesystem.File) (bytesTotal int64, failed int64) {
-	for _, file := range files {
-		content, err := file.GetContent()
-		if err != nil {
-			failed++
-			continue
-		}
-		bytesTotal += int64(len(content))
+func (e *Engine) maxFileSize() int64 {
+	if e.config.MaxFileSizeMB > 0 {
+		return e.config.MaxFileSizeMB * 1024 * 1024
 	}
-	return bytesTotal, failed
+	return filesystem.DefaultMaxFileSize
 }
 
+// runSingleFile scans a path the user named explicitly. It still honors
+// .minesweepignore: an ignore file that quietly stops working when a file is
+// named directly is not a source of truth. --no-ignore is the override.
 func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
-	file, err := filesystem.NewFileWithRoot(path, filepath.Dir(path))
+	dir := filepath.Dir(path)
+	if !e.config.NoIgnore {
+		checker, err := filesystem.NewSkipChecker(dir, filesystem.WalkOption{
+			SkipExtensions:   e.config.SkipExtensions,
+			IncludeTestFiles: e.config.IncludeTestFiles,
+			MaxFileSize:      e.maxFileSize(),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("load ignore configuration: %w", err)
+		}
+		if reason, skip := checker.Classify(path); skip {
+			return nil, fmt.Errorf("%s is excluded by ignore rules (%s); pass --no-ignore to scan it anyway",
+				path, reason)
+		}
+	}
+
+	file, err := filesystem.NewFileWithRoot(path, dir)
 	if err != nil {
 		return nil, err
 	}
-	if err := file.LoadContent(); err != nil {
-		return nil, err
-	}
+	file.MaxContentBytes = e.maxFileSize()
 
-	e.filesScanned.Store(1)
-	e.bytesScanned.Store(file.Size)
 	allFindings := e.detect(file)
-	return e.finalize(filepath.Dir(path), allFindings)
+	return e.finalize(dir, allFindings)
 }
 
 // runHistory scans every unique blob reachable from all refs. Cost scales
@@ -454,10 +625,28 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 // scanned exactly once, then findings are attributed to the commit that
 // introduced them.
 func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
-	maxFileSize := filesystem.DefaultMaxFileSize
-	if e.config.MaxFileSizeMB > 0 {
-		maxFileSize = e.config.MaxFileSizeMB * 1024 * 1024
+	maxFileSize := e.maxFileSize()
+
+	// History mode applies the same coverage filters as a working-tree scan.
+	// It previously applied only the size ceiling, so skip-dirs, test files,
+	// and the ignore files were all bypassed — in the one mode where a
+	// committed-then-ignored secret is most likely to be sitting there.
+	// History object paths are relative to the repository top level, so the
+	// filters are rooted there rather than at the requested scan path.
+	top := git.TopLevel(root)
+	if top == "" {
+		top = root
 	}
+	checker, err := filesystem.NewSkipChecker(top, filesystem.WalkOption{
+		SkipExtensions:   e.config.SkipExtensions,
+		IncludeTestFiles: e.config.IncludeTestFiles,
+		MaxFileSize:      maxFileSize,
+		NoIgnore:         e.config.NoIgnore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load ignore configuration: %w", err)
+	}
+	stats := e.prepareSkipStats()
 
 	objects, err := git.ListHistoryObjects(root)
 	if err != nil {
@@ -484,6 +673,7 @@ func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
 			sampled = append(sampled, objects[idx])
 		}
 		objects = sampled
+		e.noteIncomplete(ReasonMaxFiles)
 		fmt.Fprintf(os.Stderr, "warning: reached max files limit (%d), scanning a deterministic sample of %d history objects\n",
 			e.config.MaxFiles, e.config.MaxFiles)
 	}
@@ -496,45 +686,41 @@ func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
 
 	files := make([]*filesystem.File, 0, len(objects))
 	displaySHA := make(map[string]string, len(objects))
-	var bytesTotal int64
-	var skippedOversize int
+	var skippedOversize, skippedFiltered int
 	for _, obj := range objects {
 		obj := obj
 		if obj.Path == "" {
 			continue
 		}
+		// History paths are repository-relative with no filesystem entry, so
+		// the same filter set is applied to them directly.
+		if reason, skip := checker.ClassifyRel(obj.Path); skip {
+			stats.Note(reason, obj.Path)
+			skippedFiltered++
+			continue
+		}
 		if obj.Size > maxFileSize {
+			stats.Note(filesystem.SkipReasonLarge, obj.Path)
 			skippedOversize++
 			continue
 		}
-		bytesTotal += obj.Size
 
 		display := fmt.Sprintf("%s@%s", obj.Path, shortSHA(obj.SHA))
 		displaySHA[display] = obj.SHA
-		files = append(files, filesystem.NewBlobFile(display, obj.Size, func() ([]byte, error) {
+		bf := filesystem.NewBlobFile(display, obj.Size, func() ([]byte, error) {
 			return fetcher.Fetch(obj.SHA)
-		}))
+		})
+		bf.MaxContentBytes = maxFileSize
+		files = append(files, bf)
 	}
-	if skippedOversize > 0 {
-		fmt.Fprintf(os.Stderr, "minesweep: note: %d history objects larger than %d MB were not scanned\n",
-			skippedOversize, maxFileSize/1024/1024)
-		e.filesSkipped.Add(int64(skippedOversize))
+	total := skippedOversize + skippedFiltered
+	if total > 0 {
+		fmt.Fprintf(os.Stderr, "minesweep: note: %d of %d history objects were not scanned (%d by ignore/skip rules, %d larger than %d MB)\n",
+			total, len(objects), skippedFiltered, skippedOversize, maxFileSize/1024/1024)
+		e.filesSkipped.Add(int64(total))
 	}
 
-	e.filesScanned.Store(int64(len(files)))
-	e.bytesScanned.Store(bytesTotal)
 	allFindings := e.detectParallel(files)
-
-	// Blob fetches can fail mid-scan (pack corruption, torn object database);
-	// those files silently produced zero findings, so surface the gap.
-	fetchFailed := int64(0)
-	for _, file := range files {
-		if _, err := file.GetContent(); err != nil {
-			fetchFailed++
-		}
-	}
-	e.filesFailed.Add(fetchFailed)
-
 	attributed := e.attributeHistory(root, allFindings, displaySHA)
 	return e.finalize(root, attributed)
 }
@@ -588,34 +774,26 @@ func shortSHA(sha string) string {
 }
 
 func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
-	// Calculate max file size for walker
-	maxFileSize := filesystem.DefaultMaxFileSize
-	if e.config.MaxFileSizeMB > 0 {
-		maxFileSize = e.config.MaxFileSizeMB * 1024 * 1024
-	}
-
-	var stats filesystem.WalkStats
+	stats := e.prepareSkipStats()
 	files, err := filesystem.WalkWithOptions(root, filesystem.WalkOption{
-		MaxFileSize:      maxFileSize,
+		MaxFileSize:      e.maxFileSize(),
 		SkipExtensions:   e.config.SkipExtensions,
 		IncludeTestFiles: e.config.IncludeTestFiles,
-		Stats:            &stats,
+		NoIgnore:         e.config.NoIgnore,
+		Stats:            stats,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("walk directory: %w", err)
 	}
-	e.filesSkipped.Store(int64(stats.TotalSkipped()))
+	e.filesSkipped.Store(int64(stats.Total()))
 
 	// Apply max files limit
 	if e.config.MaxFiles > 0 && len(files) > e.config.MaxFiles {
 		files = files[:e.config.MaxFiles]
+		e.noteIncomplete(ReasonMaxFiles)
 		fmt.Fprintf(os.Stderr, "warning: reached max files limit (%d), scanning first %d files\n", e.config.MaxFiles, e.config.MaxFiles)
 	}
 
-	e.filesScanned.Store(int64(len(files)))
-	bytesTotal, failed := e.countContent(files)
-	e.bytesScanned.Store(bytesTotal)
-	e.filesFailed.Add(failed)
 	allFindings := e.detectParallel(files)
 	return e.finalize(root, allFindings)
 }
@@ -638,12 +816,48 @@ func relativizeFindings(root string, fs []findings.Finding) []findings.Finding {
 	return fs
 }
 
+// detect runs every detector over one file, then filters, then attaches
+// evidence to the survivors.
+//
+// The order matters for memory. Content is loaded here and nowhere else, the
+// file is released before returning, and the surrounding source lines — the
+// largest field on a finding — are built only for findings that survive
+// filtering. Doing evidence first and filtering afterwards meant allocating
+// context blocks for the ~99% of findings that were about to be discarded.
 func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	if file == nil {
 		return nil
 	}
+	// The file is finished with once detect returns. Releasing here is what
+	// keeps peak memory proportional to the worker count rather than to the
+	// total size of the tree.
+	defer file.Release()
 
-	// Acquire semaphore for file read
+	// Accounting lives here, where the content is already in hand. A separate
+	// pre-pass would force every file resident before detection began,
+	// defeating lazy loading outright.
+	content, err := file.GetContent()
+	if err != nil {
+		e.filesFailed.Add(1)
+		if e.config.Verbose {
+			fmt.Fprintf(os.Stderr, "minesweep: %s: %v\n", file.Path, err)
+		}
+		return nil
+	}
+	e.filesScanned.Add(1)
+	e.bytesScanned.Add(int64(len(content)))
+
+	// Bound this file's contribution from what is actually left of the global
+	// budget, so a single pathological input cannot outrun the cap.
+	if cap := e.maxFindings(); cap > 0 {
+		room := cap - int(e.findingsKept.Load())
+		if room <= 0 {
+			e.noteIncomplete(ReasonFindingCap)
+			return nil
+		}
+		file.SetFindingBudget(room)
+	}
+
 	if e.readSemaphore != nil {
 		e.readSemaphore <- struct{}{}
 		defer func() { <-e.readSemaphore }()
@@ -651,40 +865,67 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 
 	var all []findings.Finding
 	for _, d := range e.detectors {
-		fResults := d.Detect(file)
-		all = append(all, fResults...)
+		all = append(all, d.Detect(file)...)
+	}
+	if file.FindingBudgetHit {
+		e.noteIncomplete(ReasonFileBudget)
 	}
 
-	var minSev findings.Severity
+	minSev := findings.Severity(0)
 	if e.config.MinSeverity != "" {
 		minSev = findings.ParseSeverity(e.config.MinSeverity)
 	}
+	minConf := e.config.MinConfidence
+	if minConf == 0 && !e.config.IncludeLowConfidence {
+		minConf = DefaultConfidenceFloor
+	}
 
-	var filtered []findings.Finding
+	filtered := all[:0]
 	for _, f := range all {
-		if e.config.MinConfidence > 0 && f.Confidence < e.config.MinConfidence {
+		if minConf > 0 && f.Confidence < minConf {
 			continue
 		}
-
 		if minSev > 0 && f.Severity < minSev {
 			continue
 		}
-
 		if len(e.config.Tags) > 0 && !hasAnyTag(f.Tags, e.config.Tags) {
 			continue
 		}
-
 		filtered = append(filtered, f)
 	}
 
-	if len(filtered) > 0 && !e.config.DisableInlineSuppression {
-		content, err := file.GetContent()
-		if err == nil {
-			filtered = findings.FilterInlineSuppressions(filtered, string(content))
+	if !e.config.DisableInlineSuppression && len(filtered) > 0 {
+		// The LineIndex is used directly rather than splitting the content
+		// into a []string: that split copied the whole file and allocated a
+		// string header per line, for every file that had any finding.
+		if li := file.Lines(); li != nil {
+			filtered = findings.FilterInlineSuppressionsLines(filtered, li)
 		}
 	}
 
+	// Evidence last: only for findings that are actually reported.
+	attachEvidence(file, filtered)
+
+	e.findingsKept.Add(int64(len(filtered)))
 	return filtered
+}
+
+// attachEvidence fills in Context and SourceLine from the file's line index.
+func attachEvidence(file *filesystem.File, fs []findings.Finding) {
+	if len(fs) == 0 {
+		return
+	}
+	li := file.Lines()
+	if li == nil {
+		return
+	}
+	for i := range fs {
+		if fs[i].Line <= 0 {
+			continue
+		}
+		fs[i].Context = li.Context(fs[i].Line-1, 2)
+		fs[i].SourceLine = strings.TrimSpace(li.LineText(fs[i].Line - 1))
+	}
 }
 
 func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
@@ -706,7 +947,9 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 	fileCh := make(chan *filesystem.File, len(files))
 	resultCh := make(chan result, len(files))
 
-	var filesScanned atomic.Int64
+	// Progress-display only. The authoritative counts live on the Engine and
+	// are incremented where the work actually happened.
+	var filesProcessed atomic.Int64
 	var findingsFound atomic.Int64
 
 	totalFiles := int64(len(files))
@@ -737,8 +980,9 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 				case <-ticker.C:
 					if e.allocBytes() > initialAlloc+limit {
 						if memCancelWarned.CompareAndSwap(false, true) {
-							fmt.Fprintf(os.Stderr, "warning: memory limit (%d MB) reached; stopping scan early, results are incomplete\n", e.config.MemoryLimitMB)
+							fmt.Fprintf(os.Stderr, "warning: memory limit (%d MB) reached; stopping scan early\n", e.config.MemoryLimitMB)
 						}
+						e.noteIncomplete(ReasonMemoryLimit)
 						cancel()
 						return
 					}
@@ -759,12 +1003,16 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
+			// A panic must not take the worker down silently. Whatever the
+			// worker had not reached when it died was never scanned, so that
+			// is counted and reported rather than folded into a clean result.
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Fprintf(os.Stderr, "panic in detector goroutine: %v\n", r)
+					e.noteIncomplete(ReasonWorkerPanic)
 				}
 			}()
-			defer wg.Done()
 			for file := range fileCh {
 				if ctx.Err() != nil {
 					continue // drain the channel without processing
@@ -779,12 +1027,12 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 					}()
 					fResults := e.detect(file)
 					findingsFound.Add(int64(len(fResults)))
-					filesScanned.Add(1)
+					filesProcessed.Add(1)
 					resultCh <- result{findings: fResults}
 				}()
 
-				if e.config.Verbose && filesScanned.Load()%100 == 0 {
-					fmt.Fprintf(os.Stderr, "\rScanning: %d/%d files (%d findings)", filesScanned.Load(), totalFiles, findingsFound.Load())
+				if e.config.Verbose && filesProcessed.Load()%100 == 0 {
+					fmt.Fprintf(os.Stderr, "\rScanning: %d/%d files (%d findings)", filesProcessed.Load(), totalFiles, findingsFound.Load())
 				}
 			}
 		}()

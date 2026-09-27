@@ -147,6 +147,10 @@ func (b *batchChecker) Close() {
 	b.cmd.Wait() //nolint:errcheck // child cleanup; errors are not actionable
 }
 
+// blobBufRetainBytes is the scratch-buffer size above which the BlobFetcher
+// stops holding onto its high-water mark between requests.
+const blobBufRetainBytes = 1 << 20
+
 // BlobFetcher serves blob contents over a single long-lived
 // `git cat-file --batch` process. Requests are serialized internally: the
 // request/response protocol cannot interleave.
@@ -180,8 +184,12 @@ func NewBlobFetcher(root string) (*BlobFetcher, error) {
 	return &BlobFetcher{root: top, cmd: cmd, in: in, out: bufio.NewReaderSize(out, 256*1024)}, nil
 }
 
-// Fetch returns the content of one blob. The returned slice is owned by the
-// fetcher and valid only until the next call, from any goroutine.
+// Fetch returns the content of one blob.
+//
+// The caller owns the returned slice and may retain it indefinitely: the
+// fetcher's internal buffer is reused by every later fetch, so handing that
+// buffer out would corrupt any file still holding it. Callers are expected to
+// release the copy once a file has been scanned.
 func (f *BlobFetcher) Fetch(sha string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -221,12 +229,20 @@ func (f *BlobFetcher) Fetch(sha string) ([]byte, error) {
 	// callers cache results across goroutines.
 	out := make([]byte, size)
 	copy(out, buf)
+	// This buffer grows to the largest blob seen and is otherwise never
+	// released, so one large object would pin that much memory for the rest
+	// of the scan. Drop it when it has grown well past the current need;
+	// small-blob scans keep reusing it and stay allocation-free.
+	if cap(f.buf) > blobBufRetainBytes && int64(cap(f.buf)) > 4*size {
+		f.buf = nil
+	}
 	return out, nil
 }
 
 func (f *BlobFetcher) Close() {
 	f.in.Close()
 	f.cmd.Wait() //nolint:errcheck // child cleanup; errors are not actionable
+	f.buf = nil
 }
 
 // commitAttribution carries who introduced an object into history.

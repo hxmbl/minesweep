@@ -57,9 +57,6 @@ type matchResult struct {
 	End   int
 }
 
-// Maximum length of content to match against (to prevent memory exhaustion)
-const maxMatchLength = 10 * 1024 * 1024 // 10MB
-
 type RegexDetector struct {
 	rules []Rule
 }
@@ -135,12 +132,12 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 		return nil
 	}
 	lowered := file.LoweredContent()
-	if len(content) > maxMatchLength {
-		content = content[:maxMatchLength]
-		if len(lowered) > maxMatchLength {
-			lowered = lowered[:maxMatchLength]
-		}
-	}
+	// Content length is not capped here. The previous 10 MB truncation
+	// silently dropped everything after the 10 MB mark, so a file that was
+	// merely large reported a clean result while hiding its tail — the worst
+	// kind of failure for a secret scanner. Size is now bounded once, at load
+	// time, by filesystem.File.MaxContentBytes (--max-file-size-mb), and a
+	// file that exceeds it is recorded as unreadable rather than half-scanned.
 
 	base := filepath.Base(file.Path)
 	var li *filesystem.LineIndex
@@ -157,10 +154,17 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 					li = file.Lines()
 				}
 				line, col := li.LineCol(m.Start)
-				sourceLine := strings.TrimSpace(li.LineText(line - 1))
 				if len(rule.Allowlist) > 0 &&
-					suppressedByAllowlist(rule.Allowlist, file.Path, m.Value, sourceLine) {
+					suppressedByAllowlist(rule.Allowlist, file.Path, m.Value, sourceLineOf(li, line)) {
 					continue
+				}
+				// Evidence (Context, SourceLine) is deliberately NOT built
+				// here. Most findings are discarded by confidence and severity
+				// filtering downstream, and the surrounding lines are the
+				// largest field on a finding. The engine attaches evidence to
+				// the survivors only.
+				if !file.ClaimFinding() {
+					return fResults
 				}
 				tags := make([]string, len(rule.Tags))
 				copy(tags, rule.Tags)
@@ -175,13 +179,17 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 					Reason:     rule.Description,
 					RuleID:     rule.ID,
 					Tags:       tags,
-					Context:    li.Context(line-1, 2),
-					SourceLine: sourceLine,
 				})
 			}
 		}
 	}
 	return fResults
+}
+
+// sourceLineOf returns the trimmed text of a 1-based line, for allowlist
+// matching that needs the line text without materializing a Finding for it.
+func sourceLineOf(li *filesystem.LineIndex, line int) string {
+	return strings.TrimSpace(li.LineText(line - 1))
 }
 
 func (p *Pattern) compile() error {

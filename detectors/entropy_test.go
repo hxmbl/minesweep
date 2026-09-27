@@ -189,13 +189,17 @@ func TestEntropyDetectorSourceLine(t *testing.T) {
 		Path:    "test.txt",
 		Content: []byte(content),
 	}
+	// Detectors no longer build surrounding source lines; the engine
+	// attaches evidence to the survivors only. The Line field is set
+	// so the engine can locate the source later.
 	results := d.Detect(file)
 	for _, f := range results {
 		if f.Value == longHigh {
-			if f.SourceLine != "token "+longHigh {
-				t.Errorf("expected source line 'token ...', got %q", f.SourceLine)
+			if f.SourceLine != "" {
+				t.Errorf("expected detector-level source line to be empty (engine attaches it), got %q", f.SourceLine)
 			}
 			return
 		}
 	}
+	t.Fatal("finding not found")
 }

@@ -30,50 +30,78 @@ func ParseInlineSuppression(line string) *InlineSuppression {
 	return nil
 }
 
-func FilterInlineSuppressions(findings []Finding, fileContent string) []Finding {
-	if len(findings) == 0 {
+// LineLookup is the minimum a file's line index must provide to evaluate
+// inline suppressions. It exists so this package stays free of an import
+// cycle with filesystem.
+type LineLookup interface {
+	LineCount() int
+	LineText(idx int) string
+}
+
+// FilterInlineSuppressionsLines applies inline suppressions using a line
+// index instead of a []string.
+//
+// The previous implementation split the whole file into lines — copying every
+// byte and allocating a string header per line — and then ran the suppression
+// regex over every one of them, even for a file with a single finding. Only
+// the finding's own line and the three above it can ever suppress it, so this
+// version looks at at most four lines per finding and memoizes the result.
+func FilterInlineSuppressionsLines(findings []Finding, lines LineLookup) []Finding {
+	if len(findings) == 0 || lines == nil {
 		return findings
 	}
+	n := lines.LineCount()
 
-	lines := strings.Split(fileContent, "\n")
-	lineSuppressions := make(map[int]*InlineSuppression)
-
-	for i, line := range lines {
-		if sp := ParseInlineSuppression(line); sp != nil {
-			lineSuppressions[i+1] = sp
+	// Sparse memo: only the lines that were actually consulted are cached.
+	suppression := make(map[int]*InlineSuppression)
+	cached := make(map[int]*InlineSuppression)
+	suppressAt := func(line int) *InlineSuppression {
+		if sp, ok := cached[line]; ok {
+			return sp
 		}
+		sp := ParseInlineSuppression(lines.LineText(line - 1))
+		cached[line] = sp
+		if sp != nil {
+			suppression[line] = sp
+		}
+		return sp
 	}
 
-	var result []Finding
+	result := make([]Finding, 0, len(findings))
 	for _, f := range findings {
-		if isInlineSuppressed(f, lines, lineSuppressions) {
+		target := f.Line
+		if target <= 0 || target > n {
+			result = append(result, f)
+			continue
+		}
+		if isSuppressedAt(f, n, suppressAt) {
 			continue
 		}
 		result = append(result, f)
 	}
-
 	return result
 }
 
-func isInlineSuppressed(f Finding, lines []string, suppressions map[int]*InlineSuppression) bool {
-	targetLine := f.Line
-	if targetLine <= 0 || targetLine > len(lines) {
-		return false
-	}
-
-	for checkLine := targetLine; checkLine >= 1 && checkLine >= targetLine-3; checkLine-- {
-		if sp, ok := suppressions[checkLine]; ok {
-			if sp.RuleIDs == nil {
+// isSuppressedAt walks back up to three lines looking for a suppression that
+// covers f, matching the original window.
+func isSuppressedAt(f Finding, n int, suppressAt func(int) *InlineSuppression) bool {
+	for check := f.Line; check >= 1 && check >= f.Line-3; check-- {
+		if check > n {
+			continue
+		}
+		sp := suppressAt(check)
+		if sp == nil {
+			continue
+		}
+		if sp.RuleIDs == nil {
+			return true
+		}
+		for _, ruleID := range sp.RuleIDs {
+			if ruleID == f.RuleID {
 				return true
-			}
-			for _, ruleID := range sp.RuleIDs {
-				if ruleID == f.RuleID {
-					return true
-				}
 			}
 		}
 	}
-
 	return false
 }
 

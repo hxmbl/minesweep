@@ -34,6 +34,17 @@ type FileConfig struct {
 	MaxFileSizeMB int64 `yaml:"max_file_size_mb" json:"max_file_size_mb"`
 	// Concurrency limits
 	MaxConcurrentReads int `yaml:"max_concurrent_reads" json:"max_concurrent_reads"`
+	// MaxFindings bounds reported findings (0 = engine default).
+	MaxFindings int `yaml:"max_findings" json:"max_findings"`
+	// NoIgnore disables .minesweepignore/.msignore. It weakens coverage
+	// reporting, so an untrusted auto-discovered config may not set it.
+	NoIgnore bool `yaml:"no_ignore" json:"no_ignore"`
+	// IncludeLowConfidence disables the default confidence floor.
+	IncludeLowConfidence bool `yaml:"include_low_confidence" json:"include_low_confidence"`
+	// DangerouslyShowSecrets prints raw secret values. It is deliberately not
+	// configurable from a file: opting in must be a deliberate act on the
+	// command line, never something a checked-in config can do for you.
+	DangerouslyShowSecrets bool `yaml:"dangerously_show_secrets" json:"dangerously_show_secrets"`
 }
 
 var configNames = []string{".minesweep.yml", ".minesweep.yaml", "minesweep.yml", "minesweep.yaml"}

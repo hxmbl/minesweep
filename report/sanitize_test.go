@@ -88,22 +88,22 @@ func TestCensorValue(t *testing.T) {
 		{
 			line:  "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
 			value: "AKIAIOSFODNN7EXAMPLE",
-			want:  "export AWS_ACCESS_KEY_ID=AKIAIOSF.._[CENSORED]",
+			want:  "export AWS_ACCESS_KEY_ID=sha256:1a5d44a2dca1",
 		},
 		{
 			line:  "api_key=sk_1234567890abcdefghijklmnop",
 			value: "sk_1234567890abcdefghijklmnop",
-			want:  "api_key=sk_12345.._[CENSORED]",
+			want:  "api_key=sha256:93c103f6f882",
 		},
 		{
 			line:  "password=hunter2",
 			value: "hunter2",
-			want:  "password=hunt.._[CENSORED]",
+			want:  "password=sha256:f52fbd32b2b3",
 		},
 		{
 			line:  "key=ab",
 			value: "ab",
-			want:  "key=ab.._[CENSORED]",
+			want:  "key=sha256:fb8e20fc2e4c",
 		},
 		{
 			line:  "export KEY=value",

@@ -319,7 +319,18 @@ func TestIgnorePatternGitignoreStyle(t *testing.T) {
 		{"subdirectory", []string{"build/"}, "src/build/file.o", true},
 		{"vendor without star", []string{"vendor/"}, "vendor/pkg/file.go", true},
 		{"vendor star single level", []string{"vendor/*"}, "vendor/pkg", true},
-		{"vendor star no deep", []string{"vendor/*"}, "vendor/pkg/file.go", false},
+		// Verified against `git check-ignore`: excluding vendor/pkg excludes
+		// everything under it, because a file cannot be re-included while a
+		// parent directory is excluded. The previous expectation of false
+		// encoded a false negative.
+		{"vendor star covers descendants", []string{"vendor/*"}, "vendor/pkg/file.go", true},
+		{"anchored to root only", []string{"/root.env"}, "a/root.env", false},
+		{"anchored to root", []string{"/root.env"}, "root.env", true},
+		{"anchored dir covers descendants", []string{"test/fixtures"}, "test/fixtures/e.env", true},
+		{"anchored dir nested path", []string{"sub/secrets"}, "sub/secrets/a.env", true},
+		{"unanchored basename any depth", []string{"node_modules"}, "a/node_modules/pkg.js", true},
+		{"later negation re-includes", []string{"*.env", "!keep.env"}, "keep.env", false},
+		{"negation then ignore wins", []string{"!keep.env", "*.env"}, "keep.env", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -977,14 +988,14 @@ func TestIgnorePatternConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			cases := map[string]bool{
-				"debug.log":          true,
-				"build/output.o":     true,
-				"important.log":      false,
-				"vendor/pkg":         true,
-				"vendor/pkg/file.go": false,
-				"main.go":            false,
-				"src/main.go":        false,
-			}
+"debug.log":          true,
+		"build/output.o":     true,
+		"important.log":      false,
+		"vendor/pkg":         true,
+		"vendor/pkg/file.go": true, // verified against git: subdirectories inherit the exclusion
+		"main.go":            false,
+		"src/main.go":        false,
+	}
 			for path, want := range cases {
 				if got := ip.Ignored(path); got != want {
 					t.Errorf("concurrent Ignored(%q) = %v, want %v", path, got, want)

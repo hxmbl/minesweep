@@ -145,3 +145,53 @@ func TestWriteTextCleanScanShowsStats(t *testing.T) {
 		t.Errorf("expected duration in clean output, got:\n%s", out)
 	}
 }
+
+func TestWriteTextShowsSkipBreakdown(t *testing.T) {
+	report := findings.RiskReport{
+		RiskScore:    findings.RiskScoreNone,
+		Summary:      "No secrets or sensitive data detected.",
+		SafeToShare:  map[string]bool{},
+		FilesScanned: 1,
+		FilesSkipped: 3,
+		SkippedBy: []string{
+			"2 extension (e.g. yarn.lock, go.sum)",
+			"1 test-file: foo.spec.js",
+		},
+	}
+	var buf bytes.Buffer
+	if err := WriteText(&buf, &report, TextOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "3 files skipped") {
+		t.Errorf("expected skip count, got:\n%s", out)
+	}
+	if !strings.Contains(out, "yarn.lock") || !strings.Contains(out, "foo.spec.js") {
+		t.Errorf("expected named skipped files, got:\n%s", out)
+	}
+	if strings.Contains(out, "size/test/vendor") {
+		t.Errorf("stale hardcoded skip message still present:\n%s", out)
+	}
+}
+
+func TestWriteTextShowsIncomplete(t *testing.T) {
+	report := findings.RiskReport{
+		RiskScore:         findings.RiskScoreNone,
+		Summary:           "No secrets or sensitive data detected.",
+		SafeToShare:       map[string]bool{},
+		Incomplete:        true,
+		IncompleteReasons: []string{"memory limit exceeded"},
+		FindingsDropped:   0,
+	}
+	var buf bytes.Buffer
+	if err := WriteText(&buf, &report, TextOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "INCOMPLETE SCAN") {
+		t.Errorf("expected incomplete banner, got:\n%s", out)
+	}
+	if !strings.Contains(out, "memory limit exceeded") {
+		t.Errorf("expected incomplete reason, got:\n%s", out)
+	}
+}

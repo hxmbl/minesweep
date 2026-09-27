@@ -38,6 +38,9 @@ func (li *LineIndex) LineCol(pos int) (line, col int) {
 	return i + 1, pos - int(li.starts[i]) + 1
 }
 
+// LineCount returns the number of lines in the indexed content.
+func (li *LineIndex) LineCount() int { return len(li.starts) }
+
 // LineText returns the raw text of the given 0-based line index without the
 // trailing newline.
 func (li *LineIndex) LineText(idx int) string {

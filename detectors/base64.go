@@ -195,22 +195,33 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 				Mode:     file.Mode,
 				IsBinary: isBinaryContent(decoded),
 			}
+			// Hand the inner scan whatever budget is left, so a decoded
+			// payload cannot outrun the cap either.
+			decodedFile.SetFindingBudget(file.FindingBudget)
 			decodedFindings := d.regexDetector.Detect(decodedFile)
-			// Adjust the findings to indicate they were found in base64
+			// Adjust the findings to indicate they were found in base64.
+			// The fact that they were decoded is carried by Type and Reason;
+			// the surrounding source lines are attached by the engine, which
+			// shows the base64 token in situ — more useful than a synthetic
+			// context block that omitted the file entirely.
 			for i := range decodedFindings {
+				if !file.ClaimFinding() {
+					return fResults
+				}
 				decodedFindings[i] = remap(decodedFindings[i], decoded, cand)
 				decodedFindings[i].Type = "base64_" + decodedFindings[i].Type
 				decodedFindings[i].Reason = "Base64 encoded secret detected: " + decodedFindings[i].Reason
-				// Add context about the base64 string
-				decodedFindings[i].Context += "\n[Base64 encoded content detected and decoded]"
+				fResults = append(fResults, decodedFindings[i])
 			}
-			fResults = append(fResults, decodedFindings...)
 		} else {
 			// Without regex detector, just report the base64 string as a finding
 			if li == nil {
 				li = file.Lines()
 			}
 			line, col := li.LineCol(cand.start)
+			if !file.ClaimFinding() {
+				return fResults
+			}
 			fResults = append(fResults, findings.Finding{
 				Type:       "base64_encoded_secret",
 				Severity:   findings.SeverityMedium,
@@ -222,8 +233,6 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 				Reason:     "Base64 encoded content with high entropy detected",
 				RuleID:     "base64-high-entropy",
 				Tags:       []string{"base64", "encoded", "secret"},
-				Context:    "Base64 string: " + truncateString(cand.value, 50) + "...",
-				SourceLine: strings.TrimSpace(li.LineText(line - 1)),
 			})
 		}
 	}

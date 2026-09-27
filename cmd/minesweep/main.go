@@ -142,6 +142,11 @@ func main() {
 	root.Flags().IntVarP(&cfg.MemoryLimitMB, "memory-limit-mb", "", 0, "Maximum memory usage in MB (0 = unlimited)")
 	root.Flags().Int64VarP(&cfg.MaxFileSizeMB, "max-file-size-mb", "", 0, "Maximum file size in MB to scan (0 = use default)")
 	root.Flags().IntVarP(&cfg.MaxConcurrentReads, "max-concurrent-reads", "", 0, "Maximum concurrent file reads (0 = use workers)")
+	root.Flags().IntVar(&cfg.MaxFindings, "max-findings", engine.DefaultMaxFindings, "Maximum findings to report; highest-confidence kept when exceeded (0 = unlimited)")
+	root.Flags().BoolVar(&cfg.NoIgnore, "no-ignore", false, "Scan everything, ignoring .minesweepignore and .msignore")
+	root.Flags().BoolVar(&cfg.ShowIgnored, "show-ignored", false, "List every skipped file path (default: sample per cause)")
+	root.Flags().BoolVar(&cfg.IncludeLowConfidence, "include-low-confidence", false, "Report findings below the default confidence floor")
+	root.Flags().BoolVar(&cfg.DangerouslyShowSecrets, "dangerously-show-secrets", false, "Print raw secret values instead of hashes")
 
 	root.AddCommand(&cobra.Command{
 		Use:   "install-hooks",
@@ -233,6 +238,15 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MaxFiles) },
 		func(f *config.FileConfig) bool { return f.MaxFiles > 0 }),
+	numField("max_findings", "max-findings", false,
+		func(f *config.FileConfig) string {
+			if f.MaxFindings > 0 {
+				return fmt.Sprint(f.MaxFindings)
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MaxFindings) },
+		func(f *config.FileConfig) bool { return f.MaxFindings > 0 }),
 	numField("memory_limit_mb", "memory-limit-mb", false,
 		func(f *config.FileConfig) string {
 			if f.MemoryLimitMB > 0 {
@@ -266,6 +280,26 @@ var configFields = []configField{
 		func(f *config.FileConfig) bool { return f.MaxConcurrentReads > 0 }),
 
 	// ---- security-relevant: ignored from discovered configs ----
+	strField("no_ignore", "no-ignore", true,
+		func(f *config.FileConfig) string {
+			if f.NoIgnore {
+				return "true"
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { c.NoIgnore = v == "true" },
+		func(f *config.FileConfig) bool { return f.NoIgnore }),
+	strField("include_low_confidence", "include-low-confidence", false,
+		func(f *config.FileConfig) string {
+			if f.IncludeLowConfidence {
+				return "true"
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { c.IncludeLowConfidence = v == "true" },
+		func(f *config.FileConfig) bool { return f.IncludeLowConfidence }),
+	// Intentionally has no config-file entry: raw secret values must be
+	// opted into on the command line, never by a file in the repository.
 	pathField("rules_dir", "rules", func(c *engine.Config, v string) { c.RulesDir = v }, func(f *config.FileConfig) bool { return f.RulesDir != "" }),
 	pathField("profiles_dir", "profiles", func(c *engine.Config, v string) { c.ProfilesDir = v }, func(f *config.FileConfig) bool { return f.ProfilesDir != "" }),
 	pathField("policy_dir", "policy-dir", func(c *engine.Config, v string) { c.PolicyDir = v }, func(f *config.FileConfig) bool { return f.PolicyDir != "" }),
@@ -427,6 +461,14 @@ func runScan(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("path does not exist: %s\n\nDouble-check the spelling, or run 'minesweep .' to scan the current directory", scanPath)
 	}
 
+	// The CLI's own default is DefaultMaxFindings, so an explicit
+	// --max-findings 0 can only mean the user asked for no limit. The engine
+	// keeps 0 = "apply the default" for library callers who never set the
+	// field; translate so the two meanings do not collide.
+	if cfg.MaxFindings == 0 {
+		cfg.MaxFindings = -1
+	}
+
 	wd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
@@ -519,6 +561,25 @@ func scanAndReport(scanPath string) (int, error) {
 		return 0, fmt.Errorf("scan: %w", err)
 	}
 
+	// Censor secrets before any output format sees the report.
+	if !cfg.DangerouslyShowSecrets {
+		reportData = report.CensorReport(reportData)
+	}
+
+	// An incomplete scan must never read as a clean one. Exit 2 says "I did
+	// not fully look", which is different in kind from exit 1's "I looked and
+	// found something": a truncated scan with no findings is the result most
+	// likely to be trusted wrongly.
+	if reportData != nil && reportData.Incomplete {
+		fmt.Fprintf(os.Stderr, "\nminesweep: INCOMPLETE SCAN — results do not cover the whole target.\n")
+		for _, reason := range reportData.IncompleteReasons {
+			fmt.Fprintf(os.Stderr, "  - %s\n", reason)
+		}
+		if reportData.FindingsDropped > 0 {
+			fmt.Fprintf(os.Stderr, "  - %s\n", fmt.Sprintf("%d findings dropped by the --max-findings cap", reportData.FindingsDropped))
+		}
+	}
+
 	if outputJSON {
 		if err := report.WriteJSON(os.Stdout, reportData); err != nil {
 			return 0, err
@@ -550,6 +611,11 @@ func scanAndReport(scanPath string) (int, error) {
 		}
 	}
 
+	// Exit 2 is reserved for "the answer is not trustworthy" and outranks the
+	// findings check: a caller that gets 2 must not read it as "clean".
+	if reportData != nil && reportData.Incomplete {
+		return 2, nil
+	}
 	if reportData != nil {
 		minSev := findings.ParseSeverity(cfg.FailOn)
 		for _, f := range reportData.Findings {
@@ -578,8 +644,10 @@ func nextStepHints(scanPath string, data *findings.RiskReport) []string {
 		hints = append(hints, "Block secrets before every commit:\n      minesweep install-hooks")
 	}
 
-	if !cfg.Verbose {
-		hints = append(hints, "Show matched values and context:\n      minesweep -v .")
+	if !cfg.Verbose && !cfg.DangerouslyShowSecrets {
+		hints = append(hints, "Show hashed values and context:\n      minesweep -v .\n    Reveal raw secrets only when needed:\n      minesweep -v --dangerously-show-secrets .")
+	} else if cfg.Verbose && !cfg.DangerouslyShowSecrets {
+		hints = append(hints, "Reveal raw secret values:\n      minesweep -v --dangerously-show-secrets .")
 	}
 
 	if hasFindings && !showSnippets && len(hints) < 3 {

@@ -3,6 +3,9 @@ package filesystem
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +32,20 @@ type File struct {
 	SymlinkTarget string
 	IsBinary      bool
 	Hash          string
+	// MaxContentBytes bounds how much content will be loaded. Zero means
+	// unlimited. Exceeding it is reported as an error, never as a silent
+	// truncation: a partly-scanned file is a false negative, and producing
+	// false negatives is the one failure this tool must not have.
+	MaxContentBytes int64
+	// FindingBudget caps how many findings detectors may emit for this
+	// file. Zero means unlimited. The engine sets it from the global
+	// remaining budget, which is what keeps one pathological file from
+	// producing hundreds of thousands of findings before the global cap is
+	// ever consulted. It lives on File because File is the per-scan unit
+	// every detector already receives, so the budget is race-free without
+	// mutating shared detector state.
+	FindingBudget    int
+	FindingBudgetHit bool
 	// Lazy loading support
 	contentLoaded bool
 	contentErr    error
@@ -40,6 +57,9 @@ type File struct {
 	// (e.g. git blobs). It runs at most once, under contentMu.
 	loader func() ([]byte, error)
 }
+
+// ErrTooLarge is returned when content exceeds a File's MaxContentBytes.
+var ErrTooLarge = errors.New("content exceeds the configured size ceiling")
 
 // isSafePath checks if a path is safe (doesn't traverse outside root)
 func isSafePath(path, root string) bool {
@@ -199,6 +219,9 @@ func (f *File) contentLocked() ([]byte, error) {
 
 	if f.loader != nil {
 		data, err := f.loader()
+		if err == nil && f.MaxContentBytes > 0 && int64(len(data)) > f.MaxContentBytes {
+			err = fmt.Errorf("%w: %d bytes over a %d byte ceiling", ErrTooLarge, int64(len(data))-f.MaxContentBytes, f.MaxContentBytes)
+		}
 		f.Content = data
 		f.contentErr = err
 		f.contentLoaded = true
@@ -216,7 +239,7 @@ func (f *File) contentLocked() ([]byte, error) {
 		return f.Content, nil
 	}
 
-	data, err := os.ReadFile(f.Path)
+	data, err := f.readBounded()
 	if err != nil {
 		f.contentErr = err
 		f.contentLoaded = true
@@ -228,6 +251,71 @@ func (f *File) contentLocked() ([]byte, error) {
 	f.IsBinary = IsBinary(data)
 
 	return f.Content, nil
+}
+
+// readBounded loads the file, refusing anything past MaxContentBytes.
+//
+// The walker's size check is not sufficient on its own: a file can grow
+// between the directory read and this read, so the ceiling is re-enforced
+// here against the bytes actually delivered. Reading one byte past the limit
+// detects overflow without buffering the whole oversized file.
+func (f *File) readBounded() ([]byte, error) {
+	if f.MaxContentBytes <= 0 {
+		return os.ReadFile(f.Path)
+	}
+	fh, err := os.Open(f.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer fh.Close() //nolint:errcheck // read-only handle
+
+	data, err := io.ReadAll(io.LimitReader(fh, f.MaxContentBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > f.MaxContentBytes {
+		return nil, fmt.Errorf("%w: limit %d bytes", ErrTooLarge, f.MaxContentBytes)
+	}
+	return data, nil
+}
+
+// ClaimFinding reserves one unit of the file's finding budget and reports
+// whether a detector may emit another finding. Once the budget is spent it
+// returns false forever, so a detector can simply stop.
+func (f *File) ClaimFinding() bool {
+	if f.FindingBudget <= 0 {
+		return true // unlimited
+	}
+	if f.FindingBudgetHit || f.FindingBudget <= 0 {
+		f.FindingBudgetHit = true
+		return false
+	}
+	f.FindingBudget--
+	return true
+}
+
+// SetFindingBudget arms (or disarms) the budget for this file.
+func (f *File) SetFindingBudget(n int) {
+	f.FindingBudget = n
+	f.FindingBudgetHit = false
+}
+
+// Release drops the cached content and every view derived from it, so a file
+// that has finished scanning stops holding memory. The File stays usable:
+// content is re-read on demand.
+//
+// LineIndex must be cleared alongside Content because it retains a reference
+// to the same backing array — nil'ing Content alone would keep every byte of
+// the file alive.
+func (f *File) Release() {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+	f.Content = nil
+	f.lowered = nil
+	f.lineIdx = nil
+	f.Hash = ""
+	f.contentLoaded = false
+	f.contentErr = nil
 }
 
 // ContentHash returns the BLAKE3 hash of the file content, computing it on
