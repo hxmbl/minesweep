@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"minesweep/findings"
 )
@@ -192,5 +193,117 @@ func TestCensorFindingStillCensorsEvidenceForTokenShapedValue(t *testing.T) {
 	}
 	if strings.Contains(got.SourceLine, "sha256:sha256:") {
 		t.Errorf("token was hashed twice: %q", got.SourceLine)
+	}
+}
+
+// #14: a field that must occupy one line. SanitizeTerminal deliberately keeps \n
+// and \t because a context block needs them, which meant a file name, a git
+// author or a commit subject could forge whole report blocks. Those strings come
+// from the repository and from git metadata, not from the scanner.
+func TestSanitizeLineNeutralisesLineBreaks(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"a\nb", `a\nb`},
+		{"a\rb", `a\rb`},
+		{"a\tb", `a\tb`},
+		{"a\r\nb", `a\r\nb`},
+		{"a\u2028b", `a\u2028b`}, // line separator
+		{"a\u2029b", `a\u2029b`}, // paragraph separator
+		{"ab", "a^[Eb"},         // NEL
+		{"ab", `a\eb`},          // ESC
+		{"ab", "a^[[b"},         // C1 CSI
+		{"plain/path.env", "plain/path.env"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := SanitizeLine(c.in); got != c.want {
+			t.Errorf("SanitizeLine(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// The forged-finding case end to end: an author name and a commit summary must
+// not be able to clear the screen or plant a clickable link.
+func TestGitMetadataCannotForgeTerminalOutput(t *testing.T) {
+	f := findings.Finding{
+		Type:          "AWS Secret Access Key",
+		RuleID:        "aws-secret-key",
+		Severity:      findings.SeverityCritical,
+		Confidence:    0.95,
+		File:          "a.env",
+		Line:          1,
+		Author:        "Alice [31mRED[0m]8;;http://evil.example\\CLICK",
+		CommitSummary: "add creds [2J[31mFAKE-CRITICAL: 1 critical finding[0m",
+		Context:       "> a.env:1",
+	}
+	var buf bytes.Buffer
+	opts := TextOptions{Verbose: true, Snippets: false, Color: ColorNever}
+	if err := WriteText(&buf, &findings.RiskReport{Findings: []findings.Finding{f}}, opts); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("raw ESC reached the report:\n%q", out)
+	}
+	// The forged text still appears, but only as inert characters after a \e
+	// escape: neutralising a payload must not mean deleting evidence of it.
+	if !strings.Contains(out, "FAKE-CRITICAL") {
+		t.Error("the commit summary text should still be visible, escaped")
+	}
+	for _, want := range []string{`Alice \e[31mRED`, `\e]8;;http://evil.example`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q to appear escaped, got:\n%s", want, out)
+		}
+	}
+}
+
+// SkippedBy echoes file names and prints on a CLEAN scan, before any secret is
+// found, so it is the widest-reaching injection point of all.
+func TestSkippedByNamesCannotForgeLines(t *testing.T) {
+	rep := &findings.RiskReport{
+		FilesSkipped: 1,
+		SkippedBy:    []string{"1 extension: a\u001b[2J.env\n  ✓ SAFE TO SHARE"},
+	}
+	var buf bytes.Buffer
+	if err := WriteText(&buf, rep, TextOptions{Color: ColorNever}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("raw ESC reached the report:\n%q", out)
+	}
+	if strings.Contains(out, "\n  ✓ SAFE TO SHARE") {
+		t.Error("a skipped file name forged a real line")
+	}
+	if !strings.Contains(out, `\n  ✓ SAFE TO SHARE`) {
+		t.Errorf("expected the line break to be visible, got:\n%s", out)
+	}
+}
+
+func TestDashboardSanitisesAndTruncatesOnRunes(t *testing.T) {
+	d := GenerateDashboard(&findings.RiskReport{Findings: []findings.Finding{
+		{RuleID: "r-very-long-rule-identifier-that-overflows", Type: "T]8;;evil", Severity: findings.SeverityLow, Confidence: 0.5, File: "a\nb.env"},
+		{RuleID: "r-very-long-rule-identifier-that-overflows", Type: "T]8;;evil", Severity: findings.SeverityCritical, Confidence: 0.9, File: "c.env"},
+	}})
+	var buf bytes.Buffer
+	if err := WriteDashboard(&buf, d, true); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("raw ESC reached the dashboard:\n%q", out)
+	}
+	if !strings.Contains(out, `\e]8;;evil`) {
+		t.Errorf("expected the OSC sequence escaped, got:\n%s", out)
+	}
+	if !strings.Contains(out, `a\nb.env`) {
+		t.Errorf("expected the file name's line break visible, got:\n%s", out)
+	}
+	if !utf8.ValidString(out) {
+		t.Error("dashboard emitted invalid UTF-8 (a rune was split by truncation)")
+	}
+	// The rule's severity must be the worst one it produced, not whichever
+	// finding happened to be first.
+	if d.Rules[0].Severity != findings.SeverityCritical {
+		t.Errorf("rule severity = %v, want critical", d.Rules[0].Severity)
 	}
 }

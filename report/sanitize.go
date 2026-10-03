@@ -69,6 +69,45 @@ func needsEscape(r rune) bool {
 		(r >= 0x80 && r <= 0x9f)
 }
 
+// SanitizeLine neutralises a value that must occupy exactly one line.
+//
+// SanitizeTerminal deliberately preserves \n and \t, because a context block
+// genuinely needs them. That is wrong for a single field: a file name containing
+// a newline, a git author name, or a commit summary carrying a line break can
+// forge whole report blocks, and those strings come from the repository and from
+// git metadata rather than from the scanner.
+//
+// Newlines, carriage returns and tabs become visible escapes, and every other
+// control character is handled as SanitizeTerminal does. A path or a commit
+// subject remains legible.
+func SanitizeLine(s string) string {
+	if !strings.ContainsFunc(s, needsLineEscape) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteString(SanitizeTerminal(string(r)))
+		}
+	}
+	return b.String()
+}
+
+func needsLineEscape(r rune) bool {
+	if r == '\n' || r == '\r' || r == '\t' {
+		return true
+	}
+	return needsEscape(r)
+}
+
 // CensorFinding returns a copy of f with its secret value replaced by a stable
 // token, and with secrets removed from the evidence printed alongside it.
 //

@@ -98,7 +98,9 @@ func writeCoverageNotes(tw *textWriter, p palette, report *findings.RiskReport, 
 		tw.writeln(p.dim(fmt.Sprintf("%snote: %d %s skipped by filters and not scanned",
 			indent, report.FilesSkipped, pluralWord(report.FilesSkipped, "file"))))
 		for _, line := range report.SkippedBy {
-			tw.writeln(p.dim(fmt.Sprintf("%s  - %s", indent, line)))
+			// SkippedBy echoes file names and prints on a CLEAN scan, before any
+			// secret is found. A name containing a newline forges report blocks.
+			tw.writeln(p.dim(fmt.Sprintf("%s  - %s", indent, SanitizeLine(line))))
 		}
 	}
 	if report.FilesFailed > 0 {
@@ -180,21 +182,21 @@ func writeGroups(tw *textWriter, p palette, opts TextOptions, groups []severityG
 func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Finding) {
 	action := actionLabel(p, f.Action)
 	conf := fmt.Sprintf("%.0f%%", f.Confidence*findings.ConfidenceScale)
-	tw.writefmt("  %s %s\n", action, p.bold(SanitizeTerminal(f.Type)))
-	loc := fmt.Sprintf("%s:%d · %s confident", SanitizeTerminal(f.File), f.Line, conf)
+	tw.writefmt("  %s %s\n", action, p.bold(SanitizeLine(f.Type)))
+	loc := fmt.Sprintf("%s:%d · %s confident", SanitizeLine(f.File), f.Line, conf)
 	if len(f.Commit) >= 7 {
 		loc += fmt.Sprintf(" · commit %s", shortHash(f.Commit))
 	}
 	tw.writeln(p.dim(loc))
 	if f.Author != "" || f.Date != "" {
-		who := strings.TrimSpace(f.Author)
+		who := strings.TrimSpace(SanitizeLine(f.Author))
 		if who != "" {
 			who = "by " + who
 		}
-		tw.writeln(p.dim(fmt.Sprintf("          introduced %s %s", f.Date, who)))
+		tw.writeln(p.dim(fmt.Sprintf("          introduced %s %s", SanitizeLine(f.Date), who)))
 	}
 	if f.CommitSummary != "" {
-		tw.writefmt("          %s\n", p.dim(wrapText("\""+f.CommitSummary+"\"", 12)))
+		tw.writefmt("          %s\n", p.dim(wrapText("\""+SanitizeLine(f.CommitSummary)+"\"", 12)))
 	}
 
 	if opts.Snippets && f.SourceLine != "" {
@@ -263,7 +265,7 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 	if txt := remediationFor(f); txt != "" {
 		tw.writefmt("          %s %s\n", p.cyan("↳"), wrapText(txt, 12))
 	} else if f.Reason != "" {
-		tw.writefmt("          %s %s\n", p.cyan("↳"), wrapText(f.Reason, 12))
+		tw.writefmt("          %s %s\n", p.cyan("↳"), wrapText(SanitizeLine(f.Reason), 12))
 	}
 	if opts.Verbose && f.Context != "" {
 		tw.writeln(p.dim("          Context:"))
@@ -299,7 +301,7 @@ func writeRiskFactors(tw *textWriter, p palette, report *findings.RiskReport, op
 	}
 	tw.writeln(sectionTitle(p, "Risk factors"))
 	for _, r := range report.Reasons {
-		tw.writefmt("  %s %s\n", p.yellow("•"), r)
+		tw.writefmt("  %s %s\n", p.yellow("•"), SanitizeLine(r))
 	}
 	tw.writeln("")
 }
