@@ -36,6 +36,6 @@ rules:
     severity: low
     tags: [gcp, cloud]
     patterns:
-      - regex: '(?i)(?:project|gcp_project|google_project)\s*[:=]\s*["\x27]?([a-z][a-z0-9\-]{4,28}[a-z0-9])["\x27]?'
+      - regex: '(?i)(?:project|gcp_project|google_project)[ \t]*[:=][ \t]*["\x27]?([a-z][a-z0-9\-]{4,28}[a-z0-9])["\x27]?'
         confidence: 0.60
         capture_group: 1

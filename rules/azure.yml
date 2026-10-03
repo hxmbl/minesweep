@@ -6,7 +6,7 @@ rules:
     severity: critical
     tags: [azure, cloud, credentials]
     patterns:
-      - regex: '(?i)(?:account_key|storage_key|azure_key)\s*[:=]\s*["\x27]?([A-Za-z0-9+/]{88}==)["\x27]?'
+      - regex: '(?i)(?:account_key|storage_key|azure_key)[ \t]*[:=][ \t]*["\x27]?([A-Za-z0-9+/]{88}==)["\x27]?'
         confidence: 0.90
         capture_group: 1
 
@@ -37,7 +37,7 @@ rules:
     severity: critical
     tags: [azure, cloud, credentials]
     patterns:
-      - regex: '(?i)(?:client_secret|azure_client_secret|aad_client_secret)\s*[:=]\s*["\x27]?([A-Za-z0-9\-_~.]{34,})["\x27]?'
+      - regex: '(?i)(?:client_secret|azure_client_secret|aad_client_secret)[ \t]*[:=][ \t]*["\x27]?([A-Za-z0-9\-_~.]{34,})["\x27]?'
         confidence: 0.85
         capture_group: 1
 

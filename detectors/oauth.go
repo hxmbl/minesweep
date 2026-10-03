@@ -41,12 +41,12 @@ func NewOAuthDetector() *OAuthDetector {
 	return &OAuthDetector{
 		patterns: []oauthPattern{
 			newOAuthPattern("oauth_client_secret",
-				`(?i)(oauth|client)[_-]?secret\s*[:=]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
+				`(?i)(oauth|client)[_-]?secret[ \t]*[:=][ \t]*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
 				findings.SeverityHigh, 0.80,
 				[]string{"oauth", "secret", "credentials"}, "OAuth client secret"),
 
 			newOAuthPattern("oauth_access_token",
-				`(?i)(oauth|access)[_-]?token\s*[:=]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
+				`(?i)(oauth|access)[_-]?token[ \t]*[:=][ \t]*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
 				findings.SeverityHigh, 0.80,
 				[]string{"oauth", "token", "credentials"}, "OAuth access token"),
 
@@ -58,7 +58,7 @@ func NewOAuthDetector() *OAuthDetector {
 			// Anchored to an explicit key/value context: an unanchored
 			// fixed-length match would flag every git SHA-1 in sight.
 			newOAuthPattern("bitbucket_token",
-				`(?i)bitbucket[_-]?(?:token|app[_-]?password)\s*[:=]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
+				`(?i)bitbucket[_-]?(?:token|app[_-]?password)[ \t]*[:=][ \t]*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
 				findings.SeverityHigh, 0.85,
 				[]string{"bitbucket", "token", "credentials", "vcs"}, "Bitbucket app password or token"),
 
@@ -68,7 +68,7 @@ func NewOAuthDetector() *OAuthDetector {
 				[]string{"session", "cookie", "credentials"}, "Session cookie or ID"),
 
 			newOAuthPattern("cloud_storage_credentials",
-				`(?i)(aws|gcp|azure|s3|gs|blob)\s*(access|secret|key|token|password)\s*[:=]\s*['"]?[A-Za-z0-9/+=@\-_]{20,}['"]?`,
+				`(?i)(aws|gcp|azure|s3|gs|blob)\s*(access|secret|key|token|password)[ \t]*[:=][ \t]*['"]?[A-Za-z0-9/+=@\-_]{20,}['"]?`,
 				findings.SeverityHigh, 0.80,
 				[]string{"cloud", "storage", "credentials"}, "Cloud storage credentials"),
 		},

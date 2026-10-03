@@ -48,9 +48,10 @@ rules:
     severity: high
     tags: [database, password]
     patterns:
-      - regex: '(?i)(?:db_password|database_password|mysql_password|postgres_password|redis_password)\s*[:=]\s*["\x27]?([^\s"\x27]{8,})["\x27]?'
+      - regex: '(?i)(?:db_password|database_password|mysql_password|postgres_password|redis_password)[ \t]*[:=][ \t]*["\x27]?([^\s"\x27]{8,})["\x27]?'
         confidence: 0.80
         capture_group: 1
+        require_value: true
 
   - id: database-url
     type: regex
@@ -59,5 +60,5 @@ rules:
     severity: high
     tags: [database, url]
     patterns:
-      - regex: '(?i)(?:database_url|db_url|database_uri|db_uri)\s*[:=]\s*["\x27]?(postgres(ql)?|mysql|mongodb(\+srv)?|redis)://[^\s"\x27]+["\x27]?'
+      - regex: '(?i)(?:database_url|db_url|database_uri|db_uri)[ \t]*[:=][ \t]*["\x27]?(postgres(ql)?|mysql|mongodb(\+srv)?|redis)://[^\s"\x27]+["\x27]?'
         confidence: 0.85

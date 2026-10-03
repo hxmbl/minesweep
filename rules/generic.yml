@@ -7,10 +7,10 @@ rules:
     tags: [credentials, api-key]
     patterns:
       # Only match when there's clear context that this is a secret
-      - regex: (?i)(api[_-]?key|apikey|secret[_-]?key|access[_-]?key|auth[_-]?token|api[_-]?secret)\s*[:=]\s*['"]?([A-Za-z0-9\-_]{20,})['"]?
+      - regex: (?i)(api[_-]?key|apikey|secret[_-]?key|access[_-]?key|auth[_-]?token|api[_-]?secret)[ \t]*[:=][ \t]*['"]?([A-Za-z0-9\-_]{20,})['"]?
         confidence: 0.45
         capture_group: 2
-      - regex: (?i)(key|token|secret|password|credential)\s*[:=]\s*['"]?([A-Za-z0-9\-_]{20,})['"]?
+      - regex: (?i)(key|token|secret|password|credential)[ \t]*[:=][ \t]*['"]?([A-Za-z0-9\-_]{20,})['"]?
         confidence: 0.35
         capture_group: 2
     file_filter:
@@ -19,24 +19,12 @@ rules:
         - "*.txt"
         - "*.lock"
 
-  - id: generic-api-key
-    type: regex
-    name: Generic API Key
-    description: Common API key formats (hex, alphanumeric) - low confidence, requires context
-    severity: low
-    tags: [credentials, api-key]
-    patterns:
-      # Only match high-entropy strings that look like API keys
-      - regex: \b([A-Za-z0-9\-_]{40,45})\b
-        confidence: 0.10
-      - regex: \b([0-9a-fA-F]{32})\b
-        confidence: 0.15
-    file_filter:
-      exclude:
-        - "*.md"
-        - "*.txt"
-        - "*.json"
-        - "*.lock"
+  # Removed: a bare "\b[A-Za-z0-9\-_]{40,45}\b" and a bare 32-hex-digit run carry
+  # no context at all — they match every long identifier, truncated git SHA and
+  # content hash, and produced the overwhelming majority of findings on real
+  # codebases while gating nothing (severity low => action allow). The
+  # contextual rule above is the same detection with the assignment context that
+  # makes it meaningful. Restore them via --rules if you want them back.
 
   - id: generic-password
     type: regex
@@ -46,9 +34,10 @@ rules:
     tags: [credentials, password]
     patterns:
       # Match password assignments with actual secret values (not placeholders)
-      - regex: (?i)(password|passwd|pwd)\s*[:=]\s*['"]?([A-Za-z0-9@#$%^&+=]{8,})['"]?
+      - regex: (?i)(password|passwd|pwd)[ \t]*[:=][ \t]*['"]?([A-Za-z0-9@#$%^&+=]{8,})['"]?
         confidence: 0.70
         capture_group: 2
+        require_value: true
     file_filter:
       exclude:
         - "*.md"
@@ -96,7 +85,7 @@ rules:
     severity: high
     tags: [credentials, api-key, heroku]
     patterns:
-      - regex: \b([hH][eE][rR][oO][kK][uU]\s*[:=]\s*[A-Za-z0-9\-_]{20,})\b
+      - regex: \b([hH][eE][rR][oO][kK][uU][ \t]*[:=][ \t]*[A-Za-z0-9\-_]{20,})\b
         confidence: 0.70
 
   - id: generic-npm-token
