@@ -3,6 +3,7 @@ package filesystem
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -312,5 +313,37 @@ func TestWalkBrokenSymlinkIsCountedButNotAGap(t *testing.T) {
 	}
 	if gaps != 0 {
 		t.Errorf("broken symlink reported as a coverage gap (%d)", gaps)
+	}
+}
+
+// #17: an empty skip_extensions entry panicked, and Go's panic exit code is 2 --
+// the same code this tool uses to mean "incomplete scan". A mistyped config entry
+// therefore looked like a deliberate verdict.
+func TestEmptySkipExtensionIsAnErrorNotAPanic(t *testing.T) {
+	_, err := newFilterSet(WalkOption{SkipExtensions: []string{""}})
+	if err == nil {
+		t.Fatal("an empty skip_extensions entry must be reported")
+	}
+	if !strings.Contains(err.Error(), "skip_extensions") {
+		t.Errorf("error = %v, want it to name skip_extensions", err)
+	}
+}
+
+// #34: a bare "env" never matched, because filepath.Ext always returns a
+// dot-prefixed suffix, so the entry was a silent no-op. ".DS_Store?" in the
+// defaults was the same mistake: a glob compared with ==.
+func TestSkipExtensionsAcceptMissingLeadingDot(t *testing.T) {
+	fs, err := newFilterSet(WalkOption{SkipExtensions: []string{"env", ".png"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fs.skipExtSet[".env"] {
+		t.Errorf("skipExtSet = %v, want .env normalised", fs.skipExtSet)
+	}
+	if !fs.skipExtSet[".png"] {
+		t.Errorf("skipExtSet = %v, want .png present", fs.skipExtSet)
+	}
+	if reason, skip := fs.reasonExcludingSkipDir("thing.env"); !skip || reason != SkipReasonExt {
+		t.Errorf("thing.env: skip=%v reason=%q, want it skipped as an extension", skip, reason)
 	}
 }

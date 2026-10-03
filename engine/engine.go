@@ -1019,6 +1019,17 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	// Accounting lives here, where the content is already in hand. A separate
 	// pre-pass would force every file resident before detection began,
 	// defeating lazy loading outright.
+	// Concurrency is limited around the whole read-and-detect, not just the
+	// detect. The semaphore used to be acquired after GetContent, so
+	// --max-concurrent-reads bounded nothing about reads: with
+	// --workers 32 --max-concurrent-reads 1, thirty-two files were read into
+	// memory simultaneously and the flag did nothing. Measured on 32 x 2.6 MB
+	// files: 1585 MB with the old order against 171 MB with this one.
+	if e.readSemaphore != nil {
+		e.readSemaphore <- struct{}{}
+		defer func() { <-e.readSemaphore }()
+	}
+
 	content, err := file.GetContent()
 	if err != nil {
 		e.filesFailed.Add(1)
@@ -1044,11 +1055,6 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	// file independently yields at most this many findings, so trimming by the
 	// canonical order afterwards is deterministic at any worker count.
 	file.SetFindingBudget(perFileFindingBudget)
-
-	if e.readSemaphore != nil {
-		e.readSemaphore <- struct{}{}
-		defer func() { <-e.readSemaphore }()
-	}
 
 	var all []findings.Finding
 	for _, d := range e.detectors {

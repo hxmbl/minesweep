@@ -23,6 +23,14 @@ var flagSections = []flagSection{
 		flags: []string{"diff", "diff-base", "staged", "history", "annotations", "baseline", "update-baseline", "suppress"},
 	},
 	{
+		// --dangerously-show-secrets belonged to no section at all, so it fell
+		// through to the unlabelled leftover block below Performance. It is the
+		// one flag here that can print raw credentials, which is exactly why it
+		// should be findable rather than buried.
+		title: "Disclosure",
+		flags: []string{"dangerously-show-secrets", "include-low-confidence"},
+	},
+	{
 		title: "Filtering",
 		flags: []string{"min-severity", "min-confidence", "tag", "include-tests"},
 	},

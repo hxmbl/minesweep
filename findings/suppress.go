@@ -2,8 +2,11 @@ package findings
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"regexp"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Suppression identifies findings to exclude from reports. ID is a human
@@ -24,6 +27,13 @@ type SuppressionList struct {
 	Suppression []Suppression `yaml:"suppressions" json:"suppressions"`
 }
 
+// LoadSuppressions reads a suppression file.
+//
+// Both YAML and JSON are accepted, because JSON is a subset of YAML and a single
+// decoder handles both. It was json.Unmarshal only, while `minesweep init` wrote a
+// template recommending ".minesweep-suppress.yml" -- so following the tool's own
+// instructions aborted the scan with "invalid character 'v' looking for beginning
+// of value". The struct carries both tag sets for that reason.
 func LoadSuppressions(path string) (*SuppressionList, error) {
 	if path == "" {
 		return &SuppressionList{Version: "1"}, nil
@@ -38,11 +48,25 @@ func LoadSuppressions(path string) (*SuppressionList, error) {
 	}
 
 	var list SuppressionList
-	if err := json.Unmarshal(data, &list); err != nil {
+	if err := yaml.Unmarshal(data, &list); err != nil {
+		return nil, err
+	}
+	if err := list.validate(); err != nil {
 		return nil, err
 	}
 
 	return &list, nil
+}
+
+// validate rejects entries that can never match, rather than loading a
+// suppression file that silently suppresses nothing.
+func (l *SuppressionList) validate() error {
+	for i, s := range l.Suppression {
+		if s.RuleID == "" && s.File == "" && s.Pattern == "" && s.ID == "" {
+			return fmt.Errorf("suppression #%d matches nothing: set at least one of id, rule_id, file or pattern", i+1)
+		}
+	}
+	return nil
 }
 
 func SaveSuppressions(path string, list *SuppressionList) error {

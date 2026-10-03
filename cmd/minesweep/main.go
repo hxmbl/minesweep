@@ -148,12 +148,17 @@ func main() {
 	root.Flags().BoolVar(&cfg.IncludeLowConfidence, "include-low-confidence", false, "Report findings below the default confidence floor")
 	root.Flags().BoolVar(&cfg.DangerouslyShowSecrets, "dangerously-show-secrets", false, "Print raw secret values instead of hashes")
 
-	root.AddCommand(&cobra.Command{
+	hookCmd := &cobra.Command{
 		Use:   "install-hooks",
 		Short: "Install git pre-commit hook",
-		Long:  "Install a pre-commit hook that runs minesweep on staged files",
-		RunE:  runInstallHooks,
-	})
+		Long: "Install a pre-commit hook that runs minesweep on staged files.\n\n" +
+			"An existing pre-commit hook that minesweep did not write is never\n" +
+			"overwritten silently: the command refuses, unless --force is given, in\n" +
+			"which case the existing hook is kept alongside as pre-commit.bak.",
+		RunE: runInstallHooks,
+	}
+	hookCmd.Flags().Bool("force", false, "Replace an existing pre-commit hook that minesweep did not write (kept as .bak)")
+	root.AddCommand(hookCmd)
 
 	root.AddCommand(&cobra.Command{
 		Use:   "uninstall-hooks",
@@ -735,6 +740,7 @@ exit 0
 `
 
 func runInstallHooks(cmd *cobra.Command, args []string) error {
+	forceHooks, _ := cmd.Flags().GetBool("force")
 	wd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
@@ -751,6 +757,26 @@ func runInstallHooks(cmd *cobra.Command, args []string) error {
 	}
 
 	hookPath := filepath.Join(hooksDir, "pre-commit")
+
+	// Never silently destroy someone else's hook. Writing over an existing
+	// pre-commit is how a team's husky, lint-staged or plain-shell setup
+	// disappears without a trace, and the command then reports success. The
+	// asymmetry was glaring: uninstall-hooks already refused to touch a hook it
+	// did not own, and init already required --force to overwrite a config.
+	if existing, statErr := os.ReadFile(hookPath); statErr == nil {
+		if !strings.Contains(strings.ToLower(string(existing)), "minesweep") {
+			if !forceHooks {
+				return fmt.Errorf("refusing to overwrite an existing pre-commit hook that minesweep did not write: %s\n"+
+					"       move it aside, or re-run with --force to replace it (the old hook is kept as .bak)", hookPath)
+			}
+			backup := hookPath + ".bak"
+			if err := os.WriteFile(backup, existing, 0o755); err != nil { //nolint:gosec // preserving mode of the hook being backed up
+				return fmt.Errorf("back up existing hook: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "Existing hook backed up to %s\n", backup)
+		}
+	}
+
 	if err := os.WriteFile(hookPath, []byte(preCommitHook), 0755); err != nil { //nolint:gosec // pre-commit hook must be executable
 		return fmt.Errorf("write pre-commit hook: %w", err)
 	}
