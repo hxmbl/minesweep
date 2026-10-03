@@ -214,9 +214,21 @@ func matchGlobParts(pattern, path []string) bool {
 // discovered from the scan root and its ancestors, plus any rule sets found
 // in subdirectories during traversal. Nested sets are applied after the base
 // set, shallowest first, so the nearest declaration wins.
+// scopedIgnore is a rule set declared by a directory, to be evaluated against
+// the path as seen from THAT directory. prefix is the ".." chain from the scan
+// root to the declaring directory, so prefix+"/"+rel is that directory's view of
+// the same file.
+type scopedIgnore struct {
+	prefix string
+	pat    *IgnorePattern
+}
+
 type IgnoreSet struct {
 	base   *IgnorePattern
 	nested map[string]*IgnorePattern
+	// ancestors are rule sets declared above the scan root, outermost first.
+	// They are applied before the base set so a nearer declaration wins.
+	ancestors []scopedIgnore
 }
 
 // NewIgnoreSet builds a set from an explicit base rule set.
@@ -338,15 +350,41 @@ func sameDir(a, b string) bool {
 	if err2 != nil {
 		rb = b
 	}
-	return filepath.Clean(ra) == filepath.Clean(rb)
+	// One side may be reachable only through an absolute path while the other
+	// came from git, so compare the absolute spelling too before giving up.
+	if filepath.Clean(ra) == filepath.Clean(rb) {
+		return true
+	}
+	aa, err1 := filepath.Abs(ra)
+	ab, err2 := filepath.Abs(rb)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return filepath.Clean(aa) == filepath.Clean(ab)
 }
 
+// isWithin reports whether path is dir or lies beneath it.
+//
+// Both sides are resolved first. git rev-parse --show-toplevel returns the
+// resolved path, so on macOS a git root of /private/var/... never matched the
+// /var/... spelling that filepath.Abs produces for the same directory, and the
+// ancestor walk stopped one level short of the repository root -- so a
+// repository's own ignore file was never read at all.
 func isWithin(path, dir string) bool {
-	rel, err := filepath.Rel(dir, path)
+	rel, err := filepath.Rel(resolveForCompare(dir), resolveForCompare(path))
 	if err != nil {
 		return false
 	}
 	return !escapesRoot(rel)
+}
+
+// resolveForCompare fully resolves a path for comparison, falling back to the
+// input when it cannot be resolved (it may not exist yet).
+func resolveForCompare(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
 }
 
 // escapesRoot reports whether a root-relative path leaves the root.
@@ -371,9 +409,24 @@ func runGitTopLevel(dir string) (string, error) {
 // DiscoverIgnore builds the ignore set for a scan rooted at root: every
 // ignore file from the outermost relevant ancestor down to root, merged in
 // that order so nearer declarations win.
+//
+// Each file keeps its own anchor. Git evaluates every pattern relative to the
+// directory that declared it, so an ancestor's "/secrets/" means
+// "<that directory>/secrets/". Flattening every ancestor into one rule set
+// evaluated against the scan-root-relative path re-anchors those patterns onto
+// the scan root: scanning <repo>/services/api, a "/secrets/" at the <repo> root
+// silently dropped services/api/secrets/db.env, which is a false negative in a
+// file the user never asked to ignore.
 func DiscoverIgnore(root string) (*IgnoreSet, error) {
-	var lines []string
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+
+	var baseLines []string
+	scoped := make([]scopedIgnore, 0, 4)
 	seen := make(map[string]bool)
+
 	for _, dir := range ignoreSearchDirs(root) {
 		for _, name := range IgnoreFileNames {
 			p := filepath.Join(dir, name)
@@ -389,10 +442,46 @@ func DiscoverIgnore(root string) (*IgnoreSet, error) {
 			if err != nil {
 				return nil, err
 			}
-			lines = append(lines, ls...)
+			if len(ls) == 0 {
+				continue
+			}
+			if sameDir(dir, absRoot) {
+				// The scan root's own file is the base set: its patterns are
+				// evaluated against exactly the path they will see.
+				baseLines = append(baseLines, ls...)
+				continue
+			}
+			scoped = append(scoped, scopedIgnore{
+				prefix: rootRelativePrefix(absRoot, dir),
+				pat:    NewIgnorePattern(ls),
+			})
 		}
 	}
-	return NewIgnoreSet(NewIgnorePattern(lines)), nil
+
+	s := NewIgnoreSet(NewIgnorePattern(baseLines))
+	s.ancestors = scoped
+	return s, nil
+}
+
+// rootRelativePrefix expresses an absolute directory as a ".." chain relative to
+// the scan root, so an ancestor's patterns can be evaluated against the path as
+// that ancestor would have seen it. The scan root itself gives "".
+func rootRelativePrefix(root, dir string) string {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." {
+		return ""
+	}
+	rel = filepath.ToSlash(rel)
+	depth := 0
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == ".." {
+			depth++
+		}
+	}
+	if depth == 0 {
+		return ""
+	}
+	return strings.Repeat("../", depth-1) + ".."
 }
 
 // AddNested registers the rule set found in a subdirectory, so it applies to
@@ -417,15 +506,34 @@ func (s *IgnoreSet) AddNested(dir string, p *IgnorePattern) {
 	s.nested[key] = p
 }
 
-// Ignored reports whether rel (relative to the scan root) is excluded. Base
-// rules are applied first, then each nested rule set from shallowest to
-// deepest, so the nearest declaration has the final say.
+// Ignored reports whether rel (relative to the scan root) is excluded.
+//
+// Order matters and follows git: rule sets are applied outermost-first and the
+// last match wins, so the nearest declaration has the final say. Ancestors above
+// the scan root come first, then the scan root's own base set, then each nested
+// rule set from shallowest to deepest.
 func (s *IgnoreSet) Ignored(rel string) bool {
 	if s == nil {
 		return false
 	}
 	rel = filepath.ToSlash(rel)
-	ignored, _ := s.base.decide(rel)
+
+	ignored := false
+	for _, sc := range s.ancestors {
+		// sc.prefix is the ancestor's view of the scan root, so the candidate
+		// path is that view of this file.
+		candidate := rel
+		if sc.prefix != "" {
+			candidate = sc.prefix + "/" + rel
+		}
+		if v, matched := sc.pat.decide(candidate); matched {
+			ignored = v
+		}
+	}
+
+	if v, matched := s.base.decide(rel); matched {
+		ignored = v
+	}
 	if len(s.nested) == 0 {
 		return ignored
 	}
@@ -858,10 +966,43 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 	return files, nil
 }
 
+// testSourceExtensions are the extensions where a ".test"/".spec" segment is a
+// test marker rather than part of a data file's name.
+//
+// The name alone cannot distinguish "secret.test.ts" from "prod.test.tfvars",
+// but the extension can: ".test.js" is a test module, while ".test.tfvars" and
+// ".test.json" are Terraform environment files and data files, which routinely
+// carry live credentials. Dropping those by default is a false negative in
+// exactly the files a secret scanner most needs to read, so the segment is only
+// honoured for a known source extension.
+var testSourceExtensions = map[string]bool{
+	".js": true, ".jsx": true, ".ts": true, ".tsx": true,
+	".mjs": true, ".cjs": true, ".mts": true, ".cts": true,
+	".go": true, ".rb": true, ".py": true, ".php": true, ".java": true,
+	".kt": true, ".kts": true, ".scala": true, ".swift": true,
+	".cs": true, ".rs": true, ".dart": true, ".ex": true, ".exs": true,
+	".c": true, ".cc": true, ".cpp": true, ".h": true, ".hpp": true,
+	".m": true, ".mm": true, ".pl": true, ".lua": true, ".r": true,
+	".clj": true, ".groovy": true, ".vue": true, ".svelte": true,
+}
+
 func isTestFile(path string) bool {
 	base := filepath.Base(path)
-	name := strings.TrimSuffix(base, filepath.Ext(base))
-	return strings.HasSuffix(name, "_test") || strings.HasSuffix(name, ".test") || strings.HasSuffix(name, ".spec")
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+
+	if strings.HasSuffix(name, "_test") || strings.HasSuffix(name, "_spec") {
+		// "_test"/"_spec" is a test marker for any extension: these are the
+		// file's own naming convention, not a data-format segment.
+		return true
+	}
+	if !strings.HasSuffix(name, ".test") && !strings.HasSuffix(name, ".spec") {
+		return false
+	}
+	// filepath.Ext returns the suffix from the LAST dot, so this branch only
+	// fires for "<stem>.test.<ext>". Require a known source extension before
+	// treating the segment as a test marker.
+	return testSourceExtensions[strings.ToLower(ext)]
 }
 
 // filterSet holds the resolved per-file filters shared by the walker and the
