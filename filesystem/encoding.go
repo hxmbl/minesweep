@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"unicode/utf16"
-	"unicode/utf8"
 )
 
 // Byte-order marks for the encodings we can decode without loss.
@@ -61,11 +60,3 @@ func decodeUTF16(body []byte, order binary.ByteOrder) ([]byte, bool) {
 	// substitutes U+FFFD, which keeps the rest of the file intact.
 	return []byte(string(runes)), true
 }
-
-// IsUTF8Content reports whether b is well-formed UTF-8 text.
-//
-// It replaces the previous IsUTF8, which was never called: a file that was valid
-// UTF-8 was treated the same as one that was not, and the distinction was only
-// ever relevant when deciding whether to transcode -- which this package now does
-// unconditionally for BOM-marked input.
-func IsUTF8Content(b []byte) bool { return utf8.Valid(b) }

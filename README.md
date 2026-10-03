@@ -122,6 +122,45 @@ minesweep install-hooks   # scan staged files on commit
 minesweep --staged .      # or run manually
 ```
 
+`install-hooks` refuses to overwrite an existing `pre-commit` hook that MineSweep
+did not write — a husky or lint-staged setup will not disappear without you asking
+for it. Use `--force` to replace it; the original is kept as `pre-commit.bak`.
+
+### Ignoring files
+
+`.minesweepignore` (or `.msignore`) excludes paths from the scan. The syntax is
+gitignore-style:
+
+```gitignore
+# a literal file or directory name, at any depth
+node_modules/
+*.min.js
+
+# anchored: this directory at the scan root only
+/secrets/
+
+# a directory and everything under it
+build/**
+
+# re-include something an earlier rule excluded
+!build/keep-this.env
+```
+
+Each ignore file is evaluated **relative to the directory that declares it**, the
+same as git. An ignore file at the repository root is therefore also applied when
+you scan a subdirectory, but its anchored patterns still mean "relative to the
+repository root" — a `/secrets/` at the repo root does not exclude
+`services/api/secrets/`.
+
+Files below the scan root are matched in the order they are found, so a nested
+ignore file overrides a shallower one, and `!` re-includes. `--no-ignore` skips
+ignore files entirely.
+
+Files excluded by type (`.png`, `.min.js`, …) or size are counted separately and
+listed under `Skipped by` in `-v` output. Reducing `--max-file-size-mb` below the
+built-in ceiling marks the scan **INCOMPLETE** (exit 2), because content was left
+unread.
+
 ### Baseline & suppressions
 
 Track known findings so only new ones surface:

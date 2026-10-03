@@ -80,3 +80,28 @@ func TestAllCoverageKeysAreSecure(t *testing.T) {
 		}
 	}
 }
+
+// A discovered config must not be able to print raw credentials. The key used to
+// parse successfully and then be silently discarded, so a user who set it saw
+// hashed values and no explanation.
+func TestDangerouslyShowSecretsIsSecure(t *testing.T) {
+	fc := &config.FileConfig{DangerouslyShowSecrets: true}
+	var buf bytes.Buffer
+	c := engine.Config{}
+	ignored := applyConfigValues(&c, fc, t.TempDir(), map[string]bool{}, false, &buf)
+
+	if c.DangerouslyShowSecrets {
+		t.Error("a discovered config enabled raw secret output")
+	}
+	if !slices.Contains(ignored, "dangerously_show_secrets") {
+		t.Errorf("the key was not reported as ignored: %v", ignored)
+	}
+
+	// An explicitly named --config is the user acting deliberately.
+	c2 := engine.Config{}
+	var buf2 bytes.Buffer
+	applyConfigValues(&c2, fc, t.TempDir(), map[string]bool{}, true, &buf2)
+	if !c2.DangerouslyShowSecrets {
+		t.Error("an explicit --config should be able to enable raw secret output")
+	}
+}

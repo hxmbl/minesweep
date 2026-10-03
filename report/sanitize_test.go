@@ -307,3 +307,47 @@ func TestDashboardSanitisesAndTruncatesOnRunes(t *testing.T) {
 		t.Errorf("rule severity = %v, want critical", d.Rules[0].Severity)
 	}
 }
+
+// A context block with no "> " marker is unreachable through the engine, but
+// WriteText is exported. With matchingLineIndex left at -1 the start line
+// became f.Line+1, shifting every printed line number by one.
+func TestSnippetWithoutMarkedLineDoesNotShiftLineNumbers(t *testing.T) {
+	f := findings.Finding{
+		RuleID: "r", Severity: findings.SeverityHigh, Confidence: 0.9,
+		File: "a.env", Line: 10,
+		SourceLine: "first line",
+		Context:    "  first line\n  second line\n",
+	}
+	var buf bytes.Buffer
+	if err := WriteText(&buf, &findings.RiskReport{Findings: []findings.Finding{f}},
+		TextOptions{Verbose: true, Snippets: true, Color: ColorNever}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "  10:") {
+		t.Errorf("expected the first context line to be numbered 10, got:\n%s", out)
+	}
+	if strings.Contains(out, "  11: first line") {
+		t.Errorf("line numbers shifted by one:\n%s", out)
+	}
+}
+
+// A finding the policy allows should not be annotated red on the pull request:
+// the scan already exited 0 for it.
+func TestAnnotationsSkipAllowedFindings(t *testing.T) {
+	allowed := findings.Finding{
+		RuleID: "r", Severity: findings.SeverityCritical, Confidence: 0.95,
+		File: "a.env", Line: 1, Action: findings.ActionAllow,
+	}
+	blocked := allowed
+	blocked.Action = findings.ActionBlock
+	blocked.RuleID = "other"
+
+	got := GenerateAnnotations([]findings.Finding{allowed, blocked}, findings.SeverityInfo)
+	if len(got) != 1 {
+		t.Fatalf("got %d annotations, want 1 (the allowed finding must be skipped): %+v", len(got), got)
+	}
+	if !strings.Contains(got[0].Message, "other") {
+		t.Errorf("annotated the wrong finding: %+v", got[0])
+	}
+}

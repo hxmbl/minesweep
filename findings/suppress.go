@@ -40,11 +40,12 @@ func LoadSuppressions(path string) (*SuppressionList, error) {
 	}
 
 	// G304: path is the suppression file the user named with --suppress.
+	// A path the user named explicitly is not optional. Returning an empty list
+	// for a missing file meant a typo silently suppressed nothing at all, and
+	// --update-baseline then recorded every finding as seen. A caller that
+	// genuinely wants no suppressions passes "".
 	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
-		if os.IsNotExist(err) {
-			return &SuppressionList{Version: "1"}, nil
-		}
 		return nil, err
 	}
 

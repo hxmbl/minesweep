@@ -513,9 +513,21 @@ func sortFindings(fs []findings.Finding) {
 
 // loadBaseline reads the configured baseline, or returns nil when none is in
 // use. It never writes: recording what was reported is a separate, later step.
+//
+// LoadBaseline treats a missing file as an empty baseline, which is what
+// --update-baseline needs on its first run -- but it cannot tell a first run from
+// a typo. Without this check, `--baseline basline.json` (misspelled) started from
+// an empty baseline and reported every known finding as new, and
+// --update-baseline then created the file at the misspelled path.
 func (e *Engine) loadBaseline() (*findings.Baseline, error) {
 	if e.config.BaselineFile == "" {
 		return nil, nil
+	}
+	if !e.config.UpdateBaseline {
+		if _, err := os.Stat(e.config.BaselineFile); err != nil {
+			return nil, fmt.Errorf("baseline file %s: %w\n"+
+				"       pass --update-baseline to create it", e.config.BaselineFile, err)
+		}
 	}
 	baseline, err := findings.LoadBaseline(e.config.BaselineFile)
 	if err != nil {

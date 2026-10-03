@@ -1,47 +1,5 @@
 package filesystem
 
-import "strings"
-
-var textExtensions = map[string]bool{
-	".txt": true, ".md": true, ".rst": true, ".adoc": true,
-	".go": true, ".rs": true, ".py": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
-	".java": true, ".c": true, ".h": true, ".cpp": true, ".hpp": true, ".cs": true,
-	".rb": true, ".php": true, ".pl": true, ".pm": true, ".swift": true, ".kt": true,
-	".sh": true, ".bash": true, ".zsh": true, ".fish": true,
-	".yaml": true, ".yml": true, ".json": true, ".xml": true, ".toml": true, ".ini": true, ".cfg": true, ".conf": true,
-	".html": true, ".htm": true, ".css": true, ".scss": true, ".sass": true, ".less": true,
-	".sql": true, ".graphql": true,
-	".env": true, ".editorconfig": true, ".gitignore": true, ".dockerignore": true,
-	".makefile": true, "Makefile": true, "Dockerfile": true,
-	".mod": true, ".sum": true, ".lock": true,
-}
-
-var binaryExtensions = map[string]bool{
-	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".ico": true, ".svg": true,
-	".webp": true, ".bmp": true, ".tiff": true,
-	".mp3": true, ".mp4": true, ".wav": true, ".ogg": true, ".flac": true, ".avi": true, ".mov": true, ".mkv": true,
-	".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true, ".ppt": true, ".pptx": true,
-	".zip": true, ".tar": true, ".gz": true, ".bz2": true, ".xz": true, ".zst": true, ".7z": true, ".rar": true,
-	".exe": true, ".dll": true, ".so": true, ".dylib": true, ".bin": true, ".o": true, ".a": true, ".lib": true,
-	".class": true, ".pyc": true, ".pyo": true, ".wasm": true,
-	".ttf": true, ".otf": true, ".woff": true, ".woff2": true, ".eot": true,
-	".db": true, ".sqlite": true, ".sqlite3": true,
-}
-
-func IsTextFile(ext string) bool {
-	if textExtensions[ext] {
-		return true
-	}
-	return textExtensions[strings.TrimPrefix(ext, ".")]
-}
-
-func IsBinaryFile(ext string) bool {
-	if binaryExtensions[ext] {
-		return true
-	}
-	return binaryExtensions[strings.TrimPrefix(ext, ".")]
-}
-
 var binaryMagics = [][]byte{
 	{0x7f, 'E', 'L', 'F'},          // ELF
 	{'M', 'Z'},                     // PE/Windows
@@ -105,50 +63,4 @@ func IsBinary(data []byte) bool {
 		}
 	}
 	return float64(controlCount)/float64(len(sample)) > 0.10
-}
-
-func IsUTF8(data []byte) bool {
-	i := 0
-	for i < len(data) {
-		if data[i] < 0x80 {
-			i++
-			continue
-		}
-		if data[i]&0xE0 == 0xC0 {
-			if i+1 >= len(data) || data[i+1]&0xC0 != 0x80 {
-				return false
-			}
-			i += 2
-			continue
-		}
-		if data[i]&0xF0 == 0xE0 {
-			if i+2 >= len(data) || data[i+1]&0xC0 != 0x80 || data[i+2]&0xC0 != 0x80 {
-				return false
-			}
-			i += 3
-			continue
-		}
-		if data[i]&0xF8 == 0xF0 {
-			if i+3 >= len(data) || data[i+1]&0xC0 != 0x80 || data[i+2]&0xC0 != 0x80 || data[i+3]&0xC0 != 0x80 {
-				return false
-			}
-			i += 4
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func HasBOM(data []byte) (string, bool) {
-	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
-		return "utf-8", true
-	}
-	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
-		return "utf-16-le", true
-	}
-	if len(data) >= 2 && data[0] == 0xFE && data[1] == 0xFF {
-		return "utf-16-be", true
-	}
-	return "", false
 }

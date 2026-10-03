@@ -26,6 +26,13 @@ func GenerateAnnotations(findingsList []findings.Finding, minSeverity findings.S
 		if f.Severity < minSeverity {
 			continue
 		}
+		// Respect the policy action. A finding the policy allows is one the user
+		// has already decided not to act on, and annotating it red on the pull
+		// request contradicts that decision -- a scan that reports exit 0 and then
+		// posts errors anyway.
+		if f.Action == findings.ActionAllow {
+			continue
+		}
 
 		level := "warning"
 		if f.Severity >= findings.SeverityHigh {

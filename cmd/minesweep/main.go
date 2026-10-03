@@ -96,6 +96,31 @@ func main() {
 			if cfg.HistoryMode && (cfg.DiffMode || cfg.StagedOnly) {
 				return fmt.Errorf("--history scans all refs and cannot be combined with --diff or --staged")
 			}
+			// A confidence floor outside 0..1 silently scans nothing and reports a
+			// clean result, which is indistinguishable from "no secrets". The
+			// configuration file cannot carry these keys (they are secure:true,
+			// so a discovered config cannot set them) but a flag typo can.
+			if cfg.MinConfidence < 0 || cfg.MinConfidence > 1 {
+				return fmt.Errorf("--min-confidence must be between 0 and 1, got %g", cfg.MinConfidence)
+			}
+			// Likewise a negative limit: it was coerced to "unlimited" by scattered
+			// <= 0 fallbacks, so the flag appeared to work while doing the opposite
+			// of what the caller asked for.
+			for _, n := range []struct {
+				name string
+				val  int
+			}{
+				{"--max-files", cfg.MaxFiles},
+				{"--max-findings", cfg.MaxFindings},
+				{"--workers", cfg.Workers},
+				{"--max-concurrent-reads", cfg.MaxConcurrentReads},
+				{"--memory-limit-mb", cfg.MemoryLimitMB},
+				{"--max-file-size-mb", int(cfg.MaxFileSizeMB)},
+			} {
+				if n.val < 0 {
+					return fmt.Errorf("%s must not be negative, got %d", n.name, n.val)
+				}
+			}
 			return loadConfig(cmd, args[0])
 		},
 		RunE: runScan,
@@ -372,6 +397,14 @@ var configFields = []configField{
 	{label: "boundaries", flag: "", secure: true,
 		apply:   func(c *engine.Config, f *config.FileConfig, _ string) { c.Boundaries = f.Boundaries },
 		present: func(f *config.FileConfig) bool { return len(f.Boundaries) > 0 }},
+	// secure, so a checked-in config cannot print raw credentials on the user's
+	// behalf: it is reported as ignored with the rest. An explicitly named
+	// --config does apply it, because that is the user acting deliberately.
+	{label: "dangerously_show_secrets", flag: "dangerously-show-secrets", secure: true,
+		apply: func(c *engine.Config, f *config.FileConfig, _ string) {
+			c.DangerouslyShowSecrets = f.DangerouslyShowSecrets
+		},
+		present: func(f *config.FileConfig) bool { return f.DangerouslyShowSecrets }},
 }
 
 func pathField(label, flag string, set func(*engine.Config, string), present func(*config.FileConfig) bool) configField {

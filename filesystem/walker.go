@@ -197,6 +197,14 @@ func matchGlobParts(pattern, path []string) bool {
 	}
 
 	if pattern[0] == "**" {
+		if len(pattern) == 1 {
+			// A trailing or bare ** matches everything below, including nothing
+			// further. Without this, `a/**` left a/b/leak.env fully scanned: "**"
+			// consumed the final path segment and then had nothing left to match,
+			// so the whole pattern failed. An ignore pattern that does not ignore is
+			// the wrong way to fail.
+			return true
+		}
 		if matchGlobParts(pattern[1:], path) {
 			return true
 		}
@@ -497,7 +505,10 @@ func (s *IgnoreSet) AddNested(dir string, p *IgnorePattern) {
 		s.nested = make(map[string]*IgnorePattern)
 	}
 	key := strings.Trim(filepath.ToSlash(dir), "/")
-	if key == "" {
+	// "." is what filepath.Rel returns for the scan root itself, and it is not
+	// trimmed away by Trim, so the "root is already the base set" branch below
+	// was unreachable for library callers using Walk. Treat it as the root.
+	if key == "" || key == "." {
 		// An ignore file at the scan root is already the base set.
 		s.base = mergePatterns(s.base, p)
 		return
@@ -841,7 +852,13 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 		if d.IsDir() {
 			// Prune only VCS internals; everything else is descended so
 			// its files are counted as skipped rather than vanishing.
-			if name := d.Name(); name == ".git" || name == ".hg" || name == ".svn" {
+			if name := d.Name(); (name == ".git" || name == ".hg" || name == ".svn") && path != root {
+				// The prune must not apply to the scan root itself. Someone who
+				// points the scanner at a directory named .git (a bare mirror, a
+				// deliberately exported object store) was getting an empty walk
+				// and a clean exit, which is the worst possible answer. Descend
+				// into the root regardless of its name, and still prune any .git
+				// found beneath it.
 				// SkipDir ends the walk of this subtree without an error, so
 				// nothing else would ever record it. SkipReasonVCS was
 				// therefore declared and printable but never incremented.

@@ -347,3 +347,118 @@ func TestSkipExtensionsAcceptMissingLeadingDot(t *testing.T) {
 		t.Errorf("thing.env: skip=%v reason=%q, want it skipped as an extension", skip, reason)
 	}
 }
+
+// A VCS prune must not apply to the scan root itself. Someone pointing the
+// scanner AT a directory named .git -- a bare mirror, an exported object store --
+// got an empty walk and a clean exit, which is the worst possible answer.
+func TestVCSPruneDoesNotApplyToScanRoot(t *testing.T) {
+	base := t.TempDir()
+	inner := filepath.Join(base, ".git")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(inner, "leak.env"), canarySecret)
+
+	// A .git found *beneath* whatever is scanned is still pruned, and recorded.
+	other := filepath.Join(base, "repo")
+	if err := os.MkdirAll(filepath.Join(other, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(other, ".git", "skipme.env"), canarySecret)
+	writeFile(t, filepath.Join(other, "keep.env"), canarySecret)
+
+	// Scanning the .git directory directly must still find its contents.
+	stats := &WalkStats{}
+	files, err := WalkWithOptions(inner, WalkOption{Stats: stats, NoIgnore: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range files {
+		got = append(got, filepath.Base(f.Path))
+	}
+	if !contains(got, "leak.env") {
+		t.Errorf("the scan root's own .git was pruned: walked %v", got)
+	}
+
+	// Scanning its parent: the nested .git is pruned, ordinary files are not.
+	stats2 := &WalkStats{}
+	files2, err := WalkWithOptions(other, WalkOption{Stats: stats2, NoIgnore: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got2 []string
+	for _, f := range files2 {
+		got2 = append(got2, filepath.Base(f.Path))
+	}
+	if contains(got2, "skipme.env") {
+		t.Errorf("a nested .git was not pruned: walked %v", got2)
+	}
+	if !contains(got2, "keep.env") {
+		t.Errorf("ordinary files were lost: walked %v", got2)
+	}
+	if stats2.ByReason[SkipReasonVCS] != 1 {
+		t.Errorf("nested VCS prune count = %d, want 1", stats2.ByReason[SkipReasonVCS])
+	}
+}
+
+// A trailing or bare ** must match everything below it. `a/**` used to leave
+// a/b/leak.env fully scanned, because "**" consumed the last path segment and
+// then had nothing left to match -- an ignore pattern that does not ignore is
+// the wrong way to fail.
+func TestTrailingDoubleStarMatchesEverythingBelow(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".minesweepignore"), "a/**\n")
+	writeFile(t, filepath.Join(root, "a", "b", "leak.env"), canarySecret)
+	writeFile(t, filepath.Join(root, "a", "leak.env"), canarySecret)
+	writeFile(t, filepath.Join(root, "keep.env"), canarySecret)
+
+	set, err := DiscoverIgnore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"a/b/leak.env", "a/leak.env"} {
+		if !set.Ignored(rel) {
+			t.Errorf("a/** did not exclude %q", rel)
+		}
+	}
+	if set.Ignored("keep.env") {
+		t.Error("a/** excluded a path outside a/")
+	}
+}
+
+// "**" as the whole pattern excludes everything.
+func TestBareDoubleStarExcludesEverything(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".minesweepignore"), "**\n")
+	writeFile(t, filepath.Join(root, "x", "y", "deep.env"), canarySecret)
+
+	set, err := DiscoverIgnore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set.Ignored("x/y/deep.env") {
+		t.Error(`a bare "**" did not exclude a deep path`)
+	}
+}
+
+// filepath.Rel returns "." for the scan root, and strings.Trim(".", "/") is ".",
+// so the "root is already the base set" branch was unreachable for library
+// callers of Walk.
+func TestAddNestedRootMergesIntoBase(t *testing.T) {
+	s := NewIgnoreSet(NewIgnorePattern([]string{"base-pattern"}))
+	s.AddNested(".", NewIgnorePattern([]string{"root-only.env"}))
+
+	if !s.base.decideContains("base-pattern") {
+		t.Error("the base rule set was replaced instead of merged into")
+	}
+	if !s.base.decideContains("root-only.env") {
+		t.Error("a rule set added for the root was not merged into the base set")
+	}
+	if !s.Ignored("root-only.env") {
+		t.Error("the merged rule is not in effect")
+	}
+	if len(s.nested) != 0 {
+		t.Errorf("a root rule set was stored as nested: %v", s.nested)
+	}
+}
