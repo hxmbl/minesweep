@@ -906,8 +906,64 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	// Evidence last: only for findings that are actually reported.
 	attachEvidence(file, filtered)
 
+	// Every secret this file produced, including ones filtered out above: a
+	// value that fell below the confidence floor is still a credential, and it
+	// is still sitting in the evidence of the findings that survived. Without
+	// this, snippet output prints a neighbouring key in full because the rule
+	// that found it was filtered out of the report while its bytes stayed in the
+	// context block of a different finding.
+	//
+	// Known secrets are censored by exact match, so this costs nothing in
+	// readability. Secrets no rule matched cannot be known here at all; those
+	// are caught by the heuristic pass at the output boundary.
+	if !e.config.DangerouslyShowSecrets {
+		redactFileSecrets(filtered, collectFileSecrets(all))
+	}
+
 	e.findingsKept.Add(int64(len(filtered)))
 	return filtered
+}
+
+// collectFileSecrets returns the distinct raw values in fs, longest first.
+//
+// Longest first so that a value containing another value is censored as a whole
+// rather than leaving its own fragment behind. detect runs one goroutine per
+// file, so no synchronisation is needed here.
+func collectFileSecrets(fs []findings.Finding) []string {
+	if len(fs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(fs))
+	out := make([]string, 0, len(fs))
+	for _, f := range fs {
+		if f.Value == "" || findings.IsCensoredToken(f.Value) {
+			continue
+		}
+		if _, dup := seen[f.Value]; dup {
+			continue
+		}
+		seen[f.Value] = struct{}{}
+		out = append(out, f.Value)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if len(out[i]) != len(out[j]) {
+			return len(out[i]) > len(out[j])
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
+// redactFileSecrets censors every known secret of the file out of the evidence
+// attached to the findings that survived filtering.
+func redactFileSecrets(fs []findings.Finding, secrets []string) {
+	if len(fs) == 0 || len(secrets) == 0 {
+		return
+	}
+	for i := range fs {
+		fs[i].SourceLine = findings.CensorEvidence(fs[i].SourceLine, secrets)
+		fs[i].Context = findings.CensorEvidence(fs[i].Context, secrets)
+	}
 }
 
 // attachEvidence fills in Context and SourceLine from the file's line index.
@@ -1096,22 +1152,26 @@ func hasAnyTag(findingTags, filterTags []string) bool {
 	return false
 }
 
+// evaluate applies the policy to each finding and records the resulting action.
+//
+// It deliberately does not rewrite f.Value, even for a redaction action. An
+// earlier version replaced the value with a constant here, which meant the
+// engine decided disclosure before the output layer knew whether the user had
+// passed --dangerously-show-secrets, so that flag revealed the literal string
+// "<REDACTED>" instead of the secret. It also collapsed every high-severity
+// finding onto one identical token, destroying the ability to tell two findings
+// apart or correlate one across runs.
+//
+// Leaving the value intact does not weaken redaction: the evidence has already
+// been stripped of every known secret by detect, and CensorReport at the output
+// boundary replaces the value with a per-secret token unless the user explicitly
+// asked for the raw value.
 func (e *Engine) evaluate(fs []findings.Finding) []findings.Finding {
-	var evaluated []findings.Finding
+	evaluated := make([]findings.Finding, 0, len(fs))
 	for _, f := range fs {
 		action := policy.Evaluate(f, e.policies)
 		f.Action = action
 		f.Reason = string(action) + ": " + f.Reason
-		if action == findings.ActionRedact && f.Value != "" {
-			raw := f.Value
-			f.Value = findings.RedactValue(raw, f.Type)
-			// The captured value also appears verbatim in the surrounding
-			// evidence; a redaction that leaves the secret sitting in
-			// source_line/context is not a redaction.
-			mask := findings.RedactValue("", "")
-			f.SourceLine = strings.ReplaceAll(f.SourceLine, raw, mask)
-			f.Context = strings.ReplaceAll(f.Context, raw, mask)
-		}
 		evaluated = append(evaluated, f)
 	}
 	return evaluated

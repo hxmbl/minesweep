@@ -9,6 +9,7 @@ import (
 
 	"minesweep/findings"
 	"minesweep/policy"
+	"minesweep/report"
 )
 
 func gitRun(t *testing.T, dir string, args ...string) {
@@ -84,14 +85,22 @@ func TestHistoryModeScansDeletedSecrets(t *testing.T) {
 	}
 }
 
-func TestRedactMasksEvidenceFields(t *testing.T) {
+// A redaction action must not destroy the finding's value in the engine, and
+// must never leave the secret sitting in the evidence it is printed with.
+//
+// An earlier version rewrote Value to a constant "<REDACTED>" here. That made
+// the engine decide disclosure before the output layer knew whether the user had
+// passed --dangerously-show-secrets, so the flag revealed the literal string
+// "<REDACTED>" instead of the secret, and every redacted finding collapsed onto
+// one identical token. Redaction is now the censor's job, at the output
+// boundary, where the flag is known.
+func TestRedactActionKeepsValueForTheCensor(t *testing.T) {
 	const secret = "SG.abcdefghijklmnopqrstuv.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	e := &Engine{config: Config{}, policies: testRedactPolicies()}
 	out := e.evaluate([]findings.Finding{{
 		Type:       "SendGrid API Key",
 		RuleID:     "sendgrid-api-key",
 		Severity:   findings.SeverityHigh,
-		Action:     findings.ActionRedact,
 		File:       "sg.py",
 		Line:       1,
 		Value:      secret,
@@ -103,15 +112,48 @@ func TestRedactMasksEvidenceFields(t *testing.T) {
 		t.Fatalf("expected 1 finding, got %d", len(out))
 	}
 	f := out[0]
-	if f.Value != "<REDACTED>" {
-		t.Errorf("value = %q", f.Value)
+	if f.Action != findings.ActionRedact {
+		t.Errorf("action = %q, want redact", f.Action)
 	}
-	if strings.Contains(f.SourceLine, secret) || strings.Contains(f.Context, secret) {
-		t.Errorf("redact leaked secret via evidence fields:\nsource_line=%q\ncontext=%q",
-			f.SourceLine, f.Context)
+	if f.Value != secret {
+		t.Errorf("engine rewrote Value to %q; the censor owns disclosure", f.Value)
 	}
-	if !strings.Contains(f.SourceLine, "<REDACTED>") || !strings.Contains(f.Context, "<REDACTED>") {
-		t.Errorf("evidence should contain the mask marker:\n%q / %q", f.SourceLine, f.Context)
+}
+
+// End to end through the censor: a redacted finding must print a per-secret
+// token, not the raw value and not a shared constant.
+func TestRedactActionCensorsToPerSecretToken(t *testing.T) {
+	const first = "SG.abcdefghijklmnopqrstuv.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	const second = "token-9f4b2c7a1e6d8053ba4c17e29f60d83a"
+	e := &Engine{config: Config{}, policies: testRedactPolicies()}
+	out := e.evaluate([]findings.Finding{
+		{Type: "SendGrid API Key", RuleID: "sendgrid-api-key", Severity: findings.SeverityHigh,
+			File: "a.py", Line: 1, Value: first, SourceLine: "key = " + first, Context: "> key = " + first},
+		{Type: "Stripe API Key", RuleID: "stripe-secret-key", Severity: findings.SeverityHigh,
+			File: "b.py", Line: 1, Value: second, SourceLine: "key = " + second, Context: "> key = " + second},
+	})
+
+	censored := report.CensorReport(&findings.RiskReport{Findings: out})
+	if len(censored.Findings) != 2 {
+		t.Fatalf("expected 2 findings, got %d", len(censored.Findings))
+	}
+	a, b := censored.Findings[0], censored.Findings[1]
+	for _, f := range censored.Findings {
+		if strings.Contains(f.Value, "REDACTED") {
+			t.Errorf("value still shows the old constant: %q", f.Value)
+		}
+		if strings.Contains(f.SourceLine, first) || strings.Contains(f.SourceLine, second) {
+			t.Errorf("evidence leaked a raw secret: %q", f.SourceLine)
+		}
+	}
+	if a.Value == b.Value {
+		t.Errorf("two different secrets share one token %q; correlation is lost", a.Value)
+	}
+	if !findings.IsCensoredToken(a.Value) || !findings.IsCensoredToken(b.Value) {
+		t.Errorf("values are not censorship tokens: %q / %q", a.Value, b.Value)
+	}
+	if a.Value != findings.SecretToken(first) {
+		t.Errorf("token for %q = %q, want the token of its own secret", first, a.Value)
 	}
 }
 

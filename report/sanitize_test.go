@@ -83,47 +83,114 @@ func TestSARIFEscapesMessageAndURI(t *testing.T) {
 	}
 }
 
-func TestCensorValue(t *testing.T) {
-	cases := []struct{ line, value, want string }{
-		{
-			line:  "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
-			value: "AKIAIOSFODNN7EXAMPLE",
-			want:  "export AWS_ACCESS_KEY_ID=sha256:1a5d44a2dca1",
-		},
-		{
-			line:  "api_key=sk_1234567890abcdefghijklmnop",
-			value: "sk_1234567890abcdefghijklmnop",
-			want:  "api_key=sha256:93c103f6f882",
-		},
-		{
-			line:  "password=hunter2",
-			value: "hunter2",
-			want:  "password=sha256:f52fbd32b2b3",
-		},
-		{
-			line:  "key=ab",
-			value: "ab",
-			want:  "key=sha256:fb8e20fc2e4c",
-		},
-		{
-			line:  "export KEY=value",
-			value: "notfound",
-			want:  "export KEY=value",
-		},
-		{
-			line:  "",
-			value: "secret",
-			want:  "",
-		},
-		{
-			line:  "line",
-			value: "",
-			want:  "line",
-		},
+// #27: the C1 range is the 8-bit spelling of the same controls. U+009B is CSI,
+// U+009D is OSC, U+0090 is DCS. They survive a UTF-8 decoder untouched, so
+// neutralising only the 7-bit ESC form left the injection intact. U+0085 and
+// U+2028/U+2029 break the report into forged lines with no escape sequence at
+// all.
+func TestSanitizeTerminalEscapesC1AndLineSeparators(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"CSI", "bad31mFAKE", `bad^[[31mFAKE`},
+		// OSC 8 hyperlink: introducer, payload, ST terminator. Built from the
+		// same arithmetic SanitizeTerminal uses so the expectation cannot
+		// drift from the implementation.
+		{"OSC", "x\u009d]8;;http://evil\u009c",
+			"x^[" + string(rune(0x9d-0x40)) + "]8;;http://evil" + "^[\\"},
+		{"DCS", "ab", "a^[Pb"},
+		{"APC", "ab", "a^[_b"},
+		{"SOS", "ab", "a^[Xb"},
+		{"PM", "ab", "a^[^b"},
+		{"NEL", "ab", "a^[Eb"},
+		{"LS", "a b", `a\u2028b`},
+		{"PS", "a b", `a\u2029b`},
 	}
 	for _, c := range cases {
-		if got := CensorValue(c.line, c.value); got != c.want {
-			t.Errorf("CensorValue(%q, %q) = %q, want %q", c.line, c.value, got, c.want)
+		if got := SanitizeTerminal(c.in); got != c.want {
+			t.Errorf("%s: SanitizeTerminal(%q) = %q, want %q", c.name, c.in, got, c.want)
 		}
+	}
+}
+
+// No raw control byte of any kind may survive.
+func TestSanitizeTerminalLeavesNoControlBytes(t *testing.T) {
+	dirty := "a]b" +
+		"c  d" + "\x1b" + "e"
+	got := SanitizeTerminal(dirty)
+	for _, r := range got {
+		if (r < 0x20 && r != '\n' && r != '\t') || r == 0x7f || (r >= 0x80 && r <= 0x9f) ||
+			r == 0x2028 || r == 0x2029 {
+			t.Errorf("SanitizeTerminal left control byte %U in %q", r, got)
+		}
+	}
+}
+
+// Sanitizing is idempotent, so a value that passes through more than one print
+// site is not progressively mangled.
+func TestSanitizeTerminalIsIdempotent(t *testing.T) {
+	dirty := "bad31mFAKEtail"
+	once := SanitizeTerminal(dirty)
+	if twice := SanitizeTerminal(once); twice != once {
+		t.Errorf("not idempotent:\n once:  %q\n twice: %q", once, twice)
+	}
+}
+
+// #26: with the default --color auto and output redirected to a file, the
+// snippet still emitted raw ANSI while every other colour was suppressed.
+func TestHighlightIfEnabledRespectsResolvedColour(t *testing.T) {
+	line := `key = "AKIAIOSFODNN7EXAMPLE"`
+	if got := highlightIfEnabled(palette{enabled: false}, line, "env"); got != line {
+		t.Errorf("colour disabled but output was highlighted: %q", got)
+	}
+	if got := highlightIfEnabled(palette{enabled: true}, line, "env"); !strings.Contains(got, "\x1b") {
+		t.Errorf("colour enabled but no highlighting applied: %q", got)
+	}
+}
+
+// #2f: the same secret must carry the same token in the Value line and in the
+// snippet below it. Re-hashing an already-hashed token printed sha256:78314b11be2e
+// in one place and sha256:331c0859e192 two lines later.
+func TestCensorFindingKeepsTokenConsistentWithEvidence(t *testing.T) {
+	const secret = "P@ssw0rd$ecret!2024"
+	f := findings.Finding{
+		RuleID:     "env-password",
+		Value:      "admin_password=" + secret,
+		SourceLine: "admin_password=" + secret,
+		Context:    "> admin_password=" + secret + "\n",
+	}
+	got := CensorFinding(f)
+	if strings.Contains(got.SourceLine, secret) || strings.Contains(got.Context, secret) {
+		t.Errorf("evidence leaked the secret: %q / %q", got.SourceLine, got.Context)
+	}
+	if !strings.Contains(got.SourceLine, got.Value) {
+		t.Errorf("Value token %q does not appear in the snippet %q", got.Value, got.SourceLine)
+	}
+	if strings.Contains(got.SourceLine, "sha256:sha256:") {
+		t.Errorf("token was hashed twice: %q", got.SourceLine)
+	}
+	if !strings.Contains(got.SourceLine, "admin_password=") {
+		t.Errorf("censoring destroyed the key name: %q", got.SourceLine)
+	}
+}
+
+// #2e: a value that already looks like a token used to switch censoring off for
+// the whole finding, leaving the snippet untouched.
+func TestCensorFindingStillCensorsEvidenceForTokenShapedValue(t *testing.T) {
+	const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY01"
+	f := findings.Finding{
+		RuleID:     "entropy-high",
+		Value:      findings.SecretToken(secret),
+		SourceLine: "aws_secret_access_key = " + secret,
+		Context:    "> aws_secret_access_key = " + secret + "\n",
+	}
+	got := CensorFinding(f)
+	if strings.Contains(got.SourceLine, secret) || strings.Contains(got.Context, secret) {
+		t.Errorf("evidence leaked despite a token-shaped value: %q / %q", got.SourceLine, got.Context)
+	}
+	if strings.Contains(got.SourceLine, "sha256:sha256:") {
+		t.Errorf("token was hashed twice: %q", got.SourceLine)
 	}
 }

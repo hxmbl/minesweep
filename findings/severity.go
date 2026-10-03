@@ -98,7 +98,3 @@ func (r RiskScore) String() string {
 func (r RiskScore) Label() string {
 	return r.String()
 }
-
-func RedactValue(value string, ruleName string) string {
-	return "<REDACTED>"
-}

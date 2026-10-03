@@ -1,10 +1,6 @@
 package report
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"regexp"
-	"sort"
 	"strings"
 
 	"minesweep/findings"
@@ -19,6 +15,16 @@ import (
 // ESC is rendered visibly as \e; other C0 controls except \n and \t are
 // rendered in caret notation. Newlines/tabs are preserved because report
 // layout depends on them.
+//
+// The C1 range (U+0080-U+009F) is escaped as well. Those code points are the
+// 8-bit spelling of the same controls: U+009B is CSI, U+009D is OSC, U+0090 is
+// DCS, U+0098 is SOS, U+009E is PM and U+009F is APC, so a terminal that
+// accepts them accepts the same payload that an ESC would have carried. They
+// also pass through a UTF-8 decoder untouched, which means neutralising only
+// the 7-bit form left the injection intact. U+0085 (NEL) and the line/paragraph
+// separators U+2028/U+2029 are escaped for the same reason a raw newline would
+// be: they break the report into forged lines without needing any escape
+// sequence at all.
 func SanitizeTerminal(s string) string {
 	if !strings.ContainsFunc(s, needsEscape) {
 		return s
@@ -36,6 +42,16 @@ func SanitizeTerminal(s string) string {
 		case r < 0x20 && r != '\n' && r != '\t':
 			b.WriteByte('^')
 			b.WriteByte(byte(r) + '@')
+		case r >= 0x80 && r <= 0x9f:
+			// U+0085 would otherwise act as a line break; render the C1 range
+			// as caret notation with a visible marker so it cannot be confused
+			// with a rendering artefact.
+			b.WriteString("^[")
+			b.WriteByte(byte(r) - 0x40)
+		case r == 0x2028:
+			b.WriteString(`\u2028`)
+		case r == 0x2029:
+			b.WriteString(`\u2029`)
 		default:
 			b.WriteRune(r)
 		}
@@ -45,71 +61,37 @@ func SanitizeTerminal(s string) string {
 }
 
 func needsEscape(r rune) bool {
-	return (r >= 0 && r < 0x20 && r != '\n' && r != '\t') || r == 0x7f
+	if r == 0x2028 || r == 0x2029 {
+		return true
+	}
+	return (r >= 0 && r < 0x20 && r != '\n' && r != '\t') ||
+		r == 0x7f ||
+		(r >= 0x80 && r <= 0x9f)
 }
 
-// CensorValue replaces every occurrence of a sensitive value in a source
-// line with a stable, non-reversible token.
+// CensorFinding returns a copy of f with its secret value replaced by a stable
+// token, and with secrets removed from the evidence printed alongside it.
 //
-// The token is a hash rather than a truncated prefix. A prefix such as
-// "AKIA1234.." is still a partial credential: it narrows a brute force, it
-// identifies the secret to anyone holding a candidate list, and for short
-// values the "prefix" is most of the secret. A hash leaks nothing, is
-// identical for the same secret everywhere it appears, and therefore still
-// lets findings be correlated across files, runs, and baselines.
-func CensorValue(line, value string) string {
-	if line == "" || value == "" {
-		return line
-	}
-	return strings.ReplaceAll(line, value, SecretToken(value))
-}
-
-// SecretToken returns a stable, non-reversible identifier for value.
-// Equal values always produce equal tokens; the original cannot be recovered
-// from the token.
-func SecretToken(value string) string {
-	if value == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(value))
-	return tokenPrefix + hex.EncodeToString(sum[:])[:tokenLength]
-}
-
-const (
-	tokenPrefix = "sha256:"
-	tokenLength = 12
-)
-
-// isCensoredToken reports whether s is already a censorship token, so
-// censoring is not applied twice and tokens survive round-tripping.
-func isCensoredToken(s string) bool {
-	if !strings.HasPrefix(s, tokenPrefix) {
-		return false
-	}
-	digest := s[len(tokenPrefix):]
-	if len(digest) != tokenLength {
-		return false
-	}
-	for _, c := range digest {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-// CensorFinding returns a copy of f with the secret value replaced by its
-// token everywhere it appears: in the value itself, the reported source line,
-// and the surrounding context block.
+// Evidence is censored even when f.Value is already a token. A token proves
+// only that the value field was censored; it says nothing about what the
+// surrounding lines still hold, so returning early here used to disable all
+// censoring of the snippet whenever the value happened to look like a token.
 func CensorFinding(f findings.Finding) findings.Finding {
-	value := f.Value
-	if value == "" || isCensoredToken(value) {
-		return f
+	// The raw value is the one secret we know for certain is in this finding's
+	// evidence, so censor with it before replacing the field itself. Replacing
+	// first and censoring afterwards would leave the evidence holding a value
+	// that no longer exists anywhere in the finding.
+	own := f.Value
+	if own != "" && !findings.IsCensoredToken(own) {
+		f.Value = findings.SecretToken(own)
 	}
-	token := SecretToken(value)
-	f.SourceLine = censorAllValues(f.SourceLine, value)
-	f.Context = censorAllValues(f.Context, value)
-	f.Value = token
+	// The engine has already censored its own known secrets out of the evidence
+	// (see engine.detect), but CensorReport is also the entry point for library
+	// callers that never went through the engine, so run it again here rather
+	// than assume. Both passes are idempotent.
+	secrets := []string{own}
+	f.SourceLine = findings.CensorEvidence(f.SourceLine, secrets)
+	f.Context = findings.CensorEvidence(f.Context, secrets)
 	return f
 }
 
@@ -128,134 +110,6 @@ func CensorReport(rep *findings.RiskReport) *findings.RiskReport {
 		}
 	}
 	return &out
-}
-
-// censorAllValues censors the primary finding value and other values that
-// strongly resemble credentials or secrets. It is intentionally conservative
-// about what it considers secret-like: snippets are opt-in, but ordinary code
-// should still remain readable.
-func censorAllValues(line, primaryValue string) string {
-	if line == "" {
-		return line
-	}
-
-	result := CensorValue(line, primaryValue)
-	return censorSecretSubstrings(result)
-
-}
-
-// secretCandidate matches contiguous credential-like tokens. Requiring a
-// substantial alphanumeric component prevents ordinary punctuation-heavy
-// source such as URLs and paths from becoming one giant candidate.
-var secretCandidate = regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9_.:/=-]{7,}[A-Za-z0-9]`)
-
-// censorSecretSubstrings finds and censors secret-like tokens without treating
-// an entire URL/path as a secret merely because it contains punctuation.
-func censorSecretSubstrings(line string) string {
-	matches := secretCandidate.FindAllStringIndex(line, -1)
-	if len(matches) == 0 {
-		return line
-	}
-
-	type candidate struct {
-		start int
-		end   int
-		value string
-	}
-
-	candidates := make([]candidate, 0, len(matches))
-	for _, match := range matches {
-		value := line[match[0]:match[1]]
-
-		if isCensoredToken(value) || strings.Contains(value, "[CENSORED]") || !looksLikeSecret(value) {
-			continue
-		}
-
-		candidates = append(candidates, candidate{
-			start: match[0],
-			end:   match[1],
-			value: value,
-		})
-	}
-
-	if len(candidates) == 0 {
-		return line
-	}
-
-	// Process right-to-left so replacing one candidate does not invalidate
-	// offsets for candidates that appear earlier in the original string.
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].start > candidates[j].start
-	})
-
-	result := line
-	for _, candidate := range candidates {
-		if candidate.end > len(result) {
-			continue
-		}
-
-		// Ignore candidates whose original span has already been changed by
-		// an overlapping replacement.
-		if result[candidate.start:candidate.end] != candidate.value {
-			continue
-		}
-
-		replacement := SecretToken(candidate.value)
-		result = result[:candidate.start] + replacement + result[candidate.end:]
-	}
-
-	return result
-
-}
-
-// looksLikeSecret determines whether a string has characteristics commonly
-// associated with credentials or other high-entropy secret material.
-func looksLikeSecret(s string) bool {
-	if len(s) < 8 {
-		return false
-	}
-
-	hasLetters := false
-	hasDigits := false
-	hasSpecial := false
-
-	for _, c := range s {
-		switch {
-		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
-			hasLetters = true
-		case c >= '0' && c <= '9':
-			hasDigits = true
-		case c == '_' || c == '-' || c == '.' || c == '/' || c == '=' || c == ':':
-			hasSpecial = true
-		}
-	}
-
-	// A candidate should contain at least two different character classes.
-	mixCount := 0
-	if hasLetters {
-		mixCount++
-	}
-	if hasDigits {
-		mixCount++
-	}
-	if hasSpecial {
-		mixCount++
-	}
-
-	if mixCount < 2 {
-		return false
-	}
-
-	// Use unique-character ratio as a cheap approximation of randomness.
-	// This is deliberately not called "entropy": it is only a heuristic.
-	uniqueChars := make(map[rune]struct{}, len(s))
-	for _, c := range s {
-		uniqueChars[c] = struct{}{}
-	}
-
-	ratio := float64(len(uniqueChars)) / float64(len([]rune(s)))
-	return ratio > 0.6
-
 }
 
 // HighlightSyntax applies basic syntax highlighting to a code line based on
@@ -368,4 +222,19 @@ func isWordChar(c byte) bool {
 		(c >= 'A' && c <= 'Z') ||
 		(c >= '0' && c <= '9') ||
 		c == '_'
+}
+
+// highlightIfEnabled applies syntax highlighting only when colour has been
+// resolved on for this writer.
+//
+// The requested --color mode is not the answer: with the default "auto" and
+// output redirected to a file or a CI log, HighlightSyntax still emitted its
+// raw ANSI codes while every other colour in the report was correctly
+// suppressed, leaving escape bytes in the file that a later `cat` would
+// interpret as control sequences.
+func highlightIfEnabled(p palette, line, fileType string) string {
+	if !p.enabled {
+		return line
+	}
+	return HighlightSyntax(line, fileType)
 }
