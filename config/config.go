@@ -41,9 +41,12 @@ type FileConfig struct {
 	NoIgnore bool `yaml:"no_ignore" json:"no_ignore"`
 	// IncludeLowConfidence disables the default confidence floor.
 	IncludeLowConfidence bool `yaml:"include_low_confidence" json:"include_low_confidence"`
-	// DangerouslyShowSecrets prints raw secret values. It is deliberately not
-	// configurable from a file: opting in must be a deliberate act on the
-	// command line, never something a checked-in config can do for you.
+	// DangerouslyShowSecrets prints raw secret values. secure:true, so a
+	// checked-in config can never opt in on the user's behalf: a discovered
+	// config's value is ignored with a warning, and only an explicitly named
+	// --config applies it. It previously had no entry in the trust table at all,
+	// so the key parsed successfully and was then silently discarded -- the worst
+	// of both, since a user who set it saw raw values missing and no explanation.
 	DangerouslyShowSecrets bool `yaml:"dangerously_show_secrets" json:"dangerously_show_secrets"`
 }
 

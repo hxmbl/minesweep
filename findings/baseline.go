@@ -32,6 +32,11 @@ type BaselineEntry struct {
 }
 
 // G304: path is the baseline file the user named with --baseline.
+// LoadBaseline reads a baseline file. A missing file yields an empty baseline,
+// because that is what --update-baseline needs on its first run.
+//
+// It cannot tell a first run from a typo, so callers that must not silently
+// start from scratch check the path themselves -- see engine.loadBaseline.
 func LoadBaseline(path string) (*Baseline, error) {
 	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {

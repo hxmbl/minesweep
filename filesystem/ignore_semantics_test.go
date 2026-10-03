@@ -213,3 +213,14 @@ func makeGitRepo(t *testing.T, dir string) {
 		}
 	}
 }
+
+// decideContains reports whether a pattern set contains a literal rule, used to
+// assert a merge happened rather than inferring it from behaviour.
+func (ip *IgnorePattern) decideContains(pattern string) bool {
+	for _, r := range ip.rules {
+		if r.pattern == pattern {
+			return true
+		}
+	}
+	return false
+}

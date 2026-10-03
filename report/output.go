@@ -212,6 +212,14 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 					break
 				}
 			}
+			if matchingLineIndex < 0 {
+				// Context with no marked line. LineIndex.Context always emits
+				// exactly one "> " prefix, so this is unreachable through the
+				// engine -- but WriteText is exported, and -1 here made startLine
+				// one greater than f.Line, shifting every printed line number by
+				// one. Fall back to the finding's own line.
+				matchingLineIndex = 0
+			}
 			// Calculate starting line number based on the finding's line and matching line index
 			startLine := f.Line - matchingLineIndex
 			if startLine < 1 {

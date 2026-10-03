@@ -15,5 +15,12 @@ actions:
     action: warn
     min_severity: high
 
-  - tags: ["env"]
-    action: allow
+  # The previous `env: allow` rule here was dead: policy.Evaluate takes the FIRST
+  # matching rule, and the unconditional ['*'] above already matches every
+  # finding, so this could never be reached. It has been removed rather than
+  # reordered, because moving it first would silently allow every credential in
+  # an .env file -- the opposite of what a reader of this file would expect from a
+  # profile documented as "relaxed", not "permissive".
+  #
+  # If you want env findings to be allowed, add a rule BEFORE the ['*'] above,
+  # or write your own profile.

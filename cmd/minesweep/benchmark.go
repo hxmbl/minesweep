@@ -50,6 +50,7 @@ func runBenchmark(scanPath string, jsonOut bool, runs int) error {
 	// anything else reading that variable afterwards.
 	benchCfg := cfg
 	benchCfg.UpdateBaseline = false
+	benchCfg.BaselineFile = ""
 
 	if !jsonOut {
 		fmt.Fprintf(os.Stderr, "minesweep: warming up (untimed)...\n")
