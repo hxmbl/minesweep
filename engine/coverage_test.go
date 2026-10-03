@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"minesweep/findings"
 )
 
 // #7: a directory the scanner cannot read held a live credential and the scan
@@ -155,4 +157,106 @@ func containsReason(reasons []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// #5: filepath.WalkDir does not follow a symlinked root, so scanning a symlinked
+// project directory found nothing, scored 0/100 and exited clean. --diff,
+// --staged and --history already resolved symlinks, so the four modes disagreed
+// about the same tree.
+func TestSymlinkedScanRootIsActuallyScanned(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "realproject")
+	wrapper := filepath.Join(base, "wrapper")
+	for _, d := range []string{real, wrapper} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const secret = "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY01\n"
+	if err := os.WriteFile(filepath.Join(real, ".env"), []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(wrapper, "project")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	scan := func(target string) *findings.RiskReport {
+		t.Helper()
+		e, err := New(Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rep, err := e.Run(target)
+		if err != nil {
+			t.Fatalf("run %s: %v", target, err)
+		}
+		return rep
+	}
+
+	viaLink := scan(link)
+	direct := scan(real)
+
+	if len(direct.Findings) == 0 {
+		t.Fatal("scanning the real directory found nothing; the fixture is wrong")
+	}
+	if len(viaLink.Findings) != len(direct.Findings) {
+		t.Errorf("scanning the symlink found %d findings, direct scan found %d",
+			len(viaLink.Findings), len(direct.Findings))
+	}
+	if viaLink.RiskScore != findings.RiskScore(direct.RiskScore) || viaLink.RiskScore == 0 {
+		t.Errorf("risk score via symlink = %v, direct scan = %v", viaLink.RiskScore, direct.RiskScore)
+	}
+	// A symlinked root that is fully scannable is not a coverage gap.
+	if containsReason(viaLink.IncompleteReasons, ReasonUnreadable) {
+		t.Errorf("IncompleteReasons = %v; scanning a resolvable symlinked root is not a gap", viaLink.IncompleteReasons)
+	}
+
+	// Paths in the report must be relative to the resolved root, not the link.
+	for _, f := range viaLink.Findings {
+		if strings.HasPrefix(f.File, "/") {
+			t.Errorf("finding path is absolute: %q", f.File)
+		}
+	}
+}
+
+// #6: the two-hop escape, at the engine level: nothing outside the scan root may
+// be read through a chain of in-root links.
+func TestSymlinkChainEscapeIsNotReadByEngine(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	outside := filepath.Join(base, "outside")
+	for _, d := range []string{root, outside} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const secret = "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY01\n"
+	if err := os.WriteFile(filepath.Join(outside, "secret.env"), []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.env"), filepath.Join(root, "b.env")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink("b.env", filepath.Join(root, "a.env")); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := e.Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, f := range rep.Findings {
+		if strings.Contains(f.Value, "wJalrXUtnFEMI") {
+			t.Errorf("secret outside the scan root was read through a symlink chain: %+v", f)
+		}
+		if strings.Contains(f.SourceLine, "wJalrXUtnFEMI") {
+			t.Errorf("evidence leaked the out-of-root secret: %q", f.SourceLine)
+		}
+	}
 }
