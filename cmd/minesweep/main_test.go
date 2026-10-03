@@ -84,18 +84,29 @@ func TestExplainRuleAmbiguousAndMissing(t *testing.T) {
 }
 
 func TestLoadAllRulesFindsEmbedded(t *testing.T) {
-	cfg.RulesDir = filepath.Join(t.TempDir(), "does-not-exist")
+	cfg.RulesDir = ""
 	all, err := loadAllRules()
 	if err != nil {
 		t.Fatalf("loadAllRules: %v", err)
 	}
 	if len(all) < 40 {
-		t.Errorf("expected embedded fallback with many rules, got %d", len(all))
+		t.Errorf("expected the embedded rule set, got %d", len(all))
 	}
 	for _, r := range all {
 		if r.ID == "" {
 			t.Fatal("rule with empty ID loaded")
 		}
+	}
+}
+
+// #23: an explicit --rules path that cannot be read has to be an error. It used
+// to fall through to the embedded rules, so a typo'd path or a single rule FILE
+// (rather than a directory) scanned silently with built-in rules only and said
+// nothing, which is the worst outcome for someone migrating from gitleaks.
+func TestLoadAllRulesErrorsOnMissingExplicitPath(t *testing.T) {
+	cfg.RulesDir = filepath.Join(t.TempDir(), "does-not-exist")
+	if _, err := loadAllRules(); err == nil {
+		t.Fatal("a missing explicit rules path must be reported, not silently ignored")
 	}
 }
 

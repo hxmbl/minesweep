@@ -150,6 +150,16 @@ func TestEscapingSymlinkMakesScanIncomplete(t *testing.T) {
 	}
 }
 
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func containsReason(reasons []string, want string) bool {
 	for _, r := range reasons {
 		if r == want {
@@ -258,5 +268,109 @@ func TestSymlinkChainEscapeIsNotReadByEngine(t *testing.T) {
 		if strings.Contains(f.SourceLine, "wJalrXUtnFEMI") {
 			t.Errorf("evidence leaked the out-of-root secret: %q", f.SourceLine)
 		}
+	}
+}
+
+// #13: PolicyDir and RulesDir used to default to "policy" and "rules", resolved
+// against the working directory. resolvePolicies preferred
+// <cwd>/policy/default.yml over the embedded policy, so merely running the
+// scanner from a checkout that happened to contain one applied that policy to a
+// tree it had nothing to do with -- and a policy whose only rule was
+// `tags: ["*"], action: allow` turned a blocked finding into a clean exit 0.
+//
+// mergeRules replaces built-in rules by ID, so an ambient ./rules could weaken a
+// built-in rule just as easily as add one. Neither is picked up now unless the
+// user names it.
+func TestAmbientPolicyAndRulesDirsAreNotUsed(t *testing.T) {
+	cwd := t.TempDir()
+	writeFile(t, filepath.Join(cwd, "policy", "default.yml"),
+		"policies:\n  - tags: [\"*\"]\n    action: allow\n")
+	writeFile(t, filepath.Join(cwd, "rules", "aws.yml"),
+		"rules:\n  - id: aws-secret-key\n    type: regex\n    name: weakened\n    description: d\n"+
+			"    severity: low\n    tags: [aws]\n    patterns:\n      - regex: NEVERMATCHES_[A-Z]+\n"+
+			"        confidence: 0.1\n")
+
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	e, err := New(Config{})
+	if err != nil {
+		t.Fatalf("ambient policy/rules dirs must not break engine construction: %v", err)
+	}
+
+	// The ambient policy would allow everything.
+	for _, r := range e.Policies() {
+		if len(r.Tags) == 1 && r.Tags[0] == "*" && r.Action == findings.ActionAllow {
+			t.Errorf("ambient ./policy/default.yml was loaded: %+v", r)
+		}
+	}
+
+	// The ambient rule file would have replaced the built-in aws-secret-key.
+	for _, r := range e.regex.Rules() {
+		if r.ID == "aws-secret-key" && r.Severity == "low" {
+			t.Errorf("ambient ./rules overwrote the built-in aws-secret-key rule: %+v", r)
+		}
+	}
+
+	// Sanity: the built-in rule really is present at its own severity.
+	var found bool
+	for _, r := range e.regex.Rules() {
+		if r.ID == "aws-secret-key" {
+			found = true
+			if r.Severity != "critical" {
+				t.Errorf("built-in aws-secret-key severity = %q, want critical", r.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Error("built-in aws-secret-key rule missing")
+	}
+}
+
+// The ambient directories must still be usable when the user names them.
+func TestNamedPolicyAndRulesDirsAreHonoured(t *testing.T) {
+	cwd := t.TempDir()
+	writeFile(t, filepath.Join(cwd, "policy", "default.yml"),
+		"policies:\n  - tags: [\"*\"]\n    action: allow\n")
+	writeFile(t, filepath.Join(cwd, "rules", "custom.yml"),
+		"rules:\n  - id: my-explicit-rule\n    type: regex\n    name: Explicit\n    description: d\n"+
+			"    severity: critical\n    tags: [t]\n    patterns:\n      - regex: EXPLICIT_[A-Z]{4}\n"+
+			"        confidence: 0.9\n")
+
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	e, err := New(Config{PolicyDir: "policy", RulesDir: "rules"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var allowed, explicit bool
+	for _, r := range e.Policies() {
+		if len(r.Tags) == 1 && r.Tags[0] == "*" && r.Action == findings.ActionAllow {
+			allowed = true
+		}
+	}
+	for _, r := range e.regex.Rules() {
+		if r.ID == "my-explicit-rule" {
+			explicit = true
+		}
+	}
+	if !allowed {
+		t.Error("an explicitly named --policy-dir was not honoured")
+	}
+	if !explicit {
+		t.Error("an explicitly named --rules dir was not honoured")
 	}
 }

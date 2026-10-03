@@ -107,7 +107,7 @@ func main() {
 
 	// --rules is persistent so subcommands like `explain` resolve the same
 	// rule directory (disk dir, embedded fallback) as scans do.
-	root.PersistentFlags().StringVarP(&cfg.RulesDir, "rules", "r", "rules", "Directory containing rule YAML files")
+	root.PersistentFlags().StringVarP(&cfg.RulesDir, "rules", "r", "", "Directory containing rule YAML files, or a single rule file (default: built-in rules, plus a .gitleaks.toml found in the scanned tree)")
 	root.Flags().StringVarP(&cfg.PolicyFile, "policy", "", "", "Policy file to evaluate against")
 	root.Flags().StringVarP(&cfg.Profile, "profile", "p", "", "Profile name (developer, enterprise, public-github)")
 	root.Flags().StringVarP(&cfg.ProfilesDir, "profiles", "", "profiles", "Directory containing profile YAML files")
@@ -120,7 +120,7 @@ func main() {
 	root.Flags().BoolVarP(&noPager, "no-pager", "", false, "Print text reports directly instead of paging")
 	root.Flags().BoolVarP(&benchMode, "benchmark", "", false, "Time full scans instead of writing a report")
 	root.Flags().IntVarP(&benchRuns, "runs", "", 1, "Number of timed runs for --benchmark (min/median/mean/max reported)")
-	root.Flags().StringVarP(&cfg.PolicyDir, "policy-dir", "", "policy", "Directory containing policy YAML files")
+	root.Flags().StringVarP(&cfg.PolicyDir, "policy-dir", "", "", "Directory containing policy YAML files (default: built-in policy only)")
 	root.Flags().BoolVarP(&cfg.Verbose, "verbose", "v", false, "Verbose output")
 	root.Flags().StringVarP(&cfg.FailOn, "fail-on", "", "low", "Minimum severity that exits non-zero (info, low, medium, high, critical)")
 	root.Flags().Float64VarP(&cfg.MinConfidence, "min-confidence", "", 0, "Minimum confidence threshold to include findings (0.0-1.0)")
@@ -229,7 +229,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.Workers) },
 		func(f *config.FileConfig) bool { return f.Workers > 0 }),
-	numField("max_files", "max-files", false,
+	numField("max_files", "max-files", true,
 		func(f *config.FileConfig) string {
 			if f.MaxFiles > 0 {
 				return fmt.Sprint(f.MaxFiles)
@@ -238,7 +238,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MaxFiles) },
 		func(f *config.FileConfig) bool { return f.MaxFiles > 0 }),
-	numField("max_findings", "max-findings", false,
+	numField("max_findings", "max-findings", true,
 		func(f *config.FileConfig) string {
 			if f.MaxFindings > 0 {
 				return fmt.Sprint(f.MaxFindings)
@@ -247,7 +247,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MaxFindings) },
 		func(f *config.FileConfig) bool { return f.MaxFindings > 0 }),
-	numField("memory_limit_mb", "memory-limit-mb", false,
+	numField("memory_limit_mb", "memory-limit-mb", true,
 		func(f *config.FileConfig) string {
 			if f.MemoryLimitMB > 0 {
 				return fmt.Sprint(f.MemoryLimitMB)
@@ -256,7 +256,15 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MemoryLimitMB) },
 		func(f *config.FileConfig) bool { return f.MemoryLimitMB > 0 }),
-	numField("max_file_size_mb", "max-file-size-mb", false,
+	// max_file_size_mb was classified as "performance", but it decides how much
+	// content is read at all. A repo-supplied .minesweep.yml containing only
+	//
+	//     max_file_size_mb: 1
+	//
+	// made an 8 MB .env holding an AWS key scan clean and exit 0: a false
+	// negative with a success message, and the only coverage knob that did not
+	// mark the scan incomplete. Performance and coverage are not the same axis.
+	numField("max_file_size_mb", "max-file-size-mb", true,
 		func(f *config.FileConfig) string {
 			if f.MaxFileSizeMB > 0 {
 				return fmt.Sprint(f.MaxFileSizeMB)
@@ -424,15 +432,29 @@ func loadConfig(cmd *cobra.Command, scanPath string) error {
 	var err error
 
 	if configPath != "" {
+		// An explicitly named config is the user's own file: a parse error is
+		// their typo and must be reported.
 		fileCfg, err = config.LoadFile(configPath)
 		if err != nil {
 			return fmt.Errorf("load config file: %w", err)
 		}
 		cfgPath = configPath
 	} else {
+		// A DISCOVERED config is not. FindConfig walks to the filesystem root,
+		// so a single stray minesweep.yml anywhere above the target -- with a
+		// misspelled key, or malformed YAML -- used to abort every scan beneath
+		// it with exit 1 and no findings at all. A hostile checkout could
+		// therefore stop a scanner from scanning it.
+		//
+		// It is still worth saying, but it must not stop the scan: an
+		// unreadable config means the scan runs on built-in defaults, which
+		// cannot be weaker than no config at all.
 		fileCfg, cfgPath, err = config.FindAndLoad(scanPath)
 		if err != nil {
-			return fmt.Errorf("load config file: %w", err)
+			fmt.Fprintf(os.Stderr,
+				"warning: ignoring config %s: %v\n    continuing with built-in defaults\n",
+				cfgPath, err)
+			return nil
 		}
 	}
 	if fileCfg == nil {
