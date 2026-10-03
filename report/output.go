@@ -219,7 +219,7 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 				// Remove the existing prefix and censor the line
 				trimmedLine := strings.TrimPrefix(line, "> ")
 				trimmedLine = strings.TrimPrefix(trimmedLine, "  ")
-				censoredLine := censorAllValues(trimmedLine, f.Value)
+				censoredLine := findings.CensorEvidence(trimmedLine, []string{f.Value})
 				lineNum := startLine + i
 				prefix := "  "
 				if i == matchingLineIndex {
@@ -227,28 +227,21 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 				}
 				// Sanitize first to remove any malicious escape sequences
 				sanitizedLine := SanitizeTerminal(censoredLine)
-				// Then apply syntax highlighting if color is enabled
-				var highlightedLine string
-				if opts.Color != ColorNever {
-					highlightedLine = HighlightSyntax(sanitizedLine, f.File)
-				} else {
-					highlightedLine = sanitizedLine
-				}
+				// Highlight only when colour is actually resolved on. Gating on the
+				// requested mode instead let the default --color auto emit raw ANSI
+				// into a redirected file or a CI log.
+				highlightedLine := highlightIfEnabled(p, sanitizedLine, f.File)
 				tw.writefmt("            %s%4d: %s\n", p.dim(prefix), lineNum, highlightedLine)
 			}
 		} else {
 			// No context available, just show the source line
-			snippet := f.SourceLine
-			snippet = censorAllValues(snippet, f.Value)
+			snippet := findings.CensorEvidence(f.SourceLine, []string{f.Value})
 			// Sanitize first to remove any malicious escape sequences
 			sanitizedLine := SanitizeTerminal(snippet)
-			// Then apply syntax highlighting if color is enabled
-			var highlightedLine string
-			if opts.Color != ColorNever {
-				highlightedLine = HighlightSyntax(sanitizedLine, f.File)
-			} else {
-				highlightedLine = sanitizedLine
-			}
+			// Highlight only when colour is actually resolved on. Gating on the
+			// requested mode instead let the default --color auto emit raw ANSI
+			// into a redirected file or a CI log.
+			highlightedLine := highlightIfEnabled(p, sanitizedLine, f.File)
 			tw.writefmt("            >%4d: %s\n", f.Line, highlightedLine)
 		}
 	}
@@ -260,7 +253,7 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 	if opts.Verbose && f.Value != "" {
 		val := f.Value
 		label := "Value"
-		if isCensoredToken(val) {
+		if findings.IsCensoredToken(val) {
 			label = "Value (hashed; --dangerously-show-secrets to reveal)"
 		} else if len(val) > 60 {
 			val = val[:60] + "..."
