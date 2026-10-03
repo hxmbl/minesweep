@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -283,22 +284,56 @@ func TestNewFileExecutable(t *testing.T) {
 	}
 }
 
-func TestNewFileUTF16(t *testing.T) {
+// #19: a BOM'd UTF-16 file used to be classified binary purely because of the NUL
+// bytes UTF-16 interleaves, so every content detector returned early. A .env
+// saved by a Windows editor scanned clean with only an info finding and no
+// incomplete flag. It is text, and it is now decoded.
+func TestNewFileUTF16IsDecodedNotBinary(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "utf16.txt")
+	path := filepath.Join(dir, "utf16.env")
 
 	utf16le := []byte{0xFF, 0xFE, 'h', 0x00, 'e', 0x00, 'l', 0x00, 'l', 0x00, 'o', 0x00}
-	os.WriteFile(path, utf16le, 0644)
+	if err := os.WriteFile(path, utf16le, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	f, err := NewFile(path)
 	if err != nil {
 		t.Fatalf("NewFile: %v", err)
 	}
-	if err := f.LoadContent(); err != nil {
-		t.Fatalf("LoadContent: %v", err)
+	content, err := f.GetContent()
+	if err != nil {
+		t.Fatalf("GetContent: %v", err)
+	}
+	if f.IsBinary {
+		t.Error("a BOM-marked UTF-16 file must not be classified binary")
+	}
+	if string(content) != "hello" {
+		t.Errorf("content = %q, want %q (BOM stripped and transcoded)", content, "hello")
+	}
+}
+
+// Unmarked UTF-16 must be left alone: the byte order cannot be known, and
+// transcoding it wrongly would corrupt the contents shown in the report.
+func TestUnmarkedUTF16IsLeftAlone(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nobom.env")
+	if err := os.WriteFile(path, []byte{'h', 0x00, 'i', 0x00}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := f.GetContent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(content, []byte{'h', 0x00, 'i', 0x00}) {
+		t.Errorf("unmarked UTF-16 was rewritten: % x", content)
 	}
 	if !f.IsBinary {
-		t.Fatal("UTF-16 file should be detected as binary (null bytes)")
+		t.Error("unmarked UTF-16 still has NUL bytes and should be binary")
 	}
 }
 

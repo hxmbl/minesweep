@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -357,8 +358,14 @@ func parseRules(data []byte, name, ruleType string, honourAllowlist bool) ([]Rul
 			return nil, err
 		}
 	} else {
+		// Strict decoding: "confidnce:" or "filefilter:" would otherwise parse
+		// into a zero value and produce a rule that silently never fires. The
+		// severity check below already fails loudly on a bad value; an unknown
+		// key deserves the same treatment.
+		dec := yaml.NewDecoder(bytes.NewReader(data))
+		dec.KnownFields(true)
 		var rf RuleFile
-		if err := yaml.Unmarshal(data, &rf); err != nil {
+		if err := dec.Decode(&rf); err != nil {
 			return nil, err
 		}
 		fileRules = rf.Rules
@@ -377,6 +384,12 @@ func parseRules(data []byte, name, ruleType string, honourAllowlist bool) ([]Rul
 		}
 		failed := 0
 		for j := range fileRules[i].Patterns {
+			if fileRules[i].Patterns[j].Confidence < 0 || fileRules[i].Patterns[j].Confidence > 1 {
+				fmt.Fprintf(os.Stderr,
+					"minesweep: warning: rule %q (%s) pattern %d has confidence %g outside 0..1; the pattern is disabled\n",
+					fileRules[i].ID, name, j+1, fileRules[i].Patterns[j].Confidence)
+				fileRules[i].Patterns[j].Confidence = -1
+			}
 			if err := fileRules[i].Patterns[j].compile(); err != nil {
 				// Warn loudly: a silently skipped pattern is silently
 				// missing coverage.
@@ -387,6 +400,19 @@ func parseRules(data []byte, name, ruleType string, honourAllowlist bool) ([]Rul
 		}
 		if failed > 0 && failed == len(fileRules[i].Patterns) {
 			fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q is disabled (all patterns failed to compile)\n", fileRules[i].ID)
+			continue
+		}
+		// A pattern whose confidence is out of range cannot match anything, and
+		// would otherwise sit in the rule looking loaded. Drop it rather than let
+		// it fail silently at scan time.
+		patterns := fileRules[i].Patterns[:0]
+		for _, p := range fileRules[i].Patterns {
+			if p.Confidence >= 0 {
+				patterns = append(patterns, p)
+			}
+		}
+		fileRules[i].Patterns = patterns
+		if len(fileRules[i].Patterns) == 0 {
 			continue
 		}
 		out = append(out, fileRules[i])
@@ -442,7 +468,38 @@ func loadRulesFS(rulesFS fs.FS, ruleType string, honourAllowlist bool) ([]Rule, 
 	if len(loadErrs) > 0 {
 		fmt.Fprintf(os.Stderr, "minesweep: warning: %d rule file(s) had errors and were skipped\n", len(loadErrs))
 	}
-	return allRules, nil
+	// Deduplicate within this source, last file wins. mergeRules only applied
+	// ACROSS sources (embedded, then --rules, then the user dir), never WITHIN one
+	// directory, so a rules directory could not override a rule: two files
+	// defining "dup-rule" both stayed live, `explain` reported "2 rules match",
+	// and a scan reported whichever pattern happened to be evaluated first. That
+	// silently kills the main reason to ship a rules directory -- tuning a noisy
+	// rule down.
+	//
+	// Last-wins, so filename ordering expresses precedence. fs.ReadDir returns
+	// names sorted, which makes that ordering predictable ("10-base.yml" is
+	// overridden by "20-override.yml").
+	return dedupeByID(allRules), nil
+}
+
+// dedupeByID keeps the last definition of each rule ID while preserving the
+// position of that ID's FIRST appearance, so the resulting order does not churn
+// when a later file overrides an earlier one.
+func dedupeByID(rules []Rule) []Rule {
+	last := make(map[string]int, len(rules))
+	for i, r := range rules {
+		last[r.ID] = i
+	}
+	out := make([]Rule, 0, len(last))
+	emitted := make(map[string]struct{}, len(last))
+	for _, r := range rules {
+		if _, done := emitted[r.ID]; done {
+			continue
+		}
+		emitted[r.ID] = struct{}{}
+		out = append(out, rules[last[r.ID]])
+	}
+	return out
 }
 
 func getUserRulesDir() string {

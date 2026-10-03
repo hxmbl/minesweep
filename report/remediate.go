@@ -2,6 +2,7 @@ package report
 
 import (
 	"minesweep/findings"
+	"strings"
 )
 
 var ruleRemediations = map[string]string{
@@ -80,9 +81,18 @@ var tagRemediations = []tagRemediation{
 	{"auth", "Rotate this authentication material and keep future values out of source control."},
 }
 
+// RemediationText returns guidance for a rule, falling back to its tags.
+//
+// The rule ID is looked up under both separator conventions. The Go-built
+// detectors (database.go, oauth.go) name their rules with underscores while this
+// table uses dashes, so all fourteen of them missed and silently degraded to
+// generic tag text. Normalising here rather than renaming the rules keeps every
+// existing baseline and --rules override keyed on the current IDs.
 func RemediationText(ruleID string, tags []string) string {
-	if txt, ok := ruleRemediations[ruleID]; ok {
-		return txt
+	for _, key := range []string{ruleID, strings.ReplaceAll(ruleID, "_", "-"), strings.ReplaceAll(ruleID, "-", "_")} {
+		if txt, ok := ruleRemediations[key]; ok {
+			return txt
+		}
 	}
 	for _, t := range tags {
 		for _, tr := range tagRemediations {
@@ -94,12 +104,32 @@ func RemediationText(ruleID string, tags []string) string {
 	return ""
 }
 
+// downplaysSeverity lists rules whose guidance talks the severity down. For a
+// finding at critical severity that text is the one a reader is most likely to
+// act on by doing nothing -- twilio-account-sid is classified critical, and its
+// guidance opens "Account SIDs are identifiers, not secrets, but confirm no
+// matching auth token was committed alongside it".
+//
+// The exception is listed explicitly rather than detected by matching prose,
+// because the rest of the table is legitimately more specific and more useful
+// than the generic critical text (aws-access-key-id tells you to switch to
+// short-lived IAM roles, which is the actual remedy).
+var downplaysSeverity = map[string]bool{
+	"twilio-account-sid":      true,
+	"generic-pem-certificate": true,
+	"generic-certificate":     true,
+}
+
+// remediationFor picks the guidance shown under a finding.
 func remediationFor(f findings.Finding) string {
-	if txt := RemediationText(f.RuleID, f.Tags); txt != "" {
-		return txt
+	critical := f.Severity >= findings.SeverityCritical
+	if !critical || !downplaysSeverity[f.RuleID] {
+		if txt := RemediationText(f.RuleID, f.Tags); txt != "" {
+			return txt
+		}
 	}
 	switch {
-	case f.Severity >= findings.SeverityCritical:
+	case critical:
 		return "Treat this value as compromised: rotate it with the responsible provider and remove it from the file."
 	case f.Severity >= findings.SeverityHigh:
 		return "Verify whether this is a real secret; if so, rotate it and keep future values out of source control."

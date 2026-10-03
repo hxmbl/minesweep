@@ -572,7 +572,10 @@ var DefaultSkipExtensions = []string{
 	".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp",
 	".mp4", ".avi", ".mov", ".mkv",
 	".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".lib", ".class", ".pyc",
-	".DS_Store", ".DS_Store?",
+	// ".DS_Store?" looked like a glob for a single-character variant, but the
+	// suffix set is compared with ==, so the ? never matched anything. ".DS_Store"
+	// on the line above already covers the real filename.
+	".DS_Store",
 	".zip", ".tar", ".gz", ".bz2", ".rar", ".7z",
 	".woff", ".woff2", ".ttf", ".eot",
 	".min.js", ".min.css",
@@ -1040,12 +1043,30 @@ func newFilterSet(opts WalkOption) (*filterSet, error) {
 		fs.maxSize = DefaultMaxFileSize
 	}
 	fs.skipExtSet = make(map[string]bool, len(skipExts))
+	var badExts []string
 	for _, e := range skipExts {
+		if e == "" {
+			// e[1:] on an empty string panics, and Go's panic exit code is 2 --
+			// the same code this tool uses to mean "incomplete scan". A
+			// mistyped config entry therefore looked like a deliberate verdict.
+			badExts = append(badExts, "<empty>")
+			continue
+		}
 		if strings.Contains(e[1:], ".") {
 			fs.skipSfx = append(fs.skipSfx, e)
-		} else {
-			fs.skipExtSet[e] = true
+			continue
 		}
+		// A bare extension never matches: filepath.Ext always returns a
+		// dot-prefixed suffix, so ["env"] silently skipped nothing. Accept the
+		// obvious spelling rather than leaving a silent no-op in the config.
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		fs.skipExtSet[strings.ToLower(e)] = true
+	}
+	if len(badExts) > 0 {
+		return nil, fmt.Errorf("skip_extensions: %s: entries must be a file extension such as .png or *.min.js",
+			strings.Join(badExts, ", "))
 	}
 	return fs, nil
 }

@@ -237,6 +237,14 @@ func NewBlobFile(path string, size int64, loader func() ([]byte, error)) *File {
 	return &File{Path: path, Size: size, Mode: 0100644, loader: loader}
 }
 
+// contentLocked loads the content and classifies it.
+//
+// A BOM'd UTF-16 file is text, not binary. IsBinary sees the NUL bytes that
+// UTF-16 interleaves between every ASCII character and classifies the whole file
+// as binary, so every content detector early-returned and a .env holding an AWS
+// secret scanned clean with only a "binary-file-detected" info finding and
+// incomplete: null. UTF-16LE/BE and UTF-8 with BOM are transcoded to UTF-8 first,
+// which is what HasBOM and IsUTF8 exist for; they were dead code until now.
 func (f *File) contentLocked() ([]byte, error) {
 	if f.contentLoaded {
 		return f.Content, f.contentErr
@@ -259,6 +267,10 @@ func (f *File) contentLocked() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		if decoded, ok := transcodeBOM(data); ok {
+			data = decoded
+			f.Content = decoded
+		}
 		f.IsBinary = IsBinary(data)
 		return f.Content, nil
 	}
@@ -275,6 +287,9 @@ func (f *File) contentLocked() ([]byte, error) {
 		f.contentErr = err
 		f.contentLoaded = true
 		return nil, err
+	}
+	if decoded, ok := transcodeBOM(data); ok {
+		data = decoded
 	}
 	f.Content = data
 	f.contentLoaded = true

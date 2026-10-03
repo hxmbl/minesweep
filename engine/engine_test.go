@@ -123,18 +123,44 @@ func TestEngineEdgeCases(t *testing.T) {
 		}
 	})
 
+	// #19: a BOM'd UTF-16 file used to be classified binary purely because of
+	// its NUL bytes, so every content detector returned early and only an info
+	// "binary file" finding was produced. It is text and must be scanned.
+	//
+	// This subtest previously asserted only that SOME finding existed, which the
+	// binary classification satisfied -- so it passed while the file was in fact
+	// unscanned. It now asserts the secret is found and the file is not binary.
 	t.Run("UTF-16 file", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "unicode.txt")
-		utf16 := []byte{0xFF, 0xFE, 'p', 0x00, 'a', 0x00, 's', 0x00, 's', 0x00, ':', 0x00, 's', 0x00, 'e', 0x00, 'c', 0x00, 'r', 0x00, 'e', 0x00, 't', 0x00}
-		os.WriteFile(path, utf16, 0644)
+		path := filepath.Join(dir, "unicode.env")
+		secret := "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY01\n"
+		var body []byte
+		body = append(body, 0xFF, 0xFE)
+		for _, b := range []byte(secret) {
+			body = append(body, b, 0x00)
+		}
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
 
 		report, err := eng.Run(dir)
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if len(report.Findings) == 0 {
-			t.Fatal("expected findings for UTF-16 file with password-like content")
+		var found, binaryOnly bool
+		for _, f := range report.Findings {
+			if f.RuleID == "binary-file-detected" || f.RuleID == "executable-file-detected" {
+				binaryOnly = true
+			}
+			if f.RuleID == "aws-secret-key" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("UTF-16 file was not scanned for secrets; findings: %+v", report.Findings)
+		}
+		if binaryOnly && !found {
+			t.Error("UTF-16 file was still classified binary")
 		}
 	})
 
