@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -101,12 +103,15 @@ func TestFileBudgetIsReachableFromEngine(t *testing.T) {
 	if len(rep.Findings) > 1 {
 		t.Errorf("kept %d findings with MaxFindings=1", len(rep.Findings))
 	}
-	// FindingsDropped is deliberately not asserted to be positive: the budget
-	// now prevents the findings from being created at all, rather than creating
-	// 200,000 of them and trimming to 1 afterwards. Nothing is dropped because
-	// nothing extra is ever built.
-	if rep.FindingsDropped != 0 {
-		t.Errorf("FindingsDropped = %d; findings should be bounded at the source now", rep.FindingsDropped)
+	// The file's own budget bounds what is ever built, so the cap only has to
+	// choose among a bounded candidate set rather than trim 200,000 findings.
+	// FindingsDropped is therefore expected to be non-zero here: 1000 were
+	// produced (perFileFindingBudget) and 1 was kept.
+	if rep.FindingsDropped <= 0 {
+		t.Error("expected the cap to drop the findings the per-file budget allowed")
+	}
+	if rep.FindingsDropped >= 100000 {
+		t.Errorf("FindingsDropped = %d; the per-file budget did not bound production", rep.FindingsDropped)
 	}
 }
 
@@ -372,5 +377,167 @@ func TestNamedPolicyAndRulesDirsAreHonoured(t *testing.T) {
 	}
 	if !explicit {
 		t.Error("an explicitly named --rules dir was not honoured")
+	}
+}
+
+// #11: which findings survive --max-findings must not depend on worker
+// scheduling. Two things made it depend on scheduling: the trim broke ties on
+// input order (detectParallel's result-channel completion order), and the
+// per-file budget was derived from the global remaining, which several workers
+// could each read as the full cap before any of them reported.
+//
+// The same tree scanned with --workers 1 and --workers 32 produced two different
+// sets, which also invalidates a baseline recorded from a different run.
+func TestMaxFindingsSelectionIsIndependentOfWorkerCount(t *testing.T) {
+	dir := t.TempDir()
+	// 40 files x 25 identical-shaped secrets each: far more than the cap, so the
+	// cap has to choose.
+	line := "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY%02d\n"
+	for f := 0; f < 40; f++ {
+		var sb strings.Builder
+		for i := 0; i < 25; i++ {
+			fmt.Fprintf(&sb, line, i)
+		}
+		writeFile(t, filepath.Join(dir, fmt.Sprintf("f%02d.env", f)), sb.String())
+	}
+
+	survey := func(workers int) []string {
+		t.Helper()
+		e, err := New(Config{MaxFindings: 25, Workers: workers})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rep, err := e.Run(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]string, 0, len(rep.Findings))
+		for _, f := range rep.Findings {
+			out = append(out, f.File+":"+strconv.Itoa(f.Line)+":"+f.RuleID)
+		}
+		return out
+	}
+
+	base := survey(1)
+	if len(base) != 25 {
+		t.Fatalf("expected the cap to keep 25 findings, kept %d", len(base))
+	}
+	for _, workers := range []int{2, 4, 8, 16} {
+		got := survey(workers)
+		if len(got) != len(base) {
+			t.Errorf("workers=%d kept %d findings, want %d", workers, len(got), len(base))
+			continue
+		}
+		for i := range got {
+			if got[i] != base[i] {
+				t.Errorf("workers=%d selected %q where workers=1 selected %q", workers, got[i], base[i])
+			}
+		}
+	}
+}
+
+// #12: a baseline has to describe what was reported. Recording the pre-filter
+// set was two bugs at once: a run capped at 10 findings wrote all 300 to the
+// baseline, and suppressed findings were baselined too, so deleting the
+// suppression file did not bring them back.
+func TestBaselineRecordsOnlyWhatWasReported(t *testing.T) {
+	dir := t.TempDir()
+	line := "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY%02d\n"
+	var sb strings.Builder
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(&sb, line, i)
+	}
+	writeFile(t, filepath.Join(dir, "big.env"), sb.String())
+
+	baseline := filepath.Join(dir, "baseline.json")
+	e, err := New(Config{MaxFindings: 10, BaselineFile: baseline, UpdateBaseline: true, Workers: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := e.Run(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Findings) != 10 {
+		t.Fatalf("expected 10 reported findings, got %d", len(rep.Findings))
+	}
+
+	b, err := findings.LoadBaseline(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Findings) != 10 {
+		t.Errorf("baseline recorded %d findings, want the 10 that were reported", len(b.Findings))
+	}
+
+	// Raising the cap must surface what the truncated run never reported.
+	e2, err := New(Config{BaselineFile: baseline, Workers: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep2, err := e2.Run(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep2.Findings) == 0 {
+		t.Error("the baseline recorded findings that were never reported, hiding them permanently")
+	}
+}
+
+// A suppression is a local, uncommitted decision, usually made to get a build
+// past a known finding. Baselining a suppressed finding means deleting the
+// suppression file no longer brings it back.
+func TestSuppressedFindingsAreNotBaselined(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.env"), "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY01\n")
+	writeFile(t, filepath.Join(dir, "b.env"), "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY99\n")
+	supp := filepath.Join(dir, "suppress.json")
+	writeFile(t, supp, `{"version":"1","suppressions":[{"file":"b.env"}]}`)
+	baseline := filepath.Join(dir, "baseline.json")
+
+	e, err := New(Config{MinSeverity: "low", SuppressFile: supp, BaselineFile: baseline, UpdateBaseline: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := e.Run(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range rep.Findings {
+		if strings.Contains(f.File, "b.env") {
+			t.Errorf("b.env should have been suppressed: %+v", f)
+		}
+	}
+
+	b, err := findings.LoadBaseline(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range b.Findings {
+		if strings.HasPrefix(entry, "b.env") {
+			t.Errorf("a suppressed finding was baselined: %q", entry)
+		}
+	}
+
+	// Removing the suppression must bring it back.
+	if err := os.Remove(supp); err != nil {
+		t.Fatal(err)
+	}
+	e2, err := New(Config{MinSeverity: "low", BaselineFile: baseline})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep2, err := e2.Run(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, f := range rep2.Findings {
+		if strings.Contains(f.File, "b.env") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("b.env did not come back after the suppression file was removed")
 	}
 }

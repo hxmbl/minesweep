@@ -36,6 +36,12 @@ const DefaultConfidenceFloor = 0.05
 // Override with --max-findings; 0 disables the cap.
 const DefaultMaxFindings = 25000
 
+// perFileFindingBudget caps how many findings any one file may produce, however
+// many matches its content contains. It exists so a single pathological input
+// cannot allocate hundreds of thousands of findings: a 13 MB file of one
+// repeated secret line matched ~210,000 times.
+const perFileFindingBudget = 1000
+
 // Reasons a scan may be incomplete. Every one of these must reach the report
 // and the exit code: a scan that did not finish must never read as clean.
 const (
@@ -377,12 +383,19 @@ func (e *Engine) finalize(root string, allFindings []findings.Finding) (*finding
 	// entropy, decoded base64 wrapping the same rule). Collapse identical
 	// ones before baselines and suppression so counts and hashes stay stable.
 	allFindings = dedupFindings(allFindings)
-	filtered, err := e.filterBaseline(allFindings)
+
+	// Loading and filtering happen here; WRITING happens at the end. A baseline
+	// has to describe what was actually reported, and at this point suppression
+	// and the finding cap have not been applied yet.
+	baseline, err := e.loadBaseline()
 	if err != nil {
 		return nil, err
 	}
+	if baseline != nil {
+		allFindings = findings.FilterNewFindings(allFindings, baseline)
+	}
 
-	filtered, err = e.filterSuppressions(filtered)
+	filtered, err := e.filterSuppressions(allFindings)
 	if err != nil {
 		return nil, err
 	}
@@ -396,14 +409,56 @@ func (e *Engine) finalize(root string, allFindings []findings.Finding) (*finding
 		e.noteIncomplete(ReasonFindingCap)
 	}
 
+	// Record only what survived both filters. Recording the pre-filter set was
+	// two bugs at once: a run capped at 10 findings wrote all 300 to the
+	// baseline, and suppressed findings were baselined too, so deleting the
+	// suppression file did not bring them back.
+	if baseline != nil {
+		if err := e.saveBaseline(baseline, filtered); err != nil {
+			return nil, err
+		}
+	}
+
 	evaluated := e.evaluate(filtered)
 	sortFindings(evaluated)
 	rep := findings.GenerateRiskReport(evaluated, e.config.Boundaries)
 	return &rep, nil
 }
 
-// trimToConfidenceCap keeps the cap highest-confidence findings, preserving
-// input order among equal confidences so the result stays deterministic.
+// findingOrder is the total order used both to decide which findings survive the
+// cap and to present them.
+//
+// It must not fall back on input order. Input order is detectParallel's
+// result-channel completion order, which depends on worker scheduling, so a tie
+// broken on it made --max-findings select a different subset depending on
+// --workers: the same tree scanned with --workers 1 and --workers 32 produced
+// two different sets of "the 100 most confident findings". That also defeats a
+// baseline, because a baseline recorded from one worker count does not describe
+// the next run's survivor set.
+func findingOrder(a, b findings.Finding) bool {
+	if a.Confidence != b.Confidence {
+		return a.Confidence > b.Confidence
+	}
+	if a.File != b.File {
+		return a.File < b.File
+	}
+	if a.Line != b.Line {
+		return a.Line < b.Line
+	}
+	if a.Column != b.Column {
+		return a.Column < b.Column
+	}
+	if a.RuleID != b.RuleID {
+		return a.RuleID < b.RuleID
+	}
+	if a.Severity != b.Severity {
+		return a.Severity > b.Severity
+	}
+	return a.Value < b.Value
+}
+
+// trimToConfidenceCap keeps the cap highest-confidence findings under the
+// canonical order, so the choice is independent of worker scheduling.
 // Returns the kept findings and how many were dropped.
 func trimToConfidenceCap(fs []findings.Finding, cap int) ([]findings.Finding, int) {
 	if cap <= 0 || len(fs) <= cap {
@@ -414,11 +469,7 @@ func trimToConfidenceCap(fs []findings.Finding, cap int) ([]findings.Finding, in
 		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool {
-		ia, ib := order[a], order[b]
-		if fs[ia].Confidence != fs[ib].Confidence {
-			return fs[ia].Confidence > fs[ib].Confidence
-		}
-		return ia < ib
+		return findingOrder(fs[order[a]], fs[order[b]])
 	})
 	keep := make(map[int]struct{}, cap)
 	for _, i := range order[:cap] {
@@ -450,42 +501,39 @@ func dedupFindings(fs []findings.Finding) []findings.Finding {
 	return out
 }
 
-// sortFindings orders findings deterministically so identical scans produce
+// sortFindings orders findings by the canonical order so identical scans produce
 // byte-identical reports regardless of worker scheduling.
 func sortFindings(fs []findings.Finding) {
 	sort.SliceStable(fs, func(i, j int) bool {
-		a, b := fs[i], fs[j]
-		if a.File != b.File {
-			return a.File < b.File
-		}
-		if a.Line != b.Line {
-			return a.Line < b.Line
-		}
-		if a.Column != b.Column {
-			return a.Column < b.Column
-		}
-		if a.RuleID != b.RuleID {
-			return a.RuleID < b.RuleID
-		}
-		return a.Value < b.Value
+		return findingOrder(fs[i], fs[j])
 	})
 }
 
-// filterBaseline removes findings already recorded in the baseline file.
-func (e *Engine) filterBaseline(fs []findings.Finding) ([]findings.Finding, error) {
+// loadBaseline reads the configured baseline, or returns nil when none is in
+// use. It never writes: recording what was reported is a separate, later step.
+func (e *Engine) loadBaseline() (*findings.Baseline, error) {
 	if e.config.BaselineFile == "" {
-		return fs, nil
+		return nil, nil
 	}
 	baseline, err := findings.LoadBaseline(e.config.BaselineFile)
 	if err != nil {
 		return nil, fmt.Errorf("load baseline: %w", err)
 	}
-	newFindings := findings.FilterNewFindings(fs, baseline)
+	return baseline, nil
+}
 
-	if err := e.updateBaseline(baseline, newFindings); err != nil {
-		return nil, fmt.Errorf("save baseline: %w", err)
+// saveBaseline records the reported findings, if --update-baseline was asked
+// for. It is called with the set that actually survived suppression and the
+// finding cap, never with the raw detection output.
+func (e *Engine) saveBaseline(baseline *findings.Baseline, reported []findings.Finding) error {
+	if !e.config.UpdateBaseline {
+		return nil
 	}
-	return newFindings, nil
+	findings.UpdateBaseline(baseline, reported)
+	if err := findings.SaveBaseline(e.config.BaselineFile, baseline); err != nil {
+		return fmt.Errorf("save baseline: %w", err)
+	}
+	return nil
 }
 
 // filterSuppressions removes findings matching the suppression file.
@@ -498,15 +546,6 @@ func (e *Engine) filterSuppressions(fs []findings.Finding) ([]findings.Finding, 
 		return nil, fmt.Errorf("load suppressions: %w", err)
 	}
 	return findings.FilterSuppressed(fs, suppressions), nil
-}
-
-// updateBaseline updates the baseline file with new findings
-func (e *Engine) updateBaseline(baseline *findings.Baseline, newFindings []findings.Finding) error {
-	if !e.config.UpdateBaseline {
-		return nil
-	}
-	findings.UpdateBaseline(baseline, newFindings)
-	return findings.SaveBaseline(e.config.BaselineFile, baseline)
 }
 
 func (e *Engine) Run(path string) (*findings.RiskReport, error) {
@@ -936,7 +975,16 @@ func (e *Engine) onWalkError(path string, err error) {
 // relativizeFindings rewrites finding paths relative to the scanned root so
 // output is stable regardless of where the repository lives on disk, and so
 // baselines match across machines and across working-tree/history modes.
+//
+// The root is resolved first. git rev-parse --show-toplevel returns the resolved
+// path, so a lexical prefix trim against an unresolved root silently matched
+// nothing and published an absolute local path into SARIF
+// artifactLocation.uri, into ::error annotations, and into the baseline file --
+// making a baseline machine-specific and a SARIF upload point nowhere.
 func relativizeFindings(root string, fs []findings.Finding) []findings.Finding {
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
 	rootWithSep := root
 	if !strings.HasSuffix(root, string(filepath.Separator)) {
 		rootWithSep += string(filepath.Separator)
@@ -982,16 +1030,20 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	e.filesScanned.Add(1)
 	e.bytesScanned.Add(int64(len(content)))
 
-	// Bound this file's contribution from what is actually left of the global
-	// budget, so a single pathological input cannot outrun the cap.
-	if cap := e.maxFindings(); cap > 0 {
-		room := cap - int(e.findingsKept.Load())
-		if room <= 0 {
-			e.noteIncomplete(ReasonFindingCap)
-			return nil
-		}
-		file.SetFindingBudget(room)
-	}
+	// Bound what one file can contribute. This is a fixed per-file ceiling, not
+	// a share of the global --max-findings remaining.
+	//
+	// Deriving it from the global remainder made the candidate set depend on
+	// worker scheduling: room := cap - findingsKept is read before any worker has
+	// reported, so with --workers 32 many files each see the full cap while with
+	// --workers 1 the first file consumes it. The same tree then produced a
+	// different set of "the cap most confident findings" per worker count, which
+	// also invalidates a baseline recorded from a different run.
+	//
+	// A fixed ceiling makes the candidate set a pure function of the tree: every
+	// file independently yields at most this many findings, so trimming by the
+	// canonical order afterwards is deterministic at any worker count.
+	file.SetFindingBudget(perFileFindingBudget)
 
 	if e.readSemaphore != nil {
 		e.readSemaphore <- struct{}{}
