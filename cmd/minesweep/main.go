@@ -102,7 +102,7 @@ func main() {
 	}
 
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		fmt.Fprint(cmd.OutOrStdout(), renderGroupedHelp(cmd))
+		_, _ = fmt.Fprint(cmd.OutOrStdout(), renderGroupedHelp(cmd))
 	})
 
 	// --rules is persistent so subcommands like `explain` resolve the same
@@ -423,7 +423,7 @@ func applyConfigValues(cfg *engine.Config, fc *config.FileConfig, cfgDir string,
 	}
 	if len(ignored) > 0 && warn != nil {
 		sort.Strings(ignored)
-		fmt.Fprintf(warn, "minesweep: warning: ignoring security-relevant settings from untrusted config:\n"+
+		_, _ = fmt.Fprintf(warn, "minesweep: warning: ignoring security-relevant settings from untrusted config:\n"+
 			"  %s\n"+
 			"  Discovered configs cannot weaken scans. Pass --config <file> to honor them explicitly.\n",
 			strings.Join(ignored, ", "))
@@ -687,8 +687,9 @@ func nextStepHints(scanPath string, data *findings.RiskReport) []string {
 	return hints
 }
 
+// G304: fixed suffix appended to the repository root; nothing scanned supplies it.
 func hasPreCommitHook(repoTop string) bool {
-	data, err := os.ReadFile(filepath.Join(repoTop, ".git", "hooks", "pre-commit"))
+	data, err := os.ReadFile(filepath.Join(repoTop, ".git", "hooks", "pre-commit")) //nolint:gosec
 	if err != nil {
 		return false
 	}
@@ -752,7 +753,8 @@ func runInstallHooks(cmd *cobra.Command, args []string) error {
 	}
 
 	hooksDir := filepath.Join(gitDir, "hooks")
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+	// 0750: git only needs the owner to traverse and execute hooks.
+	if err := os.MkdirAll(hooksDir, 0750); err != nil {
 		return fmt.Errorf("create hooks directory: %w", err)
 	}
 
@@ -763,7 +765,9 @@ func runInstallHooks(cmd *cobra.Command, args []string) error {
 	// disappears without a trace, and the command then reports success. The
 	// asymmetry was glaring: uninstall-hooks already refused to touch a hook it
 	// did not own, and init already required --force to overwrite a config.
-	if existing, statErr := os.ReadFile(hookPath); statErr == nil {
+	// G304: hookPath is <git dir>/hooks/pre-commit inside the repository the
+	// user ran this in.
+	if existing, statErr := os.ReadFile(hookPath); statErr == nil { //nolint:gosec
 		if !strings.Contains(strings.ToLower(string(existing)), "minesweep") {
 			if !forceHooks {
 				return fmt.Errorf("refusing to overwrite an existing pre-commit hook that minesweep did not write: %s\n"+
@@ -798,7 +802,7 @@ func runUninstallHooks(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if it's our hook
-	content, err := os.ReadFile(hookPath)
+	content, err := os.ReadFile(hookPath) //nolint:gosec // G304: <git dir>/hooks/pre-commit
 	if err != nil {
 		return fmt.Errorf("read hook: %w", err)
 	}

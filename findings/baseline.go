@@ -31,8 +31,9 @@ type BaselineEntry struct {
 	Value  string `json:"value,omitempty"`
 }
 
+// G304: path is the baseline file the user named with --baseline.
 func LoadBaseline(path string) (*Baseline, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &Baseline{

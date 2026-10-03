@@ -60,7 +60,7 @@ func renderGroupedHelp(cmd *cobra.Command) string {
 	if cmds := visibleSubcommands(cmd); len(cmds) > 0 {
 		b.WriteString("\nAvailable commands:\n")
 		for _, sub := range cmds {
-			b.WriteString(fmt.Sprintf("  %-18s %s\n", sub.Name(), firstLine(sub.Short)))
+			fmt.Fprintf(&b, "  %-18s %s\n", sub.Name(), firstLine(sub.Short))
 		}
 	}
 
@@ -74,7 +74,7 @@ func renderGroupedHelp(cmd *cobra.Command) string {
 		for _, name := range section.flags {
 			covered[name] = true
 		}
-		b.WriteString(fmt.Sprintf("  %s\n%s\n", titleStyle(section.title), indent(body, 4)))
+		fmt.Fprintf(&b, "  %s\n%s\n", titleStyle(section.title), indent(body, 4))
 	}
 	if leftover := renderUncoveredFlags(cmd, covered); leftover != "" {
 		b.WriteString(indent(leftover, 4) + "\n")

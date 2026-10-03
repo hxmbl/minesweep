@@ -39,11 +39,23 @@ func runBenchmark(scanPath string, jsonOut bool, runs int) error {
 		runs = 1
 	}
 
+	// A benchmark measures. It must not mutate the target's state, so the
+	// report-writing knobs are disabled for every run here -- including the
+	// untimed warmup, which used to honour --update-baseline and create the
+	// baseline file (once, plus once per timed run). A benchmark that silently
+	// edits the repository it is measuring is worse than no benchmark.
+	//
+	// Applied to a local copy: this function used to assign to the package-level
+	// cfg, so disabling the baseline for the benchmark also disabled it for
+	// anything else reading that variable afterwards.
+	benchCfg := cfg
+	benchCfg.UpdateBaseline = false
+
 	if !jsonOut {
 		fmt.Fprintf(os.Stderr, "minesweep: warming up (untimed)...\n")
 	}
 
-	eng, err := engine.New(cfg)
+	eng, err := engine.New(benchCfg)
 	if err != nil {
 		return fmt.Errorf("init engine: %w", err)
 	}
@@ -186,12 +198,17 @@ func writeBenchJSON(s benchSummary) error {
 		Max    float64 `json:"max"`
 	}
 	type benchJSON struct {
-		Benchmark      bool     `json:"benchmark"`
-		Path           string   `json:"path"`
-		Runs           int      `json:"runs"`
-		Files          int      `json:"files"`
-		Bytes          int64    `json:"bytes"`
-		Findings       int      `json:"findings"`
+		Benchmark bool   `json:"benchmark"`
+		Path      string `json:"path"`
+		Runs      int    `json:"runs"`
+		Files     int    `json:"files"`
+		Bytes     int64  `json:"bytes"`
+		// findings is an integer here, while in a normal --json report it is an
+		// array of finding objects. Anything that consumes both shapes -- a
+		// dashboard, a jq recipe, a CI assertion -- has to special-case the
+		// benchmark, and `jq '.findings[0]'` fails with "Cannot index number
+		// with string". A dedicated key keeps the normal schema intact.
+		Findings       int      `json:"findings_count"`
 		TimesMs        statJSON `json:"times_ms"`
 		FilesPerSec    float64  `json:"files_per_sec,omitempty"`
 		BytesPerSec    float64  `json:"bytes_per_sec,omitempty"`

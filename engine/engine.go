@@ -287,9 +287,11 @@ func (e *Engine) loadDiscoveredGitleaks(root string) {
 	e.mu.Lock()
 	e.discoveredRules = true
 	e.mu.Unlock()
-	data, err := os.ReadFile(path)
+	// G304: path came from detectors.FindGitleaksConfig, which only ever returns
+	// ".gitleaks.toml" or "gitleaks.toml" inside the scan root.
+	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "minesweep: warning: %s: %v\n", path, err)
+		_, _ = fmt.Fprintf(os.Stderr, "minesweep: warning: %s: %v\n", path, err)
 		return
 	}
 	rules, err := detectors.LoadGitleaksRules(data, filepath.Base(path), false)

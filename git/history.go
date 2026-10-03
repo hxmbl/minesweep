@@ -30,7 +30,9 @@ func ValidSHA(s string) bool {
 }
 
 func gitCmd(root string, args ...string) *exec.Cmd {
-	cmd := exec.Command("git", args...)
+	// G204: git is invoked with a fixed argv and no shell, and args are built by
+	// this package rather than interpolated from file contents.
+	cmd := exec.Command("git", args...) //nolint:gosec
 	cmd.Dir = root
 	return cmd
 }
@@ -54,10 +56,10 @@ func ListHistoryObjects(root string) ([]HistoryObject, error) {
 	}
 	defer func() {
 		if stdout != nil {
-			io.Copy(io.Discard, stdout) //nolint:errcheck // drain so git can exit cleanly
-			stdout.Close()
+			_, _ = io.Copy(io.Discard, stdout) // drain so git can exit cleanly
+			_ = stdout.Close()                 //nolint:gosec // G104: closing a drained pipe
 		}
-		revList.Wait() //nolint:errcheck // best-effort reaping on early return paths
+		_ = revList.Wait() // best-effort reaping on early return paths
 	}()
 
 	checker, err := newBatchChecker(top)
@@ -143,8 +145,8 @@ func (b *batchChecker) Check(sha string) (string, int64, error) {
 }
 
 func (b *batchChecker) Close() {
-	b.stdin.Close()
-	b.cmd.Wait() //nolint:errcheck // child cleanup; errors are not actionable
+	_ = b.stdin.Close()
+	_ = b.cmd.Wait() // child cleanup; errors are not actionable
 }
 
 // blobBufRetainBytes is the scratch-buffer size above which the BlobFetcher
@@ -240,8 +242,8 @@ func (f *BlobFetcher) Fetch(sha string) ([]byte, error) {
 }
 
 func (f *BlobFetcher) Close() {
-	f.in.Close()
-	f.cmd.Wait() //nolint:errcheck // child cleanup; errors are not actionable
+	_ = f.in.Close()
+	_ = f.cmd.Wait() // child cleanup; errors are not actionable
 	f.buf = nil
 }
 

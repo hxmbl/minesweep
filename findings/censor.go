@@ -265,6 +265,12 @@ func censorSecretShaped(line string) string {
 
 const minSecretLen = 8
 
+// hasTwoClasses reports whether s mixes at least two character classes: a single
+// class is prose or a run of repeated letters, which never carries a credential.
+func hasTwoClasses(letter, digit, other bool) bool {
+	return (letter && digit) || (other && (letter || digit))
+}
+
 // looksLikeSecret decides whether a token has the shape of credential material.
 //
 // It must not repeat the mistake it replaces: the previous test was a unique
@@ -293,7 +299,7 @@ func looksLikeSecret(s string) bool {
 
 	// At least two character classes: a single class is prose or a run of
 	// repeated letters, which never carries a credential.
-	if !(hasLetter && hasDigit) && !(hasOther && (hasLetter || hasDigit)) {
+	if !hasTwoClasses(hasLetter, hasDigit, hasOther) {
 		return false
 	}
 
@@ -323,7 +329,7 @@ func looksLikeSecret(s string) bool {
 func isHexAlphabet(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 			return false
 		}
 	}
@@ -333,7 +339,7 @@ func isHexAlphabet(s string) bool {
 func isBase32Alphabet(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if !((c >= 'A' && c <= 'Z') || (c >= '2' && c <= '7')) {
+		if (c < 'A' || c > 'Z') && (c < '2' || c > '7') {
 			return false
 		}
 	}

@@ -340,13 +340,6 @@ func loadRules(rulesDir, ruleType string) ([]Rule, error) {
 	return loadRulesFS(os.DirFS(rulesDir), ruleType, true)
 }
 
-// loadDiscoveredRules loads rule files found in the tree being scanned. Their
-// gitleaks allowlists are NOT honoured: an allowlist supplied by the tree under
-// inspection would let that tree suppress its own findings.
-func loadDiscoveredRules(rulesDir, ruleType string) ([]Rule, error) {
-	return loadRulesFS(os.DirFS(rulesDir), ruleType, false)
-}
-
 // parseRules decodes one rule file and prepares its rules. The extension picks
 // the format: .toml is a gitleaks config, everything else is the YAML form.
 func parseRules(data []byte, name, ruleType string, honourAllowlist bool) ([]Rule, error) {
@@ -423,7 +416,8 @@ func parseRules(data []byte, name, ruleType string, honourAllowlist bool) ([]Rul
 // loadRulesFile loads a single rule file, for --rules pointing at one file
 // rather than a directory.
 func loadRulesFile(path, ruleType string) ([]Rule, error) {
-	b, err := os.ReadFile(path)
+	// G304: path is the single file the user named with --rules.
+	b, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("read rules file %q: %w", path, err)
 	}
@@ -513,8 +507,10 @@ func getUserRulesDir() string {
 		configDir = filepath.Join(home, ".config")
 	}
 
+	// G304: configDir is the user's own XDG_CONFIG_HOME or ~/.config, and
+	// rulesDir is a fixed subpath of it. Nothing here comes from a scanned file.
 	rulesDir := filepath.Join(configDir, "minesweep", "rules")
-	if _, err := os.Stat(rulesDir); os.IsNotExist(err) {
+	if _, err := os.Stat(rulesDir); os.IsNotExist(err) { //nolint:gosec
 		return ""
 	}
 	return rulesDir

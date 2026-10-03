@@ -107,13 +107,13 @@ func TestWriteBenchJSONShape(t *testing.T) {
 	r.Close()
 
 	var parsed struct {
-		Benchmark bool `json:"benchmark"`
-		Path      string
-		Runs      int
-		Files     int
-		Bytes     int64
-		Findings  int
-		TimesMs   struct {
+		Benchmark     bool `json:"benchmark"`
+		Path          string
+		Runs          int
+		Files         int
+		Bytes         int64
+		FindingsCount int `json:"findings_count"`
+		TimesMs       struct {
 			Min    float64
 			Median float64
 			Mean   float64
@@ -124,8 +124,19 @@ func TestWriteBenchJSONShape(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
 		t.Fatalf("invalid JSON output: %v\n%s", err, buf.String())
 	}
-	if !parsed.Benchmark || parsed.Runs != 2 || parsed.Files != 5 || parsed.Findings != 1 {
+	if !parsed.Benchmark || parsed.Runs != 2 || parsed.Files != 5 || parsed.FindingsCount != 1 {
 		t.Errorf("unexpected fields: %+v", parsed)
+	}
+	// #29: `findings` was an integer in benchmark output and an array of finding
+	// objects in a normal report, so `jq '.findings[0]'` failed with "Cannot
+	// index number with string". The count now has its own key and `findings` is
+	// absent, which keeps the two shapes distinguishable.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["findings"]; ok {
+		t.Error("benchmark output still uses the `findings` key, which collides with the report schema")
 	}
 	if parsed.TimesMs.Min <= 0 || parsed.TimesMs.Max < parsed.TimesMs.Min {
 		t.Errorf("implausible times: %+v", parsed.TimesMs)
@@ -174,5 +185,45 @@ func TestBenchTextOutputContainsKeyStats(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// #28: --benchmark is documented as measuring rather than reporting, yet it
+// shared the global config with a scan, so `--update-baseline --baseline b.json
+// --benchmark .` created b.json -- once for the untimed warmup and once per timed
+// run. A measurement must not mutate the repository it is measuring.
+func TestBenchmarkNeverWritesABaseline(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"),
+		[]byte("aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY01\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline := filepath.Join(dir, "b.json")
+
+	old := cfg
+	t.Cleanup(func() { cfg = old })
+	cfg = engine.Config{}
+	cfg.UpdateBaseline = true
+	cfg.BaselineFile = baseline
+	cfg.Workers = 1
+
+	if err := runBenchmark(dir, true, 1); err != nil {
+		t.Fatalf("runBenchmark: %v", err)
+	}
+	if _, err := os.Stat(baseline); err == nil {
+		t.Error("--benchmark created a baseline file")
+	}
+
+	// A real scan with the same config still writes one.
+	cfg.BaselineFile = baseline
+	e, err := engine.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Run(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(baseline); err != nil {
+		t.Errorf("a normal scan should still write the baseline: %v", err)
 	}
 }

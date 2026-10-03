@@ -1,35 +1,61 @@
+# golangci-lint v2 configuration.
+#
+# Migrated from the v1 schema. The previous file had no `version:` key, so
+# golangci-lint v2 refused to load it outright:
+#
+#     Error: can't load config: unsupported version of the configuration: ""
+#
+# and the README's `golangci-lint run` failed for anyone who installed a current
+# release. CI only appeared to work because golangci-lint-action@v4 with
+# `version: latest` and `install-mode: goinstall` silently resolved to v1.64.8,
+# which meant the linter could never actually upgrade.
+#
+# v2 renames: linters-settings -> linters.settings, gosimple merged into
+# staticcheck, and issues.exclude-rules -> linters.exclusions.rules.
+version: "2"
+
 linters:
+  default: none
   enable:
     - errcheck
-    - gosimple
     - govet
     - ineffassign
     - staticcheck
     - unused
     - revive
     - gosec
-    - gofmt
     - misspell
-
-linters-settings:
-  revive:
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: unused-parameter
+          disabled: true
+        - name: empty-block
+          disabled: true
+        - name: redefines-builtin-id
+          disabled: true
+    staticcheck:
+      # ST1000/ST1020/ST1021/ST1022 are documentation conventions, not defects.
+      checks:
+        - all
+        - -ST1000
+        - -ST1020
+        - -ST1021
+        - -ST1022
+  exclusions:
+    generated: lax
     rules:
-      - name: exported
-        disabled: true
-      - name: unused-parameter
-        disabled: true
-      - name: empty-block
-        disabled: true
-      - name: redefines-builtin-id
-        disabled: true
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
 
 run:
   timeout: 5m
   tests: true
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec

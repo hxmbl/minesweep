@@ -73,7 +73,9 @@ func FindConfig(startDir string) string {
 }
 
 func LoadFile(path string) (*FileConfig, error) {
-	data, err := os.ReadFile(path)
+	// G304: path is the config file the user named with --config. Reading it is
+	// the entire point of the call.
+	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}

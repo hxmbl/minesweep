@@ -39,7 +39,8 @@ func LoadSuppressions(path string) (*SuppressionList, error) {
 		return &SuppressionList{Version: "1"}, nil
 	}
 
-	data, err := os.ReadFile(path)
+	// G304: path is the suppression file the user named with --suppress.
+	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &SuppressionList{Version: "1"}, nil
@@ -132,7 +133,7 @@ func isSuppressed(f Finding, s Suppression, re *regexp.Regexp) bool {
 	if s.Pattern != "" {
 		constrained = true
 		if re == nil ||
-			!(re.MatchString(f.Value) || re.MatchString(normalizeBaselineFile(f.File))) {
+			(!re.MatchString(f.Value) && !re.MatchString(normalizeBaselineFile(f.File))) {
 			return false
 		}
 	}
