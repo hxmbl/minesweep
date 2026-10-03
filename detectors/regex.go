@@ -154,7 +154,17 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 			if pat.compiledErr != nil || pat.compiled == nil {
 				continue
 			}
-			for _, m := range pat.safeMatch(content, lowered) {
+			// Re-read the remaining budget per pattern rather than once per file:
+			// the detectors before this one have already spent part of it.
+			remaining, armed := file.RemainingFindingBudget()
+			limit := 0
+			if armed {
+				if remaining <= 0 {
+					return fResults
+				}
+				limit = remaining
+			}
+			for _, m := range pat.safeMatch(content, lowered, limit) {
 				if li == nil {
 					li = file.Lines()
 				}
@@ -227,7 +237,7 @@ func (p *Pattern) compile() error {
 // Before scanning, the pattern's necessary-literal gate is evaluated; most
 // patterns require an anchor literal ("password", "AKIA", "postgres://"),
 // and files lacking it skip the NFA entirely.
-func (p *Pattern) safeMatch(content, lowered []byte) []matchResult {
+func (p *Pattern) safeMatch(content, lowered []byte, limit int) []matchResult {
 	if p.compiled == nil {
 		return nil
 	}
@@ -237,7 +247,16 @@ func (p *Pattern) safeMatch(content, lowered []byte) []matchResult {
 
 	// Cap matches to avoid pathological memory use on large files with
 	// repetitive content that generates millions of submatches.
-	matches := p.compiled.FindAllSubmatchIndex(content, maxMatchesPerPattern)
+	//
+	// The file's remaining budget is a second, tighter bound. Without it a
+	// pattern still allocated a matchResult (with a copy of the matched bytes)
+	// for every hit before ClaimFinding was ever consulted, so an exhausted
+	// budget stopped the output but not the work.
+	n := maxMatchesPerPattern
+	if limit > 0 && limit < n {
+		n = limit
+	}
+	matches := p.compiled.FindAllSubmatchIndex(content, n)
 	if matches == nil {
 		return nil
 	}

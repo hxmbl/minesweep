@@ -44,6 +44,7 @@ const (
 	ReasonFileBudget  = "a file produced more findings than its budget allowed"
 	ReasonWorkerPanic = "a detector panicked; files it had not reached were not scanned"
 	ReasonMaxFiles    = "max files limit reached; only part of the tree was scanned"
+	ReasonUnreadable  = "some paths could not be read; their contents were not scanned"
 )
 
 type Config struct {
@@ -781,6 +782,11 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 		IncludeTestFiles: e.config.IncludeTestFiles,
 		NoIgnore:         e.config.NoIgnore,
 		Stats:            stats,
+		// OnError was declared and invoked at three places in the walker but
+		// never set by any caller, so an unreadable subtree vanished with no
+		// files_failed, no SkippedBy and no Incomplete: a directory of live
+		// credentials behind chmod 000 still produced a clean exit.
+		OnError: e.onWalkError,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("walk directory: %w", err)
@@ -796,6 +802,17 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 
 	allFindings := e.detectParallel(files)
 	return e.finalize(root, allFindings)
+}
+
+// onWalkError records a path the walk could not inspect. Such a path is a
+// coverage gap, not a clean result: anything in it is unscanned, so the scan has
+// to say so rather than exit 0 on the strength of what it did manage to read.
+func (e *Engine) onWalkError(path string, err error) {
+	e.filesFailed.Add(1)
+	e.noteIncomplete(ReasonUnreadable)
+	if e.config.Verbose {
+		fmt.Fprintf(os.Stderr, "minesweep: not inspected: %s: %v\n", path, err)
+	}
 }
 
 // relativizeFindings rewrites finding paths relative to the scanned root so

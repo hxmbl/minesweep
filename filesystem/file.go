@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/zeebo/blake3"
@@ -37,14 +36,18 @@ type File struct {
 	// false negatives is the one failure this tool must not have.
 	MaxContentBytes int64
 	// FindingBudget caps how many findings detectors may emit for this
-	// file. Zero means unlimited. The engine sets it from the global
-	// remaining budget, which is what keeps one pathological file from
-	// producing hundreds of thousands of findings before the global cap is
-	// ever consulted. It lives on File because File is the per-scan unit
-	// every detector already receives, so the budget is race-free without
-	// mutating shared detector state.
+	// file. The engine sets it from the global remaining budget, which is
+	// what keeps one pathological file from producing hundreds of thousands
+	// of findings before the global cap is ever consulted. It lives on File
+	// because File is the per-scan unit every detector already receives, so
+	// the budget needs no shared detector state.
+	//
+	// FindingBudget alone does not say whether a budget applies: budgetArmed
+	// distinguishes "unlimited" from "spent", which must not share a value.
 	FindingBudget    int
 	FindingBudgetHit bool
+	budgetArmed      bool
+	budgetMu         sync.Mutex
 	// Lazy loading support
 	contentLoaded bool
 	contentErr    error
@@ -81,8 +84,9 @@ func isSafePath(path, root string) bool {
 		return false
 	}
 
-	// If rel starts with ".." then it's outside root
-	if strings.HasPrefix(rel, "..") {
+	// A path only escapes the root when its first segment is "..". Testing the
+	// prefix instead made a real file named "..env" count as outside.
+	if escapesRoot(rel) {
 		return false
 	}
 
@@ -281,11 +285,20 @@ func (f *File) readBounded() ([]byte, error) {
 // ClaimFinding reserves one unit of the file's finding budget and reports
 // whether a detector may emit another finding. Once the budget is spent it
 // returns false forever, so a detector can simply stop.
+//
+// "No budget" and "budget spent" are distinct states held in budgetArmed and
+// FindingBudget respectively. They used to share the single value 0, so the
+// decrement that spends the last unit immediately re-armed "unlimited" and the
+// budget could never be exhausted: FindingBudgetHit was unreachable,
+// ReasonFileBudget was dead code, and a 13 MB file scanned under
+// --max-findings 1 materialised 209,999 findings and 430 MB of RSS.
 func (f *File) ClaimFinding() bool {
-	if f.FindingBudget <= 0 {
+	f.budgetMu.Lock()
+	defer f.budgetMu.Unlock()
+	if !f.budgetArmed {
 		return true // unlimited
 	}
-	if f.FindingBudgetHit || f.FindingBudget <= 0 {
+	if f.FindingBudget <= 0 {
 		f.FindingBudgetHit = true
 		return false
 	}
@@ -293,9 +306,26 @@ func (f *File) ClaimFinding() bool {
 	return true
 }
 
-// SetFindingBudget arms (or disarms) the budget for this file.
+// RemainingFindingBudget reports how many findings this file may still emit and
+// whether a budget is armed at all. A detector uses it to bound how many matches
+// it materialises, so an exhausted budget stops work rather than only stopping
+// output.
+func (f *File) RemainingFindingBudget() (remaining int, armed bool) {
+	f.budgetMu.Lock()
+	defer f.budgetMu.Unlock()
+	if !f.budgetArmed {
+		return 0, false
+	}
+	return f.FindingBudget, true
+}
+
+// SetFindingBudget arms (or disarms) the budget for this file. A non-positive n
+// means unlimited.
 func (f *File) SetFindingBudget(n int) {
+	f.budgetMu.Lock()
+	defer f.budgetMu.Unlock()
 	f.FindingBudget = n
+	f.budgetArmed = n > 0
 	f.FindingBudgetHit = false
 }
 
