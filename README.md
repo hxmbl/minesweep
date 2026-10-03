@@ -149,7 +149,7 @@ minesweep --suppress suppress.json .
 
 ### Custom rules
 
-Point `--rules` at a directory of YAML rule files:
+Point `--rules` at a directory of YAML rule files, or at a single file:
 
 ```yaml
 rules:
@@ -163,7 +163,37 @@ rules:
         confidence: 0.9
 ```
 
-Verify with `minesweep explain <rule-id>`. Gitleaks TOML configs also load natively — drop one in your rules directory or pass `-r`:
+Within one rules directory, **a later file overrides an earlier one with the same
+rule id**. Files are read in sorted order, so `10-aws.yml` and `20-aws.yml` makes
+the second one win — which is the supported way to tune a built-in rule down
+without restating it.
+
+`--rules` and `--policy-dir` have no default. MineSweep uses its built-in rules
+and policy unless you name a directory explicitly, so a stray `./rules` or
+`./policy` beside your working directory can never change what a scan of an
+unrelated tree does.
+
+Verify with `minesweep explain <rule-id>`.
+
+Gitleaks TOML configs load natively. A `.gitleaks.toml` or `gitleaks.toml` at the
+root of the tree being scanned is picked up automatically, and `--rules` accepts
+either a directory or a single file:
+
+```bash
+# pick up the tree's own .gitleaks.toml (rules only; see below)
+minesweep .
+
+# point at a specific config or directory explicitly
+minesweep -r ~/.config/gitleaks --history .
+minesweep -r ./my-rules.yml .
+minesweep import-gitleaks-ignores .gitleaksignore -o suppress.json
+```
+
+> **Allowlists in a discovered `.gitleaks.toml` are ignored on purpose.**
+> An allowlist only ever *suppresses* findings, so honouring one supplied by the
+> tree being scanned would let that tree silence its own secrets. MineSweep loads
+> the rules and warns that the allowlist was skipped. Pass the file explicitly
+> with `--rules` to have its allowlist honoured.
 
 ```bash
 minesweep -r ~/.config/gitleaks --history .
@@ -211,7 +241,14 @@ minesweep --benchmark .                # single timed run
 minesweep --benchmark --runs 5 --json . > bench.json
 ```
 
-Benchmark runs always exit `0` — they are not a pass/fail gate.
+Benchmark runs are not a pass/fail gate, but they are not exempt from real errors
+either: a path that does not exist still exits non-zero. Benchmark mode also
+never writes a baseline, whatever `--update-baseline` says, because a measurement
+should not mutate the repository it is measuring.
+
+With `--json`, benchmark output uses `findings_count` (an integer). A normal
+`--json` report keeps `findings` as an array of finding objects, so tooling can
+consume both shapes without special-casing the key name.
 
 ---
 

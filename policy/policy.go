@@ -73,8 +73,9 @@ func hasMatchingTag(f findings.Finding, tags []string) bool {
 	return false
 }
 
+// G304: path is the policy file the user named with --policy.
 func LoadPolicyFile(path string) ([]PolicyRule, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("read policy %q: %w", path, err)
 	}
@@ -121,8 +122,9 @@ func ValidateRules(rules []PolicyRule) error {
 	return nil
 }
 
+// G304: path is a profile file inside the directory named by --profiles.
 func LoadProfile(path string) (Profile, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return Profile{}, fmt.Errorf("read profile %q: %w", path, err)
 	}

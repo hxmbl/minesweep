@@ -41,7 +41,7 @@ func SanitizeTerminal(s string) string {
 			b.WriteString("^?")
 		case r < 0x20 && r != '\n' && r != '\t':
 			b.WriteByte('^')
-			b.WriteByte(byte(r) + '@')
+			b.WriteByte(byte(r) + '@') //nolint:gosec // G115: guarded by r < 0x20
 		case r >= 0x80 && r <= 0x9f:
 			// U+0085 would otherwise act as a line break; render the C1 range
 			// as caret notation with a visible marker so it cannot be confused
@@ -61,12 +61,16 @@ func SanitizeTerminal(s string) string {
 }
 
 func needsEscape(r rune) bool {
-	if r == 0x2028 || r == 0x2029 {
+	switch {
+	case r == 0x2028 || r == 0x2029:
 		return true
+	case r == 0x7f:
+		return true
+	case r < 0x20:
+		return r != '\n' && r != '\t'
+	default:
+		return r >= 0x80 && r <= 0x9f
 	}
-	return (r >= 0 && r < 0x20 && r != '\n' && r != '\t') ||
-		r == 0x7f ||
-		(r >= 0x80 && r <= 0x9f)
 }
 
 // SanitizeLine neutralises a value that must occupy exactly one line.
@@ -87,12 +91,12 @@ func SanitizeLine(s string) string {
 	var b strings.Builder
 	b.Grow(len(s) + 8)
 	for _, r := range s {
-		switch {
-		case r == '\n':
+		switch r {
+		case '\n':
 			b.WriteString(`\n`)
-		case r == '\r':
+		case '\r':
 			b.WriteString(`\r`)
-		case r == '\t':
+		case '\t':
 			b.WriteString(`\t`)
 		default:
 			b.WriteString(SanitizeTerminal(string(r)))
@@ -102,10 +106,12 @@ func SanitizeLine(s string) string {
 }
 
 func needsLineEscape(r rune) bool {
-	if r == '\n' || r == '\r' || r == '\t' {
+	switch r {
+	case '\n', '\r', '\t':
 		return true
+	default:
+		return needsEscape(r)
 	}
-	return needsEscape(r)
 }
 
 // CensorFinding returns a copy of f with its secret value replaced by a stable

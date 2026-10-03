@@ -95,17 +95,17 @@ func TestSanitizeTerminalEscapesC1AndLineSeparators(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"CSI", "bad31mFAKE", `bad^[[31mFAKE`},
+		{"CSI", "bad\u009b31mFAKE", `bad^[[31mFAKE`},
 		// OSC 8 hyperlink: introducer, payload, ST terminator. Built from the
 		// same arithmetic SanitizeTerminal uses so the expectation cannot
 		// drift from the implementation.
 		{"OSC", "x\u009d]8;;http://evil\u009c",
 			"x^[" + string(rune(0x9d-0x40)) + "]8;;http://evil" + "^[\\"},
-		{"DCS", "ab", "a^[Pb"},
-		{"APC", "ab", "a^[_b"},
-		{"SOS", "ab", "a^[Xb"},
-		{"PM", "ab", "a^[^b"},
-		{"NEL", "ab", "a^[Eb"},
+		{"DCS", "a\u0090b", "a^[Pb"},
+		{"APC", "a\u009fb", "a^[_b"},
+		{"SOS", "a\u0098b", "a^[Xb"},
+		{"PM", "a\u009eb", "a^[^b"},
+		{"NEL", "a\u0085b", "a^[Eb"},
 		{"LS", "a b", `a\u2028b`},
 		{"PS", "a b", `a\u2029b`},
 	}
@@ -118,7 +118,7 @@ func TestSanitizeTerminalEscapesC1AndLineSeparators(t *testing.T) {
 
 // No raw control byte of any kind may survive.
 func TestSanitizeTerminalLeavesNoControlBytes(t *testing.T) {
-	dirty := "a]b" +
+	dirty := "a\u009b]\u0090\u0098\u009e\u009f\u0085b" +
 		"c  d" + "\x1b" + "e"
 	got := SanitizeTerminal(dirty)
 	for _, r := range got {
@@ -132,7 +132,7 @@ func TestSanitizeTerminalLeavesNoControlBytes(t *testing.T) {
 // Sanitizing is idempotent, so a value that passes through more than one print
 // site is not progressively mangled.
 func TestSanitizeTerminalIsIdempotent(t *testing.T) {
-	dirty := "bad31mFAKEtail"
+	dirty := "bad\u009b31mFAKE\u0085tail"
 	once := SanitizeTerminal(dirty)
 	if twice := SanitizeTerminal(once); twice != once {
 		t.Errorf("not idempotent:\n once:  %q\n twice: %q", once, twice)
@@ -208,9 +208,9 @@ func TestSanitizeLineNeutralisesLineBreaks(t *testing.T) {
 		{"a\r\nb", `a\r\nb`},
 		{"a\u2028b", `a\u2028b`}, // line separator
 		{"a\u2029b", `a\u2029b`}, // paragraph separator
-		{"ab", "a^[Eb"},         // NEL
-		{"ab", `a\eb`},          // ESC
-		{"ab", "a^[[b"},         // C1 CSI
+		{"a\u0085b", "a^[Eb"},    // NEL
+		{"a\x1bb", `a\eb`},       // ESC
+		{"a\u009bb", "a^[[b"},    // C1 CSI
 		{"plain/path.env", "plain/path.env"},
 		{"", ""},
 	}
@@ -231,8 +231,8 @@ func TestGitMetadataCannotForgeTerminalOutput(t *testing.T) {
 		Confidence:    0.95,
 		File:          "a.env",
 		Line:          1,
-		Author:        "Alice [31mRED[0m]8;;http://evil.example\\CLICK",
-		CommitSummary: "add creds [2J[31mFAKE-CRITICAL: 1 critical finding[0m",
+		Author:        "Alice \x1b[31mRED\x1b[0m\x1b]8;;http://evil.example\x1b\\CLICK",
+		CommitSummary: "add creds \x1b[2J\x1b[31mFAKE-CRITICAL: 1 critical finding\x1b[0m",
 		Context:       "> a.env:1",
 	}
 	var buf bytes.Buffer
@@ -281,8 +281,8 @@ func TestSkippedByNamesCannotForgeLines(t *testing.T) {
 
 func TestDashboardSanitisesAndTruncatesOnRunes(t *testing.T) {
 	d := GenerateDashboard(&findings.RiskReport{Findings: []findings.Finding{
-		{RuleID: "r-very-long-rule-identifier-that-overflows", Type: "T]8;;evil", Severity: findings.SeverityLow, Confidence: 0.5, File: "a\nb.env"},
-		{RuleID: "r-very-long-rule-identifier-that-overflows", Type: "T]8;;evil", Severity: findings.SeverityCritical, Confidence: 0.9, File: "c.env"},
+		{RuleID: "r-very-long-rule-identifier-that-overflows", Type: "T\x1b]8;;evil", Severity: findings.SeverityLow, Confidence: 0.5, File: "a\nb.env"},
+		{RuleID: "r-very-long-rule-identifier-that-overflows", Type: "T\x1b]8;;evil", Severity: findings.SeverityCritical, Confidence: 0.9, File: "c.env"},
 	}})
 	var buf bytes.Buffer
 	if err := WriteDashboard(&buf, d, true); err != nil {

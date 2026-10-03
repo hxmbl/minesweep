@@ -5,7 +5,9 @@ import (
 	"strings"
 )
 
-var ruleRemediations = map[string]string{
+// G101: this map holds remediation ADVICE keyed by rule id. The rule ids
+// happen to contain the words gosec looks for; there are no credentials here.
+var ruleRemediations = map[string]string{ //nolint:gosec
 	"aws-access-key-id":          "Rotate this key in the AWS IAM console, remove it from the file, and purge it from git history (e.g. git filter-repo). Consider switching to short-lived IAM roles.",
 	"aws-secret-key":             "Rotate this secret key in the AWS IAM console, then remove it from the file and purge git history. Store it in a secrets manager instead.",
 	"aws-session-token":          "This temporary token grants AWS access until it expires. Revoke the session it came from and remove it from the file.",

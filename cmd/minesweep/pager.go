@@ -85,7 +85,7 @@ func renderTextInteractive(r *findings.RiskReport, opts *report.TextOptions) err
 
 	if err := cmd.Start(); err != nil {
 		// Pager missing/broken: degrade to plain output rather than fail.
-		fmt.Fprintf(os.Stderr, "minesweep: pager %q unavailable (%v); printing directly\n",
+		_, _ = fmt.Fprintf(os.Stderr, "minesweep: pager %q unavailable (%v); printing directly\n",
 			resolvePagerCommand(), err)
 		return report.WriteText(os.Stdout, r, *opts)
 	}
@@ -94,7 +94,7 @@ func renderTextInteractive(r *findings.RiskReport, opts *report.TextOptions) err
 	paged.Color = report.ColorAlways
 
 	writeErr := report.WriteText(stdin, r, paged)
-	stdin.Close()
+	_ = stdin.Close()
 	waitErr := cmd.Wait()
 
 	if writeErr != nil && errors.Is(writeErr, syscall.EPIPE) {

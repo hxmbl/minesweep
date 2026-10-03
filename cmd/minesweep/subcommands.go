@@ -212,7 +212,8 @@ func shortLabel(s string) string {
 }
 
 func runImportIgnores(in, out string) error {
-	data, err := os.ReadFile(in)
+	// G304: in is the .gitleaksignore path the user passed to this subcommand.
+	data, err := os.ReadFile(in) //nolint:gosec
 	if err != nil {
 		return fmt.Errorf("read %s: %w", in, err)
 	}

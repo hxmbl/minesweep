@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write  # for SARIF upload
+  security-events: write # for SARIF upload
 
 jobs:
   minesweep:
@@ -19,7 +19,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0  # needed for --diff
+          fetch-depth: 0 # needed for --diff
+          # Otherwise the job's token is left in .git/config, and this job runs
+          # a scanner over untrusted PR content.
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -29,25 +32,38 @@ jobs:
       - name: Build minesweep
         run: go build -o minesweep ./cmd/minesweep
 
+      # One scan produces both the gate and the SARIF. They used to be two
+      # separate invocations: the gating scan failed the job, and a second
+      # `minesweep --sarif .` under `continue-on-error` uploaded whatever that
+      # run produced. So a scan that was truncated, or that did not cover the
+      # diff being reviewed, still published results as if they were complete --
+      # and on a pull_request the upload came from a FULL scan while the gate was
+      # a DIFF scan.
+      #
+      # github.base_ref goes through the environment rather than being
+      # interpolated into the script body: a branch name is attacker-controlled
+      # and `${{ }}` expansion happens before the shell runs, so a branch called
+      # `$(curl ...)` would execute on the runner.
       - name: Run minesweep (diff mode for PRs)
         if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          ./minesweep --diff --diff-base ${{ github.base_ref }} --fail-on high .
+          ./minesweep --diff --diff-base "$BASE_REF" --fail-on high --sarif . > results.sarif
 
       - name: Run minesweep (full scan on main)
         if: github.event_name == 'push'
         run: |
-          ./minesweep --fail-on high .
+          ./minesweep --fail-on high --sarif . > results.sarif
 
-      - name: Upload SARIF to GitHub Code Scanning
-        if: always()
-        run: |
-          ./minesweep --sarif . > results.sarif
-        continue-on-error: true
-
+      # No continue-on-error: if the scan above failed, there is no trustworthy
+      # result to publish, and failing loudly is the point. The upload itself is
+      # allowed to fail so that a Code Scanning outage does not masquerade as a
+      # secrets failure.
       - name: Upload SARIF results
-        if: always()
+        if: success() || failure()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results.sarif
+          category: minesweep-${{ github.event_name }}
         continue-on-error: true

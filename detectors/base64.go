@@ -59,8 +59,8 @@ func isBase64(s string) bool {
 	// Check if it only contains base64 characters
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-			(c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') {
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') &&
+			(c < '0' || c > '9') && c != '+' && c != '/' && c != '=' {
 			return false
 		}
 	}

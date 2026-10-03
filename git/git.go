@@ -164,7 +164,8 @@ func IsGitRepo(path string) bool {
 
 // ReadFileLines reads a file and returns its lines
 func ReadFileLines(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
+	// G304: path comes from git's own file list for the repository being scanned.
+	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return nil, err
 	}

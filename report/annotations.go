@@ -55,19 +55,19 @@ func WriteGitHubAnnotations(w io.Writer, annotations []GitHubAnnotation) error {
 		}
 		// Also strip :: from path to prevent breaking the annotation format
 		safePath = strings.ReplaceAll(safePath, "::", "_")
-		fmt.Fprintf(w, "::%s file=%s,line=%d::%s\n", level, safePath, a.Line, safeMsg)
+		_, _ = fmt.Fprintf(w, "::%s file=%s,line=%d::%s\n", level, safePath, a.Line, safeMsg)
 	}
 	return nil
 }
 
 func WriteGitHubWorkflowSummary(w io.Writer, annotations []GitHubAnnotation) error {
 	if len(annotations) == 0 {
-		fmt.Fprintln(w, "No secrets detected!")
+		_, _ = fmt.Fprintln(w, "No secrets detected!")
 		return nil
 	}
 
-	fmt.Fprintf(w, "## MineSweep Results\n\n")
-	fmt.Fprintf(w, "Found **%d** potential secrets:\n\n", len(annotations))
+	_, _ = fmt.Fprintf(w, "## MineSweep Results\n\n")
+	_, _ = fmt.Fprintf(w, "Found **%d** potential secrets:\n\n", len(annotations))
 
 	errors := 0
 	warnings := 0
@@ -80,15 +80,15 @@ func WriteGitHubWorkflowSummary(w io.Writer, annotations []GitHubAnnotation) err
 	}
 
 	if errors > 0 {
-		fmt.Fprintf(w, "- 🔴 **%d** high severity\n", errors)
+		_, _ = fmt.Fprintf(w, "- 🔴 **%d** high severity\n", errors)
 	}
 	if warnings > 0 {
-		fmt.Fprintf(w, "- 🟡 **%d** medium/low severity\n", warnings)
+		_, _ = fmt.Fprintf(w, "- 🟡 **%d** medium/low severity\n", warnings)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 
-	fmt.Fprintln(w, "| Severity | File | Line | Rule | Message |")
-	fmt.Fprintln(w, "|----------|------|------|------|---------|")
+	_, _ = fmt.Fprintln(w, "| Severity | File | Line | Rule | Message |")
+	_, _ = fmt.Fprintln(w, "|----------|------|------|------|---------|")
 	for _, a := range annotations {
 		icon := "🟡"
 		if a.Level == "error" {
@@ -98,7 +98,7 @@ func WriteGitHubWorkflowSummary(w io.Writer, annotations []GitHubAnnotation) err
 		if len(msg) > 60 {
 			msg = msg[:57] + "..."
 		}
-		fmt.Fprintf(w, "| %s | `%s` | %d | %s | %s |\n",
+		_, _ = fmt.Fprintf(w, "| %s | `%s` | %d | %s | %s |\n",
 			icon, a.Path, a.Line, extractRuleID(a.Message), msg)
 	}
 
@@ -113,11 +113,12 @@ func extractRuleID(msg string) string {
 }
 
 func WriteAnnotationsToFile(path string, annotations []GitHubAnnotation) error {
-	f, err := os.Create(path)
+	// G304: path is the annotations file the caller asked to write.
+	f, err := os.Create(path) //nolint:gosec
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	return WriteGitHubAnnotations(f, annotations)
 }

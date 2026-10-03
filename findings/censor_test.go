@@ -8,8 +8,15 @@ import (
 func TestSecretTokenIsStableAndDistinct(t *testing.T) {
 	const a = "AKIAIOSFODNN7EXAMPLE"
 	const b = "AKIAIOSFODNN7EXAMPLF"
-	if SecretToken(a) != SecretToken(a) {
-		t.Error("token for the same value must be stable")
+	// Pinned rather than compared against itself: the same input must always
+	// produce the same token, and a hash is exactly that property, so an
+	// accidental change to the scheme has to be a deliberate update here.
+	const wantA = "sha256:1a5d44a2dca1"
+	if got := SecretToken(a); got != wantA {
+		t.Errorf("SecretToken(%q) = %q, want %q", a, got, wantA)
+	}
+	if got := SecretToken(a); got != SecretToken(a) {
+		t.Error("SecretToken is not deterministic across calls")
 	}
 	if SecretToken(a) == SecretToken(b) {
 		t.Error("two different values share a token")

@@ -90,32 +90,32 @@ func GenerateDashboard(data *findings.RiskReport) *Dashboard {
 
 func WriteDashboard(w io.Writer, d *Dashboard, verbose bool) error {
 	if d == nil {
-		fmt.Fprintln(w, "No data for dashboard")
+		_, _ = fmt.Fprintln(w, "No data for dashboard")
 		return nil
 	}
 
-	fmt.Fprintln(w, "╔════════════════════════════════════════════════════════════╗")
-	fmt.Fprintln(w, "║                  Rule Health Dashboard                     ║")
-	fmt.Fprintln(w, "╚════════════════════════════════════════════════════════════╝")
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "╔════════════════════════════════════════════════════════════╗")
+	_, _ = fmt.Fprintln(w, "║                  Rule Health Dashboard                     ║")
+	_, _ = fmt.Fprintln(w, "╚════════════════════════════════════════════════════════════╝")
+	_, _ = fmt.Fprintln(w)
 
-	fmt.Fprintf(w, "  Total Findings: %d\n", d.TotalHits)
-	fmt.Fprintf(w, "  Files Affected: %d\n", d.TotalFiles)
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintf(w, "  Total Findings: %d\n", d.TotalHits)
+	_, _ = fmt.Fprintf(w, "  Files Affected: %d\n", d.TotalFiles)
+	_, _ = fmt.Fprintln(w)
 
-	fmt.Fprintln(w, "  Severity Distribution:")
+	_, _ = fmt.Fprintln(w, "  Severity Distribution:")
 	for _, sev := range []findings.Severity{findings.SeverityCritical, findings.SeverityHigh, findings.SeverityMedium, findings.SeverityLow, findings.SeverityInfo} {
 		count := d.SeverityMap[sev]
 		if count > 0 {
 			bar := strings.Repeat("█", min(count, 30))
-			fmt.Fprintf(w, "    %-10s %3d %s\n", sev, count, bar)
+			_, _ = fmt.Fprintf(w, "    %-10s %3d %s\n", sev, count, bar)
 		}
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 
-	fmt.Fprintln(w, "  Top Rules:")
-	fmt.Fprintf(w, "  %-20s %-8s %-6s %-10s\n", "RULE", "HITS", "CONF", "FILES")
-	fmt.Fprintln(w, "  "+strings.Repeat("-", 50))
+	_, _ = fmt.Fprintln(w, "  Top Rules:")
+	_, _ = fmt.Fprintf(w, "  %-20s %-8s %-6s %-10s\n", "RULE", "HITS", "CONF", "FILES")
+	_, _ = fmt.Fprintln(w, "  "+strings.Repeat("-", 50))
 
 	displayCount := len(d.Rules)
 	if displayCount > 20 {
@@ -124,22 +124,22 @@ func WriteDashboard(w io.Writer, d *Dashboard, verbose bool) error {
 
 	for i := 0; i < displayCount; i++ {
 		stats := d.Rules[i]
-		fmt.Fprintf(w, "  %-20s %-8d %-6.2f %-10d\n",
+		_, _ = fmt.Fprintf(w, "  %-20s %-8d %-6.2f %-10d\n",
 			truncateRunes(SanitizeLine(stats.RuleID), 18),
 			stats.HitCount, stats.AvgConf, len(stats.Files))
 	}
 
 	if len(d.Rules) > 20 {
-		fmt.Fprintf(w, "  ... and %d more rules\n", len(d.Rules)-20)
+		_, _ = fmt.Fprintf(w, "  ... and %d more rules\n", len(d.Rules)-20)
 	}
 
 	if verbose {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "  Detailed Rule Stats:")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "  Detailed Rule Stats:")
 		for _, stats := range d.Rules {
-			fmt.Fprintf(w, "    %s (%s)\n", SanitizeLine(stats.RuleName), SanitizeLine(stats.RuleID))
-			fmt.Fprintf(w, "      Hits: %d, Avg Confidence: %.2f\n", stats.HitCount, stats.AvgConf)
-			fmt.Fprintf(w, "      Files: %d\n", len(stats.Files))
+			_, _ = fmt.Fprintf(w, "    %s (%s)\n", SanitizeLine(stats.RuleName), SanitizeLine(stats.RuleID))
+			_, _ = fmt.Fprintf(w, "      Hits: %d, Avg Confidence: %.2f\n", stats.HitCount, stats.AvgConf)
+			_, _ = fmt.Fprintf(w, "      Files: %d\n", len(stats.Files))
 			fileList := make([]string, 0, len(stats.Files))
 			for f := range stats.Files {
 				fileList = append(fileList, f)
@@ -151,7 +151,7 @@ func WriteDashboard(w io.Writer, d *Dashboard, verbose bool) error {
 			for i := range fileList {
 				fileList[i] = SanitizeLine(fileList[i])
 			}
-			fmt.Fprintf(w, "      %s\n", strings.Join(fileList, ", "))
+			_, _ = fmt.Fprintf(w, "      %s\n", strings.Join(fileList, ", "))
 		}
 	}
 

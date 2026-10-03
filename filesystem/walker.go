@@ -247,7 +247,9 @@ func EmptyIgnoreSet() *IgnoreSet { return NewIgnoreSet(NewIgnorePattern(nil)) }
 // silently scanning with fewer rules than the user wrote is a false negative
 // wearing a success message.
 func LoadIgnoreFile(path string) ([]string, error) {
-	f, err := os.Open(path)
+	// G304: path is always a .minesweepignore/.msignore discovered by walking up
+	// from the scan root. It is data the user wrote, not a value from a finding.
+	f, err := os.Open(path) //nolint:gosec
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -398,7 +400,8 @@ func escapesRoot(rel string) bool {
 }
 
 func runGitTopLevel(dir string) (string, error) {
-	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	// G204: fixed argv, no shell. dir is the scan root the user passed.
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel") //nolint:gosec
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
