@@ -16,6 +16,9 @@ type dbPattern struct {
 	confidence  float64
 	tags        []string
 	description string
+	// requireValue marks a pattern whose capture spans a whole assignment, so
+	// the part after the sign has to be judged rather than the match.
+	requireValue bool
 }
 
 func newDBPattern(name, pattern string, severity findings.Severity, confidence float64, tags []string, description string) dbPattern {
@@ -28,6 +31,14 @@ func newDBPattern(name, pattern string, severity findings.Severity, confidence f
 		tags:        tags,
 		description: description,
 	}
+}
+
+// newDBAssignmentPattern is newDBPattern for rules that capture an assignment
+// rather than a bare token.
+func newDBAssignmentPattern(name, pattern string, severity findings.Severity, confidence float64, tags []string, description string) dbPattern {
+	p := newDBPattern(name, pattern, severity, confidence, tags, description)
+	p.requireValue = true
+	return p
 }
 
 // DatabaseDetector detects database connection strings and credentials
@@ -64,8 +75,8 @@ func NewDatabaseDetector() *DatabaseDetector {
 				findings.SeverityHigh, 0.80,
 				[]string{"database", "credentials"}, "Generic database connection URL with credentials"),
 
-			newDBPattern("database_credentials_kv",
-				`(?i)(?:db|database)[_-]?(?:user|username|user_name|pwd|password|passwd)\s*[:=]\s*['"]?[^\s'"]+['"]?`,
+			newDBAssignmentPattern("database_credentials_kv",
+				`(?i)(?:db|database)[_-]?(?:user|username|user_name|pwd|password|passwd)[ \t]*[:=][ \t]*['"]?[^\s'"]+['"]?`,
 				findings.SeverityHigh, 0.75,
 				[]string{"database", "credentials"}, "Database credentials in key-value format"),
 
@@ -116,6 +127,10 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 				li = file.Lines()
 			}
 			lineNum, col := li.LineCol(start)
+			value := string(data[start:end])
+			if pattern.requireValue && !assignmentValueLooksLikeCredential(value) {
+				continue
+			}
 
 			// Evidence is attached by the engine to findings that survive
 			// filtering, not here — see the note in regex.go.
@@ -129,7 +144,7 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 				File:       file.Path,
 				Line:       lineNum,
 				Column:     col,
-				Value:      string(data[start:end]),
+				Value:      value,
 				Reason:     pattern.description,
 				RuleID:     pattern.name,
 				Tags:       pattern.tags,

@@ -3,7 +3,8 @@ package detectors
 import (
 	"bytes"
 	"regexp/syntax"
-	"strings"
+
+	"minesweep/filesystem"
 )
 
 // gateAlt is an OR-group: a match may contain any one of the alternatives.
@@ -57,6 +58,36 @@ func containsAny(hay []byte, needles [][]byte) bool {
 
 const maxGateBranches = 64
 
+// asciiFoldLiteral reports the ASCII-folded form of a case-insensitive literal,
+// and whether that form is a sound needle to search for in a haystack folded by
+// filesystem.FoldLower.
+//
+// Both sides of the comparison go through filesystem.ASCIIFoldRune, which maps a
+// rune onto the ASCII member of its Unicode simple-fold orbit when it has one.
+// That is what makes the gate sound for the letters where ASCII-only lowercasing
+// was not: 'k' and 's' each share an orbit with a non-ASCII rune (U+212A KELVIN
+// SIGN and U+017F LATIN SMALL LETTER LONG S), so `(?i)secret` matches "ſecret"
+// and `(?i)key` matches "Key" spelled with U+212A. FoldLower maps those content
+// runes to 's' and 'k' as well, so the ASCII needle is present whenever the
+// regex can match.
+//
+// A literal rune with no ASCII member in its orbit is rejected: FoldLower copies
+// such runes through unchanged, so an ASCII needle derived from one would not
+// correspond to anything the haystack can hold. Such a literal yields no gate,
+// which costs a regex execution and nothing else — the gate is an optimization,
+// and a wrong gate is a silent false negative with no recovery.
+func asciiFoldLiteral(lit string) (string, bool) {
+	lower := make([]byte, 0, len(lit))
+	for _, r := range lit {
+		folded, ok := filesystem.ASCIIFoldRune(r)
+		if !ok {
+			return "", false
+		}
+		lower = append(lower, folded)
+	}
+	return string(lower), true
+}
+
 // extractLiteralGate parses a regex and returns the necessary-literal
 // condition, or nil when no sound gate can be derived (or the expression is
 // too branched to be worth it).
@@ -96,10 +127,16 @@ func collectRequired(re *syntax.Regexp) []gateBranch {
 			return nil
 		}
 		if re.Flags&syntax.FoldCase != 0 {
-			// The syntax parser folds case-insensitive literals to a fixed
-			// case; normalize to lowercase so the gate can search a lowered
-			// haystack.
-			return []gateBranch{{gateAlt{alts: []string{strings.ToLower(lit)}, fold: true}}}
+			// The haystack for a folded gate is filesystem.FoldLower(content),
+			// which folds onto ASCII the same way asciiFoldLiteral does, so a
+			// fold-safe literal is a sound needle here. Emit no gate otherwise:
+			// the gate is an optimization, and a false negative here is
+			// unrecoverable.
+			lower, ok := asciiFoldLiteral(lit)
+			if !ok {
+				return nil
+			}
+			return []gateBranch{{gateAlt{alts: []string{lower}, fold: true}}}
 		}
 		return []gateBranch{{gateAlt{alts: []string{lit}, fold: false}}}
 

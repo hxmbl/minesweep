@@ -40,10 +40,15 @@ type Pattern struct {
 	CaptureGroup int     `yaml:"capture_group,omitempty"`
 	// MinEntropy, when > 0, requires the captured secret to have Shannon
 	// entropy above the threshold (gitleaks-style filtering).
-	MinEntropy  float64 `yaml:"min_entropy,omitempty"`
-	compiled    *regexp.Regexp
-	compiledErr error
-	gate        literalGate
+	MinEntropy float64 `yaml:"min_entropy,omitempty"`
+	// RequireValue declares that this pattern captures a credential value, as
+	// opposed to only naming the credential (a "SECRET=" style canary). Such a
+	// capture is discarded when it holds source code rather than an opaque
+	// token — see looksLikeCredentialValue.
+	RequireValue bool `yaml:"require_value,omitempty"`
+	compiled     *regexp.Regexp
+	compiledErr  error
+	gate         literalGate
 }
 
 type FileFilter struct {
@@ -249,6 +254,9 @@ func (p *Pattern) safeMatch(content, lowered []byte) []matchResult {
 		}
 		value := content[start:end]
 		if p.MinEntropy > 0 && shannonEntropyBytes(value) < p.MinEntropy {
+			continue
+		}
+		if p.RequireValue && !judgeCapturedValue(string(value), g > 0) {
 			continue
 		}
 		results = append(results, matchResult{

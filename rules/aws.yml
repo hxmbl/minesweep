@@ -18,7 +18,7 @@ rules:
     severity: critical
     tags: [aws, cloud, credentials]
     patterns:
-      - regex: (?i)aws_secret_access_key\s*[:=]\s*["']?([A-Za-z0-9/+=]{40})["']?
+      - regex: (?i)aws_secret_access_key[ \t]*[:=][ \t]*["']?([A-Za-z0-9/+=]{40})["']?
         confidence: 0.95
         capture_group: 1
 
@@ -29,7 +29,7 @@ rules:
     severity: critical
     tags: [aws, cloud, credentials]
     patterns:
-      - regex: (?i)aws_session_token\s*[:=]\s*["']?([A-Za-z0-9/+=]{100,})["']?
+      - regex: (?i)aws_session_token[ \t]*[:=][ \t]*["']?([A-Za-z0-9/+=]{100,})["']?
         confidence: 0.90
         capture_group: 1
 
@@ -41,7 +41,7 @@ rules:
     tags: [aws, cloud]
     patterns:
       # Match AWS account IDs only when they appear in AWS-related contexts
-      - regex: '(?i)(aws|amazon)\s*(account|id|account_id|accountid)\s*[:=]\s*["'']?(\d{12})["'']?'
+      - regex: '(?i)(aws|amazon)\s*(account|id|account_id|accountid)[ \t]*[:=][ \t]*["'']?(\d{12})["'']?'
         confidence: 0.80
         capture_group: 2
       # Match account IDs in ARN format
@@ -49,7 +49,7 @@ rules:
         confidence: 0.90
         capture_group: 0
       # Match account IDs in resource policies or IAM documents
-      - regex: '(?i)(account|principal)\s*[:{"]\s*\d{12}\s*[}"]'
+      - regex: '(?i)(account|principal)[ \t]*[:{"][ \t]*\d{12}[ \t]*[}"]'
         confidence: 0.70
     file_filter:
       exclude:

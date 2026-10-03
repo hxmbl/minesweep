@@ -1,7 +1,6 @@
 package filesystem
 
 import (
-	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -346,9 +345,13 @@ func (f *File) LoadContent() error {
 	return err
 }
 
-// LoweredContent returns a lowercase copy of the content, computed once and
+// LoweredContent returns a case-folded copy of the content, computed once and
 // shared by every detector that runs case-insensitive literal pre-checks.
-// Returns nil when the content cannot be loaded.
+//
+// The folding matches Go's regexp `(?i)` semantics (see FoldLower), not plain
+// ASCII lowercasing, so that a case-insensitive literal gate stays sound for the
+// letters whose Unicode fold orbit escapes ASCII. Returns nil when the content
+// cannot be loaded.
 func (f *File) LoweredContent() []byte {
 	f.contentMu.Lock()
 	defer f.contentMu.Unlock()
@@ -357,7 +360,7 @@ func (f *File) LoweredContent() []byte {
 		if err != nil || content == nil {
 			return nil
 		}
-		f.lowered = bytes.ToLower(content)
+		f.lowered = FoldLower(content)
 	}
 	return f.lowered
 }
