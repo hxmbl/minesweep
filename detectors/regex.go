@@ -78,14 +78,31 @@ func NewRegexDetector(rulesDir string) (*RegexDetector, error) {
 		return nil, embeddedErr
 	}
 	if rulesDir != "" {
-		if info, statErr := os.Stat(rulesDir); statErr == nil && info.IsDir() {
+		// An explicit --rules is a request. Whether it names a directory or a
+		// single file, a path that cannot be read has to be an error: the old
+		// os.Stat/IsDir test fell through to the embedded rules, so
+		// `--rules ./my-rules.yml` and `--rules ./typo.yml` both scanned
+		// silently with the built-in rules only. A migrating user adding gitleaks
+		// rules then got neither the rules nor any indication they were missing.
+		//
+		// A missing path is only an error because a non-empty rulesDir now
+		// always means the user asked for it.
+		info, statErr := os.Stat(rulesDir)
+		switch {
+		case statErr != nil:
+			return nil, fmt.Errorf("rules path %q: %w", rulesDir, statErr)
+		case info.IsDir():
 			diskRules, diskErr := loadRules(rulesDir, "regex")
 			if diskErr != nil {
 				return nil, diskErr
 			}
 			rules = mergeRules(embeddedRules, diskRules)
-		} else {
-			rules = embeddedRules
+		default:
+			singleRules, loadErr := loadRulesFile(rulesDir, "regex")
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			rules = mergeRules(embeddedRules, singleRules)
 		}
 	} else {
 		rules = embeddedRules
@@ -109,7 +126,7 @@ func loadEmbeddedRules() ([]Rule, error) {
 	if err != nil {
 		return nil, fmt.Errorf("embedded rules: %w", err)
 	}
-	rules, err := loadRulesFS(fsys, "regex")
+	rules, err := loadRulesFS(fsys, "regex", true)
 	if err != nil {
 		return nil, fmt.Errorf("load embedded rules: %w", err)
 	}
@@ -123,6 +140,36 @@ func (d *RegexDetector) Name() string {
 // Rules returns the loaded rule definitions, including any merged user rules.
 func (d *RegexDetector) Rules() []Rule {
 	return d.rules
+}
+
+// AddRules merges additional rules in, replacing any that share an ID. Used for
+// rules discovered per scan rather than configured up front.
+func (d *RegexDetector) AddRules(extra []Rule) {
+	if len(extra) == 0 {
+		return
+	}
+	d.rules = mergeRules(d.rules, extra)
+}
+
+// GitleaksConfigNames are the filenames searched for in a scanned tree, in
+// priority order.
+var GitleaksConfigNames = []string{".gitleaks.toml", "gitleaks.toml"}
+
+// FindGitleaksConfig returns the path of a gitleaks config in root, or "".
+//
+// Search is deliberately shallow: the config belongs to the tree being scanned,
+// not to some enclosing project. Only the scan root itself is consulted, so
+// scanning a subdirectory of a repository does not silently adopt the
+// repository's configuration, and running from an unrelated working directory
+// adopts nothing.
+func FindGitleaksConfig(root string) string {
+	for _, name := range GitleaksConfigNames {
+		p := filepath.Join(root, name)
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
 }
 
 func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
@@ -288,10 +335,83 @@ func (p *Pattern) safeMatch(content, lowered []byte, limit int) []matchResult {
 }
 
 func loadRules(rulesDir, ruleType string) ([]Rule, error) {
-	return loadRulesFS(os.DirFS(rulesDir), ruleType)
+	// An explicitly named rules directory is a trust decision.
+	return loadRulesFS(os.DirFS(rulesDir), ruleType, true)
 }
 
-func loadRulesFS(rulesFS fs.FS, ruleType string) ([]Rule, error) {
+// loadDiscoveredRules loads rule files found in the tree being scanned. Their
+// gitleaks allowlists are NOT honoured: an allowlist supplied by the tree under
+// inspection would let that tree suppress its own findings.
+func loadDiscoveredRules(rulesDir, ruleType string) ([]Rule, error) {
+	return loadRulesFS(os.DirFS(rulesDir), ruleType, false)
+}
+
+// parseRules decodes one rule file and prepares its rules. The extension picks
+// the format: .toml is a gitleaks config, everything else is the YAML form.
+func parseRules(data []byte, name, ruleType string, honourAllowlist bool) ([]Rule, error) {
+	var fileRules []Rule
+	if strings.EqualFold(filepath.Ext(name), ".toml") {
+		var err error
+		fileRules, err = LoadGitleaksRules(data, name, honourAllowlist)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var rf RuleFile
+		if err := yaml.Unmarshal(data, &rf); err != nil {
+			return nil, err
+		}
+		fileRules = rf.Rules
+	}
+
+	out := make([]Rule, 0, len(fileRules))
+	for i := range fileRules {
+		if fileRules[i].Type != ruleType {
+			continue
+		}
+		// A typo'd severity is a silent downgrade in policy terms; make
+		// it visible while still defaulting to info at scan time.
+		if !findings.IsValidSeverity(fileRules[i].Severity) {
+			fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s) has invalid severity %q, treating as info\n",
+				fileRules[i].ID, name, fileRules[i].Severity)
+		}
+		failed := 0
+		for j := range fileRules[i].Patterns {
+			if err := fileRules[i].Patterns[j].compile(); err != nil {
+				// Warn loudly: a silently skipped pattern is silently
+				// missing coverage.
+				failed++
+				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s): skipping pattern %d: %v\n",
+					fileRules[i].ID, name, j+1, err)
+			}
+		}
+		if failed > 0 && failed == len(fileRules[i].Patterns) {
+			fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q is disabled (all patterns failed to compile)\n", fileRules[i].ID)
+			continue
+		}
+		out = append(out, fileRules[i])
+	}
+	return out, nil
+}
+
+// loadRulesFile loads a single rule file, for --rules pointing at one file
+// rather than a directory.
+func loadRulesFile(path, ruleType string) ([]Rule, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read rules file %q: %w", path, err)
+	}
+	rules, err := parseRules(b, filepath.Base(path), ruleType, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(rules) == 0 {
+		return nil, fmt.Errorf("rules file %q contains no %s rules", path, ruleType)
+	}
+	return rules, nil
+}
+
+func loadRulesFS(rulesFS fs.FS, ruleType string, honourAllowlist bool) ([]Rule, error) {
 	entries, err := fs.ReadDir(rulesFS, ".")
 	if err != nil {
 		return nil, fmt.Errorf("read rules dir: %w", err)
@@ -312,49 +432,12 @@ func loadRulesFS(rulesFS fs.FS, ruleType string) ([]Rule, error) {
 			continue
 		}
 
-		var fileRules []Rule
-		switch ext {
-		case ".toml":
-			fileRules, err = LoadGitleaksRules(data, entry.Name())
-			if err != nil {
-				loadErrs = append(loadErrs, fmt.Sprintf("parse %q: %v", entry.Name(), err))
-				continue
-			}
-		default:
-			var rf RuleFile
-			if err := yaml.Unmarshal(data, &rf); err != nil {
-				loadErrs = append(loadErrs, fmt.Sprintf("parse %q: %v", entry.Name(), err))
-				continue
-			}
-			fileRules = rf.Rules
+		fileRules, err := parseRules(data, entry.Name(), ruleType, honourAllowlist)
+		if err != nil {
+			loadErrs = append(loadErrs, fmt.Sprintf("parse %q: %v", entry.Name(), err))
+			continue
 		}
-
-		for i := range fileRules {
-			if fileRules[i].Type != "regex" {
-				continue
-			}
-			// A typo'd severity is a silent downgrade in policy terms; make
-			// it visible while still defaulting to info at scan time.
-			if !findings.IsValidSeverity(fileRules[i].Severity) {
-				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s) has invalid severity %q, treating as info\n",
-					fileRules[i].ID, entry.Name(), fileRules[i].Severity)
-			}
-			failed := 0
-			for j := range fileRules[i].Patterns {
-				if err := fileRules[i].Patterns[j].compile(); err != nil {
-					// Warn loudly: a silently skipped pattern is silently
-					// missing coverage.
-					failed++
-					fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s): skipping pattern %d: %v\n",
-						fileRules[i].ID, entry.Name(), j+1, err)
-				}
-			}
-			if failed > 0 && failed == len(fileRules[i].Patterns) {
-				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q is disabled (all patterns failed to compile)\n", fileRules[i].ID)
-				continue
-			}
-			allRules = append(allRules, fileRules[i])
-		}
+		allRules = append(allRules, fileRules...)
 	}
 	if len(loadErrs) > 0 {
 		fmt.Fprintf(os.Stderr, "minesweep: warning: %d rule file(s) had errors and were skipped\n", len(loadErrs))

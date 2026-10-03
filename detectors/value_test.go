@@ -83,7 +83,7 @@ password = os.environ["DB_PASSWORD"]
 db_password = config.settings.auth
 token = "${SECRET_FROM_VAULT}"
 `
-	rd, err := NewRegexDetector("/nonexistent-rules-dir-for-test")
+	rd, err := NewRegexDetector("") // embedded rules only
 	if err != nil {
 		t.Fatalf("load rules: %v", err)
 	}
@@ -109,7 +109,7 @@ aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY01
 GH_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345
 password = "hunter2hunter2"
 `
-	rd, err := NewRegexDetector("/nonexistent-rules-dir-for-test")
+	rd, err := NewRegexDetector("") // embedded rules only
 	if err != nil {
 		t.Fatalf("load rules: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestAssignmentRulesDoNotConsumeNextLine(t *testing.T) {
 	src := "def find(haystack, token):\n" +
 		"    while position < len(haystack) and haystack[position] != token:\n" +
 		"        position += 1\n"
-	rd, err := NewRegexDetector("/nonexistent-rules-dir-for-test")
+	rd, err := NewRegexDetector("") // embedded rules only
 	if err != nil {
 		t.Fatalf("load rules: %v", err)
 	}

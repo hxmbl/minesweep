@@ -85,13 +85,29 @@ func gitleaksSeverity(id string) string {
 // LoadGitleaksRules parses a gitleaks TOML config and translates it into
 // native rules. Translation is total: every supported field maps, and every
 // unsupported field produces a warning naming the rule.
-func LoadGitleaksRules(data []byte, sourceName string) ([]Rule, error) {
+//
+// honourAllowlist is false for a config discovered in the repository being
+// scanned. An allowlist only ever suppresses findings, so honouring one supplied
+// by the tree under inspection lets that tree silence its own secrets -- the
+// same trust hole as a repository-supplied max_file_size_mb. A config the user
+// names explicitly with --rules is a different case and keeps its allowlist.
+func LoadGitleaksRules(data []byte, sourceName string, honourAllowlist bool) ([]Rule, error) {
 	var cfg GitleaksConfig
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", sourceName, err)
 	}
 
-	global := buildAllowlistSet(cfg.Allowlists, cfg.Allowlist, sourceName, "global")
+	var global []*importedAllowlist
+	if honourAllowlist {
+		global = buildAllowlistSet(cfg.Allowlists, cfg.Allowlist, sourceName, "global")
+	} else if n := len(cfg.Allowlists); n > 0 || cfg.Allowlist != nil {
+		// Say so plainly: a migrating user whose allowlist is being skipped must
+		// not conclude their false positives were fixed.
+		fmt.Fprintf(os.Stderr,
+			"minesweep: warning: %s: ignoring %d global allowlist(s) from this file because it was found in the\n"+
+				"             scanned tree. Pass it explicitly with --rules to honour them.\n",
+			sourceName, max(n, 1))
+	}
 
 	if cfg.Extend != nil && (cfg.Extend.UseDefault || cfg.Extend.Path != "") {
 		warnGitleaks(sourceName, "[extend]", "external config extension is not supported; only rules defined inline are loaded")
@@ -138,8 +154,15 @@ func LoadGitleaksRules(data []byte, sourceName string) ([]Rule, error) {
 			Patterns:    []Pattern{pattern},
 		}
 
-		blocks := buildAllowlistSet(gr.Allowlists, gr.Allowlist, sourceName, gr.ID)
-		blocks = append(blocks, global...)
+		var blocks []*importedAllowlist
+		if honourAllowlist {
+			blocks = buildAllowlistSet(gr.Allowlists, gr.Allowlist, sourceName, gr.ID)
+			blocks = append(blocks, global...)
+		} else if n := len(gr.Allowlists); n > 0 || gr.Allowlist != nil {
+			fmt.Fprintf(os.Stderr,
+				"minesweep: warning: %s: rule %q has %d allowlist(s) that are being ignored.\n",
+				sourceName, gr.ID, max(n, 1))
+		}
 		if len(blocks) > 0 {
 			rule.Allowlist = blocks
 		}

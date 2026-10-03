@@ -45,6 +45,7 @@ const (
 	ReasonWorkerPanic = "a detector panicked; files it had not reached were not scanned"
 	ReasonMaxFiles    = "max files limit reached; only part of the tree was scanned"
 	ReasonUnreadable  = "some paths could not be read; their contents were not scanned"
+	ReasonSizeCeiling = "a reduced max file size meant some files were not read"
 )
 
 type Config struct {
@@ -97,7 +98,10 @@ type Config struct {
 type Engine struct {
 	config    Config
 	detectors []detectors.Detector
-	policies  []policy.PolicyRule
+	// regex is held separately so a per-Run step can add discovered rules
+	// (see loadDiscoveredGitleaks).
+	regex    *detectors.RegexDetector
+	policies []policy.PolicyRule
 	// Semaphore for limiting concurrent file reads
 	readSemaphore chan struct{}
 	// Number of files and bytes examined during the most recent Run
@@ -116,6 +120,9 @@ type Engine struct {
 	// skipStats mirrors the walker's coverage accounting into the report.
 	skipStatsMu sync.Mutex
 	skipStats   *filesystem.WalkStats
+	// discoveredRules guards the one-shot .gitleaks.toml discovery so repeated
+	// internal dispatches within a single Run cannot add the same rules twice.
+	discoveredRules bool
 }
 
 // maxFindings returns the effective finding cap, or 0 for unlimited.
@@ -178,20 +185,31 @@ func (e *Engine) getSkipStats() *filesystem.WalkStats {
 }
 
 func New(cfg Config) (*Engine, error) {
-	if cfg.RulesDir == "" {
-		cfg.RulesDir = "rules"
-	}
+	// RulesDir and PolicyDir deliberately have no implicit default; see the
+	// comments below. A path that is not there is not an error either: the
+	// embedded rules and policy are always the base signal.
 	if cfg.ProfilesDir == "" {
 		cfg.ProfilesDir = "profiles"
 	}
-	if cfg.PolicyDir == "" {
-		cfg.PolicyDir = "policy"
-	}
+	// PolicyDir deliberately has no implicit default. It used to default to
+	// "policy", which main.go then resolved against the working directory, so
+	// merely running `minesweep /some/unrelated/target` from a checkout that
+	// happened to contain ./policy/default.yml silently applied that policy to a
+	// tree it has nothing to do with -- and a policy whose only rule was
+	// `tags: ["*"], action: allow` turned a blocked finding into a clean exit 0.
+	//
+	// A policy now applies only when it is named: --policy, --policy-dir or
+	// --profile. Otherwise the built-in policy is used. That matches how the
+	// rules directory already behaves, and it is the same trust boundary as not
+	// honouring a repo-supplied .gitleaks.toml allowlist.
 
 	regexDetector, err := detectors.NewRegexDetector(cfg.RulesDir)
 	if err != nil {
 		return nil, fmt.Errorf("load regex detector: %w", err)
 	}
+
+	// Gitleaks discovery is deliberately absent from New: it needs the scan root,
+	// which is only known per Run. See loadDiscoveredGitleaks.
 
 	detList := []detectors.Detector{
 		regexDetector,
@@ -223,9 +241,62 @@ func New(cfg Config) (*Engine, error) {
 	return &Engine{
 		config:        cfg,
 		detectors:     detList,
+		regex:         regexDetector,
 		policies:      policies,
 		readSemaphore: make(chan struct{}, maxReads),
 	}, nil
+}
+
+// loadDiscoveredGitleaks adds the rules from a gitleaks config found in the tree
+// being scanned (#20).
+//
+// Nothing read a repo-local .gitleaks.toml. The README says to drop one in your
+// rules directory "or pass -r", which reads as if the ecosystem config were
+// picked up, but only ~/.config/minesweep/rules was automatic. Combined with the
+// fact that a --rules FILE argument was silently dropped (#23), a user migrating
+// from gitleaks got neither their rules nor their allowlist, silently.
+//
+// Only RULES are loaded. An allowlist supplied by the tree under inspection
+// would let that tree suppress its own findings -- the same trust class as the
+// max_file_size_mb hole, and the same reasoning as not picking up an ambient
+// ./policy. A config named explicitly with --rules keeps its allowlist, because
+// then the user is the one making the trust decision.
+//
+// Skipped entirely when --rules was given: an explicit rule source should not be
+// silently augmented from the target.
+func (e *Engine) loadDiscoveredGitleaks(root string) {
+	if e.regex == nil || e.config.RulesDir != "" {
+		return
+	}
+	e.mu.Lock()
+	already := e.discoveredRules
+	e.mu.Unlock()
+	if already {
+		return
+	}
+	path := detectors.FindGitleaksConfig(root)
+	if path == "" {
+		return
+	}
+	e.mu.Lock()
+	e.discoveredRules = true
+	e.mu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "minesweep: warning: %s: %v\n", path, err)
+		return
+	}
+	rules, err := detectors.LoadGitleaksRules(data, filepath.Base(path), false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "minesweep: warning: ignoring %s: %v\n", path, err)
+		return
+	}
+	if len(rules) == 0 {
+		fmt.Fprintf(os.Stderr, "minesweep: warning: %s contains no usable rules\n", path)
+		return
+	}
+	e.regex.AddRules(rules)
+	fmt.Fprintf(os.Stderr, "minesweep: loaded %d rule(s) from %s\n", len(rules), filepath.Base(path))
 }
 
 // resolvePolicies loads policy rules from, in order of precedence:
@@ -450,7 +521,14 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	e.mu.Unlock()
 	e.setSkipStats(nil)
 
+	// Discovered rules are per-scan state, so reset before adding them: a second
+	// Run over a different tree must not inherit the first tree's config.
+	e.mu.Lock()
+	e.discoveredRules = false
+	e.mu.Unlock()
+
 	start := time.Now()
+	e.loadDiscoveredGitleaks(path)
 	rep, err := e.run(path)
 	if rep != nil {
 		// Counters are incremented where the work actually happened, so
@@ -598,9 +676,29 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 	if skipped > 0 {
 		e.filesSkipped.Add(int64(skipped))
 	}
+	e.noteReducedSizeCeiling()
 
 	allFindings := e.detectParallel(files)
 	return e.finalize(root, allFindings)
+}
+
+// noteReducedSizeCeiling marks the scan incomplete when files were dropped for
+// size because the ceiling was set below the built-in default.
+//
+// With the default ceiling the limit is a documented, visible property of the
+// tool and the drops already show up in skipped_by. A ceiling somebody chose is
+// a decision to look at less, and "I looked at less" must not be reported the
+// same way as "I looked and found nothing". This is the second half of the fix
+// for the config-trust hole: max_file_size_mb is now secure:true so a discovered
+// config cannot set it at all, and a ceiling that does come from a trusted flag
+// or config still cannot produce a clean exit.
+func (e *Engine) noteReducedSizeCeiling() {
+	if e.maxFileSize() >= filesystem.DefaultMaxFileSize {
+		return
+	}
+	if st := e.getSkipStats(); st != nil && st.ByReason[filesystem.SkipReasonLarge] > 0 {
+		e.noteIncomplete(ReasonSizeCeiling)
+	}
 }
 
 func (e *Engine) maxFileSize() int64 {
@@ -811,6 +909,7 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 		return nil, fmt.Errorf("walk directory: %w", err)
 	}
 	e.filesSkipped.Store(int64(stats.Total()))
+	e.noteReducedSizeCeiling()
 
 	// Apply max files limit
 	if e.config.MaxFiles > 0 && len(files) > e.config.MaxFiles {

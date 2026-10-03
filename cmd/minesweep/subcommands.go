@@ -283,11 +283,11 @@ func newExplainCommand() *cobra.Command {
 }
 
 func loadAllRules() ([]detectors.Rule, error) {
-	dir := cfg.RulesDir
-	if dir == "" {
-		dir = "rules"
-	}
-	det, err := detectors.NewRegexDetector(dir)
+	// No implicit "./rules": a directory beside the working directory is not a
+	// request, and mergeRules replaces built-in rules by ID, so an ambient
+	// ./rules could weaken a built-in rule just as easily as it could add one.
+	// Empty means the embedded rule set.
+	det, err := detectors.NewRegexDetector(cfg.RulesDir)
 	if err != nil {
 		return nil, fmt.Errorf("load rules: %w", err)
 	}

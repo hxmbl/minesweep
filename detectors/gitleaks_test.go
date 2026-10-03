@@ -58,7 +58,7 @@ func writeTemp(t *testing.T, name, content string) string {
 }
 
 func TestLoadGitleaksRulesTranslation(t *testing.T) {
-	rules, err := LoadGitleaksRules([]byte(sampleGitleaks), "test.toml")
+	rules, err := LoadGitleaksRules([]byte(sampleGitleaks), "test.toml", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ stopwords = ["nomatch"]
 
 [[rules.allowlists]]
 stopwords = ["zzzrealstop"]
-`), "audit.toml")
+`), "audit.toml", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,5 +312,95 @@ stopwords = ["zzzrealstop"]
 	// Case C: full AND satisfaction on table1 -> suppressed.
 	if n := detectAt("src/c.go", "value = secret_nomatch99\n"); n != 0 {
 		t.Error("case C must be suppressed: AND table fully satisfied")
+	}
+}
+
+// #20: a gitleaks config found in the tree being scanned contributes its RULES
+// but not its ALLOWLISTS. An allowlist only ever suppresses findings, so
+// honouring one from the tree under inspection would let that tree silence its
+// own secrets -- the same trust class as the max_file_size_mb hole.
+//
+// (The original note claimed the allowlist was broken when loaded. It is not:
+// LoadGitleaksRules does honour it. The real defect was that nothing discovered
+// the file at all, and that -r <file> was silently ignored, so a migrating user
+// got neither rules nor allowlist without being told.)
+func TestLoadGitleaksRulesDiscoveredIgnoresAllowlists(t *testing.T) {
+	const cfg = `
+title = "untrusted"
+
+[allowlist]
+paths = ['''^secrets/''']
+
+[[rules]]
+id = "demo-rule"
+regex = '''DEMO_[A-Z0-9]{8}'''
+secretGroup = 0
+`
+	rules, err := LoadGitleaksRules([]byte(cfg), ".gitleaks.toml", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected the rule to be loaded, got %d rules", len(rules))
+	}
+	if len(rules[0].Allowlist) != 0 {
+		t.Errorf("discovered config carried %d allowlist block(s); an untrusted allowlist must be dropped",
+			len(rules[0].Allowlist))
+	}
+
+	// The same config, explicitly named by the user, keeps its allowlist.
+	trusted, err := LoadGitleaksRules([]byte(cfg), "mine.toml", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trusted) != 1 || len(trusted[0].Allowlist) == 0 {
+		t.Error("an explicitly named config must keep its allowlist")
+	}
+}
+
+func TestFindGitleaksConfig(t *testing.T) {
+	dir := t.TempDir()
+	if got := FindGitleaksConfig(dir); got != "" {
+		t.Errorf("no config present, got %q", got)
+	}
+	write := func(name string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("title = \"x\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// The search does not walk up: a config belonging to an enclosing project
+	// must not be adopted when scanning one of its subdirectories.
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := FindGitleaksConfig(sub); got != "" {
+		t.Errorf("adopted a config from outside the scan root: %q", got)
+	}
+	// A config inside the scan root is found.
+	inner := filepath.Join(sub, ".gitleaks.toml")
+	if err := os.WriteFile(inner, []byte("title = \"x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := FindGitleaksConfig(sub); got != inner {
+		t.Errorf("FindGitleaksConfig(sub) = %q, want %q", got, inner)
+	}
+	if err := os.Remove(inner); err != nil {
+		t.Fatal(err)
+	}
+
+	want := write(".gitleaks.toml")
+	if got := FindGitleaksConfig(dir); got != want {
+		t.Errorf("FindGitleaksConfig = %q, want %q", got, want)
+	}
+	// A directory named like the config is not a config.
+	d := filepath.Join(dir, "gitleaks.toml")
+	if err := os.Mkdir(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := FindGitleaksConfig(dir); got != want {
+		t.Errorf("a directory named gitleaks.toml was treated as the config: %q", got)
 	}
 }

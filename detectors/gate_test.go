@@ -160,7 +160,7 @@ func TestFoldedHaystackRescuesFoldOrbitHomoglyphs(t *testing.T) {
 // accepts must also satisfy the gate that rule derived. The homoglyph cases are
 // the ones that previously produced silent false negatives.
 func TestEmbeddedRulesGatesNeverRejectMatchingInput(t *testing.T) {
-	rd, err := NewRegexDetector("/nonexistent-rules-dir-for-test")
+	rd, err := NewRegexDetector("") // embedded rules only
 	if err != nil {
 		t.Fatalf("load rules: %v", err)
 	}
