@@ -480,6 +480,25 @@ func (e *Engine) run(path string) (*findings.RiskReport, error) {
 		return e.runSingleFile(path)
 	}
 
+	// filepath.WalkDir does not follow a symlinked root: it treats the link as
+	// a single non-directory entry, which is then marked unsafe and read as
+	// empty. Scanning a symlinked project directory therefore found nothing,
+	// scored 0/100 and exited clean. Resolve the root first so that stat, the
+	// walk, the symlink guard and relativisation all agree on one path.
+	//
+	// --diff/--staged/--history already resolved symlinks on their own, which is
+	// why the three modes disagreed about the same tree.
+	if resolved, rerr := filepath.EvalSymlinks(path); rerr == nil && resolved != path {
+		path = resolved
+		info, err = os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("stat path: %w", err)
+		}
+		if !info.IsDir() {
+			return e.runSingleFile(path)
+		}
+	}
+
 	if e.config.DiffMode || e.config.StagedOnly {
 		return e.runDiff(path)
 	}

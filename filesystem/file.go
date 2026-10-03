@@ -63,7 +63,15 @@ type File struct {
 // ErrTooLarge is returned when content exceeds a File's MaxContentBytes.
 var ErrTooLarge = errors.New("content exceeds the configured size ceiling")
 
-// isSafePath checks if a path is safe (doesn't traverse outside root)
+// isSafePath reports whether path stays inside root.
+//
+// Both sides are fully resolved first. Comparing an unresolved candidate against
+// an unresolved root, or one against the other, is the comparison that fails:
+// git rev-parse --show-toplevel and $PWD routinely disagree about whether the
+// same directory is /tmp/x or /private/tmp/x, so a lexical comparison can call an
+// in-root path outside or an outside path inside. Resolution is best-effort:
+// if a side cannot be resolved it is used as-is, because a path that does not
+// exist yet still has to be classified.
 func isSafePath(path, root string) bool {
 	// Relative paths are interpreted relative to the scan root.
 	if !filepath.IsAbs(path) {
@@ -77,6 +85,12 @@ func isSafePath(path, root string) bool {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
+		absRoot = resolved
 	}
 
 	rel, err := filepath.Rel(absRoot, absPath)
@@ -144,9 +158,35 @@ func newFileFromInfo(path string, mode os.FileMode, size int64, root string) (*F
 		// Clean the path (remove . and ..)
 		absTarget = filepath.Clean(absTarget)
 
-		// If root is specified, check if the symlink target is safe
+		// Resolve the WHOLE chain, not just the first hop. The kernel follows
+		// every link, so validating the lexical join of the first hop is not the
+		// same question as what will actually be opened: with
+		//
+		//     root/b.env -> ../outside/secret.env
+		//     root/a.env -> b.env
+		//
+		// the lexical check on a.env sees "root/b.env", which is inside the
+		// root, and approves it -- while the kernel goes on to read
+		// outside/secret.env. That let a hostile checkout point the scanner at
+		// ~/.aws/credentials and get rule hits, line and column, and contents
+		// back under --dangerously-show-secrets.
+		resolved, err := filepath.EvalSymlinks(absTarget)
+		if err != nil {
+			// Unresolvable: either the target does not exist, or the chain never
+			// terminates. A loop reports ELOOP rather than ENOENT, so the old
+			// os.IsNotExist test left a loop marked as a perfectly good link with
+			// no marker at all. Both cases are unreadable for the same reason and
+			// are treated the same way here rather than branching on a
+			// platform-specific errno.
+			f.symlinkState = symlinkBroken
+			f.SymlinkTarget = absTarget + " (broken)"
+			return f, nil
+		}
+
+		// If root is specified, check the resolved target against the resolved
+		// root, so that both sides are compared in the same coordinate system.
 		if root != "" {
-			if !isSafePath(absTarget, root) {
+			if !isSafePath(resolved, root) {
 				// Symlink points outside root - mark as unsafe
 				f.symlinkState = symlinkUnsafe
 				f.SymlinkTarget = "(unsafe: outside scan root)"
@@ -154,23 +194,11 @@ func newFileFromInfo(path string, mode os.FileMode, size int64, root string) (*F
 			}
 		}
 
-		// Try to get absolute path
-		finalTarget, err := filepath.Abs(absTarget)
-		if err != nil {
-			f.SymlinkTarget = absTarget
-		} else {
-			f.SymlinkTarget = finalTarget
-		}
+		f.SymlinkTarget = resolved
 
-		// Check if target exists
-		if _, err := os.Stat(f.SymlinkTarget); os.IsNotExist(err) {
-			f.symlinkState = symlinkBroken
-			f.SymlinkTarget = f.SymlinkTarget + " (broken)"
-			return f, nil
-		}
 		// Stat the resolved target to get the real file size; Lstat on
 		// the symlink itself returns the length of the target path string.
-		if targetInfo, err := os.Stat(f.SymlinkTarget); err == nil {
+		if targetInfo, err := os.Stat(resolved); err == nil {
 			f.Size = targetInfo.Size()
 		}
 	}
