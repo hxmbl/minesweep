@@ -346,7 +346,17 @@ func isWithin(path, dir string) bool {
 	if err != nil {
 		return false
 	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+	return !escapesRoot(rel)
+}
+
+// escapesRoot reports whether a root-relative path leaves the root.
+//
+// The test has to be "is the first path segment ..", not "does the string start
+// with ..". A real file named "..env" starts with two dots but is inside the
+// root; treating it as outside made a symlink to it unsafe, and in
+// --diff/--staged/--history dropped it as a VCS-internal path.
+func escapesRoot(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func runGitTopLevel(dir string) (string, error) {
@@ -488,7 +498,22 @@ const (
 	SkipReasonLarge   SkipReason = "size"
 	SkipReasonSkipDir SkipReason = "skip-dir"
 	SkipReasonVCS     SkipReason = "vcs-internals"
+	// SkipReasonUnreadable covers a path the scanner could not open or read.
+	// SkipReasonSymlink covers a symlink whose target could not be inspected
+	// because it was broken, unreadable, or resolved outside the scan root.
+	//
+	// Both are coverage gaps rather than configuration decisions: a file that
+	// was not inspected has to be visible in the report, or a clean exit means
+	// "I did not look" instead of "I looked and found nothing".
+	SkipReasonUnreadable SkipReason = "unreadable"
+	SkipReasonSymlink    SkipReason = "symlink"
 )
+
+// errUnreadable is the sentinel handed to OnError for a coverage gap the walker
+// detected structurally (an unopenable directory, a symlink that resolves
+// outside the scan root) rather than from a syscall failure. The path carries
+// the detail; the class is what the report needs.
+var errUnreadable = errors.New("path could not be inspected")
 
 // SkipReasons is the fixed reporting order, most- to least-common by default.
 var SkipReasons = []SkipReason{
@@ -497,6 +522,8 @@ var SkipReasons = []SkipReason{
 	SkipReasonIgnore,
 	SkipReasonTest,
 	SkipReasonLarge,
+	SkipReasonUnreadable,
+	SkipReasonSymlink,
 	SkipReasonVCS,
 }
 
@@ -675,25 +702,51 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 	}
 
 	var files []*File
+	// WalkDir surfaces an unopenable directory twice: once as a successful
+	// directory entry it cannot descend into, and once as an error for the same
+	// path. Without this guard the path, its skip reason and its failure count
+	// were each recorded twice.
+	reported := make(map[string]struct{})
+	noteGap := func(reason SkipReason, path string) {
+		if _, dup := reported[path]; dup {
+			return
+		}
+		reported[path] = struct{}{}
+		if opts.Stats != nil {
+			opts.Stats.Note(reason, path)
+		}
+		if opts.OnError != nil {
+			opts.OnError(path, errUnreadable)
+		}
+	}
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			if opts.OnError != nil {
-				opts.OnError(path, err)
-			}
+			noteGap(SkipReasonUnreadable, path)
 			return nil
 		}
 		if d.IsDir() {
 			// Prune only VCS internals; everything else is descended so
 			// its files are counted as skipped rather than vanishing.
 			if name := d.Name(); name == ".git" || name == ".hg" || name == ".svn" {
+				// SkipDir ends the walk of this subtree without an error, so
+				// nothing else would ever record it. SkipReasonVCS was
+				// therefore declared and printable but never incremented.
+				//
+				// Recorded relative to the root: this string reaches the report
+				// and would otherwise publish an absolute local path.
+				if opts.Stats != nil {
+					rel, rerr := filepath.Rel(root, path)
+					if rerr != nil {
+						rel = path
+					}
+					opts.Stats.Note(SkipReasonVCS, rel)
+				}
 				return filepath.SkipDir
 			}
 			// Attempt to open the directory; if we cannot, this is a genuine
 			// coverage gap, not a config error.
 			if _, err := os.ReadDir(path); err != nil {
-				if opts.OnError != nil {
-					opts.OnError(path, err)
-				}
+				noteGap(SkipReasonUnreadable, path)
 				return nil // Skip this subtree entirely
 			}
 			// A nested ignore file scopes to its own directory, so record
@@ -755,10 +808,27 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 		// rather than silently admitting an unchecked file.
 		f, err := newFileFromDirEntry(path, d, root)
 		if err != nil {
-			if opts.OnError != nil {
-				opts.OnError(path, err)
-			}
+			noteGap(SkipReasonUnreadable, path)
 			return nil
+		}
+
+		// A symlink whose target could not be inspected is a coverage gap. It
+		// is still admitted below so the symlink-detected notice is reported,
+		// but it must stop being counted as if it had been scanned, and it must
+		// not let the scan report clean.
+		if f.IsSymlink && f.symlinkState != symlinkOK {
+			if opts.Stats != nil {
+				opts.Stats.SkippedSymlink++
+				opts.Stats.Note(SkipReasonSymlink, rel)
+			}
+			// A broken link has nothing to inspect, so it is only counted. An
+			// unreadable or root-escaping one hides content the scan was asked
+			// for, and that is a real gap.
+			if f.symlinkState != symlinkBroken {
+				if opts.OnError != nil {
+					opts.OnError(path, errUnreadable)
+				}
+			}
 		}
 
 		if f.Size > fs.maxSize {
@@ -950,7 +1020,7 @@ func (sc *SkipChecker) classify(absPath string) (SkipReason, bool) {
 		}
 	}
 	rel, err := filepath.Rel(sc.root, absPath)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == "." || escapesRoot(rel) {
 		return SkipReasonVCS, true
 	}
 	return sc.fs.reason(filepath.ToSlash(rel))
