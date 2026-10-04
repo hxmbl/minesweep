@@ -43,14 +43,22 @@ type File struct {
 	// false negatives is the one failure this tool must not have.
 	MaxContentBytes int64
 	// FindingBudget caps how many findings detectors may emit for this
-	// file. Zero means unlimited. The engine sets it from the global
-	// remaining budget, which is what keeps one pathological file from
-	// producing hundreds of thousands of findings before the global cap is
-	// ever consulted. It lives on File because File is the per-scan unit
-	// every detector already receives, so the budget is race-free without
-	// mutating shared detector state.
+	// file. The engine sets it from the global remaining budget, which is what
+	// keeps one pathological file from producing hundreds of thousands of
+	// findings before the global cap is ever consulted. It lives on File
+	// because File is the per-scan unit every detector already receives, so the
+	// budget is race-free without mutating shared detector state.
+	//
+	// The budget is live only once armed. A zero-valued File has no budget and
+	// emits without limit, so a struct literal stays usable; once armed, zero
+	// means zero findings remain and must deny. Deriving "unlimited" from the
+	// numeric value instead (the earlier `FindingBudget <= 0`) meant the
+	// decrement landed on the value that read as unlimited: ClaimFinding never
+	// denied, FindingBudgetHit could never become true, and the whole
+	// mechanism was dead code.
 	FindingBudget    int
 	FindingBudgetHit bool
+	budgetArmed      bool
 	// Lazy loading support
 	contentLoaded bool
 	contentErr    error
@@ -69,6 +77,9 @@ type File struct {
 
 // ErrTooLarge is returned when content exceeds a File's MaxContentBytes.
 var ErrTooLarge = errors.New("content exceeds the configured size ceiling")
+
+// FindingBudgetUnlimited is the FindingBudget value meaning "no limit".
+const FindingBudgetUnlimited = -1
 
 // isSafePath reports whether path resolves inside root.
 //
@@ -384,8 +395,8 @@ func readFileBounded(path string, max int64) ([]byte, error) {
 // whether a detector may emit another finding. Once the budget is spent it
 // returns false forever, so a detector can simply stop.
 func (f *File) ClaimFinding() bool {
-	if f.FindingBudget <= 0 {
-		return true // unlimited
+	if !f.budgetArmed {
+		return true
 	}
 	if f.FindingBudgetHit || f.FindingBudget <= 0 {
 		f.FindingBudgetHit = true
@@ -395,10 +406,36 @@ func (f *File) ClaimFinding() bool {
 	return true
 }
 
-// SetFindingBudget arms (or disarms) the budget for this file.
+// SetFindingBudget arms the budget for this file. A negative value, including
+// FindingBudgetUnlimited, disarms it.
 func (f *File) SetFindingBudget(n int) {
+	if n < 0 {
+		f.FindingBudget = 0
+		f.FindingBudgetHit = false
+		f.budgetArmed = false
+		return
+	}
 	f.FindingBudget = n
 	f.FindingBudgetHit = false
+	f.budgetArmed = true
+}
+
+// InheritFindingBudget copies whatever budget src currently has onto f, so a
+// synthetic file standing in for another (the base64 detector scans a decoded
+// payload in place of the real file) cannot outrun the real file's allowance.
+func (f *File) InheritFindingBudget(src *File) {
+	f.FindingBudget = src.FindingBudget
+	f.FindingBudgetHit = false
+	f.budgetArmed = src.budgetArmed
+}
+
+// RemainingFindingBudget reports how much of the file's finding budget is
+// unspent. An unarmed budget reports 0.
+func (f *File) RemainingFindingBudget() int {
+	if !f.budgetArmed {
+		return 0
+	}
+	return f.FindingBudget
 }
 
 // Release drops the cached content and every view derived from it, so a file

@@ -111,6 +111,10 @@ type Engine struct {
 	// inlineSuppressed counts findings removed by an inline suppression
 	// comment in the scanned content.
 	inlineSuppressed atomic.Int64
+	// findingsDiscarded counts findings detectors dropped because a file's
+	// per-file budget was exhausted, plus findings dropped because the global
+	// budget was already spent when a file started.
+	findingsDiscarded atomic.Int64
 	// incompleteReasons records why a scan did not finish. Guarded by mu
 	// because workers and the memory monitor both append.
 	mu                sync.Mutex
@@ -129,6 +133,54 @@ func (e *Engine) maxFindings() int {
 		return DefaultMaxFindings
 	default:
 		return e.config.MaxFindings
+	}
+}
+
+// fileBudgetFor returns how many findings a single file may contribute when the
+// scan covers nFiles files.
+//
+// The share is a deterministic function of the cap and the file count, and is
+// uniform across files.
+//
+// This replaced a shared atomic pool that workers raced to draw from. A pool is
+// attractive — it never under-fills the cap — but "which files were admitted
+// before the pool ran dry" is a function of goroutine scheduling, so every
+// counter derived from it varied between identical runs of the same tree: the
+// retained finding set, the dropped count, and the number of files skipped.
+// With a pool, some files were also skipped wholesale, which is a coverage gap
+// no report described.
+//
+// The trade-off is explicit and deliberate: on a tree with many files each file
+// is capped at cap/nFiles, so a wide tree can under-fill the cap and a single
+// very noisy file is truncated. Total materialised findings stay bounded by the
+// cap, no file is ever skipped, and every reported number is reproducible.
+// `--max-findings 0` removes the cap entirely.
+func (e *Engine) fileBudgetFor(nFiles int) int {
+	limit := e.maxFindings()
+	if limit <= 0 {
+		return filesystem.FindingBudgetUnlimited
+	}
+	if nFiles <= 1 {
+		return limit
+	}
+	share := (limit + nFiles - 1) / nFiles // ceiling division
+	if share < 1 {
+		share = 1
+	}
+	return share
+}
+
+// noteBudgetDiscard records findings a detector had to drop because the file's
+// budget was spent. Without this the report understated how much was lost: the
+// per-file discard happened before trimToConfidenceCap ever saw the findings,
+// so it was counted nowhere.
+func (e *Engine) noteBudgetDiscard(file *filesystem.File, before int) {
+	if !file.FindingBudgetHit {
+		return
+	}
+	e.noteIncomplete(ReasonFileBudget)
+	if dropped := before - file.RemainingFindingBudget(); dropped > 0 {
+		e.findingsDiscarded.Add(int64(dropped))
 	}
 }
 
@@ -318,6 +370,12 @@ func (e *Engine) finalize(root string, allFindings []findings.Finding) (*finding
 		return nil, err
 	}
 
+	// Establish a total order BEFORE trimming. trimToConfidenceCap breaks ties
+	// on input order, and the input order was the order in which workers
+	// finished, which is not a function of the input: three identical runs of
+	// one tree over the cap produced three different result sets.
+	sortFindings(filtered)
+
 	// The per-file budget can overshoot the global cap by up to one file's
 	// worth per worker, so trim here too. When a scan is truncated, the
 	// highest-confidence findings are the ones worth keeping.
@@ -336,6 +394,9 @@ func (e *Engine) finalize(root string, allFindings []findings.Finding) (*finding
 // trimToConfidenceCap keeps the cap highest-confidence findings, preserving
 // input order among equal confidences so the result stays deterministic.
 // Returns the kept findings and how many were dropped.
+//
+// Callers must sortFindings first: the tie-break here is positional, so the
+// caller's order is part of the result.
 func trimToConfidenceCap(fs []findings.Finding, cap int) ([]findings.Finding, int) {
 	if cap <= 0 || len(fs) <= cap {
 		return fs, 0
@@ -351,13 +412,13 @@ func trimToConfidenceCap(fs []findings.Finding, cap int) ([]findings.Finding, in
 		}
 		return ia < ib
 	})
-	keep := make(map[int]struct{}, cap)
+	keep := make([]bool, len(fs))
 	for _, i := range order[:cap] {
-		keep[i] = struct{}{}
+		keep[i] = true
 	}
 	out := make([]findings.Finding, 0, cap)
 	for i, f := range fs {
-		if _, ok := keep[i]; ok {
+		if keep[i] {
 			out = append(out, f)
 		}
 	}
@@ -383,8 +444,15 @@ func dedupFindings(fs []findings.Finding) []findings.Finding {
 
 // sortFindings orders findings deterministically so identical scans produce
 // byte-identical reports regardless of worker scheduling.
+//
+// This must be a total order: two findings that agree on every field compared
+// here but differ elsewhere would still be ordered arbitrarily, and that
+// arbitrariness is what leaks worker scheduling into the output. Confidence is
+// not part of the key because it is the primary sort key of
+// trimToConfidenceCap, which runs after this and would otherwise have to
+// re-establish the order.
 func sortFindings(fs []findings.Finding) {
-	sort.SliceStable(fs, func(i, j int) bool {
+	sort.Slice(fs, func(i, j int) bool {
 		a, b := fs[i], fs[j]
 		if a.File != b.File {
 			return a.File < b.File
@@ -398,7 +466,33 @@ func sortFindings(fs []findings.Finding) {
 		if a.RuleID != b.RuleID {
 			return a.RuleID < b.RuleID
 		}
-		return a.Value < b.Value
+		if a.Value != b.Value {
+			return a.Value < b.Value
+		}
+		if a.Confidence != b.Confidence {
+			return a.Confidence > b.Confidence
+		}
+		if a.Type != b.Type {
+			return a.Type < b.Type
+		}
+		if len(a.Tags) != len(b.Tags) {
+			return len(a.Tags) < len(b.Tags)
+		}
+		for k := range a.Tags {
+			if a.Tags[k] != b.Tags[k] {
+				return a.Tags[k] < b.Tags[k]
+			}
+		}
+		if a.Reason != b.Reason {
+			return a.Reason < b.Reason
+		}
+		if a.Severity != b.Severity {
+			return a.Severity > b.Severity
+		}
+		if a.Context != b.Context {
+			return a.Context < b.Context
+		}
+		return a.SourceLine < b.SourceLine
 	})
 }
 
@@ -447,6 +541,7 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	e.filesFailed.Store(0)
 	e.findingsKept.Store(0)
 	e.findingsDropped.Store(0)
+	e.findingsDiscarded.Store(0)
 	e.inlineSuppressed.Store(0)
 	e.mu.Lock()
 	e.incompleteReasons = nil
@@ -464,6 +559,7 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 		rep.FilesFailed = int(e.filesFailed.Load())
 		rep.DurationMs = time.Since(start).Milliseconds()
 		rep.FindingsDropped = int(e.findingsDropped.Load())
+		rep.FindingsDiscarded = int(e.findingsDiscarded.Load())
 		rep.FindingsSuppressed = int(e.inlineSuppressed.Load())
 		rep.IncompleteReasons = e.incomplete()
 		rep.Incomplete = len(rep.IncompleteReasons) > 0
@@ -643,7 +739,7 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 	}
 	file.MaxContentBytes = e.maxFileSize()
 
-	allFindings := e.detect(file)
+	allFindings := e.detect(file, e.fileBudgetFor(1))
 	return e.finalize(dir, allFindings)
 }
 
@@ -846,12 +942,14 @@ func relativizeFindings(root string, fs []findings.Finding) []findings.Finding {
 // detect runs every detector over one file, then filters, then attaches
 // evidence to the survivors.
 //
+// budget is how many findings this file may contribute; see fileBudgetFor.
+//
 // The order matters for memory. Content is loaded here and nowhere else, the
 // file is released before returning, and the surrounding source lines — the
 // largest field on a finding — are built only for findings that survive
 // filtering. Doing evidence first and filtering afterwards meant allocating
 // context blocks for the ~99% of findings that were about to be discarded.
-func (e *Engine) detect(file *filesystem.File) []findings.Finding {
+func (e *Engine) detect(file *filesystem.File, budget int) []findings.Finding {
 	if file == nil {
 		return nil
 	}
@@ -874,16 +972,8 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	e.filesScanned.Add(1)
 	e.bytesScanned.Add(int64(len(content)))
 
-	// Bound this file's contribution from what is actually left of the global
-	// budget, so a single pathological input cannot outrun the cap.
-	if cap := e.maxFindings(); cap > 0 {
-		room := cap - int(e.findingsKept.Load())
-		if room <= 0 {
-			e.noteIncomplete(ReasonFindingCap)
-			return nil
-		}
-		file.SetFindingBudget(room)
-	}
+	file.SetFindingBudget(budget)
+	defer e.noteBudgetDiscard(file, budget)
 
 	if e.readSemaphore != nil {
 		e.readSemaphore <- struct{}{}
@@ -893,9 +983,6 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	var all []findings.Finding
 	for _, d := range e.detectors {
 		all = append(all, d.Detect(file)...)
-	}
-	if file.FindingBudgetHit {
-		e.noteIncomplete(ReasonFileBudget)
 	}
 
 	minSev := findings.Severity(0)
@@ -1029,6 +1116,10 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 
 	totalFiles := int64(len(files))
 
+	// One deterministic allowance for every file, so the run is reproducible
+	// and no file is skipped outright. See fileBudgetFor.
+	budget := e.fileBudgetFor(len(files))
+
 	// Cancelling ctx stops processing of remaining files without closing fileCh,
 	// which is owned by the producer below (closing it from a worker would risk
 	// a send-on-closed-channel panic).
@@ -1100,7 +1191,7 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 							e.filesFailed.Add(1)
 						}
 					}()
-					fResults := e.detect(file)
+					fResults := e.detect(file, budget)
 					findingsFound.Add(int64(len(fResults)))
 					filesProcessed.Add(1)
 					resultCh <- result{findings: fResults}

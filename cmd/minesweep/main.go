@@ -593,6 +593,9 @@ func scanAndReport(scanPath string) (int, error) {
 		if reportData.FindingsDropped > 0 {
 			fmt.Fprintf(os.Stderr, "  - %s\n", fmt.Sprintf("%d findings dropped by the --max-findings cap", reportData.FindingsDropped))
 		}
+		if reportData.FindingsDiscarded > 0 {
+			fmt.Fprintf(os.Stderr, "  - %s\n", fmt.Sprintf("at least %d findings dropped by the per-file finding budget (further matches went uncounted)", reportData.FindingsDiscarded))
+		}
 	}
 
 	if outputJSON {

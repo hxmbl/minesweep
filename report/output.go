@@ -123,6 +123,14 @@ func writeIncomplete(tw *textWriter, p palette, report *findings.RiskReport) {
 		tw.writeln(p.yellow(fmt.Sprintf("  - %d findings dropped by the --max-findings cap",
 			report.FindingsDropped)))
 	}
+	if report.FindingsDiscarded > 0 {
+		// A detector that stops at its budget stops *before* materialising the
+		// matches it has not looked at yet, so this is a floor, not a total.
+		// Saying so is the point: the previous figure was presented as exact
+		// while understating the loss several-fold.
+		tw.writeln(p.yellow(fmt.Sprintf("  - at least %d findings dropped by the per-file finding budget "+
+			"(detectors stop at their budget, so further matches went uncounted)", report.FindingsDiscarded)))
+	}
 }
 
 func writeCounts(tw *textWriter, p palette, groups []severityGroup) {

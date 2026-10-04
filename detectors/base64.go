@@ -197,7 +197,7 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 			}
 			// Hand the inner scan whatever budget is left, so a decoded
 			// payload cannot outrun the cap either.
-			decodedFile.SetFindingBudget(file.FindingBudget)
+			decodedFile.InheritFindingBudget(file)
 			decodedFindings := d.regexDetector.Detect(decodedFile)
 			// Adjust the findings to indicate they were found in base64.
 			// The fact that they were decoded is carried by Type and Reason;

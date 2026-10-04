@@ -24,8 +24,20 @@ type RiskReport struct {
 	// in every output format and forces a distinct exit code.
 	Incomplete        bool     `yaml:"incomplete,omitempty" json:"incomplete,omitempty"`
 	IncompleteReasons []string `yaml:"incomplete_reasons,omitempty" json:"incomplete_reasons,omitempty"`
-	// FindingsDropped counts findings removed by the finding cap.
+	// FindingsDropped counts findings removed by the global finding cap during
+	// the final trim.
 	FindingsDropped int `yaml:"findings_dropped,omitempty" json:"findings_dropped,omitempty"`
+	// FindingsDiscarded counts findings that were materialised and then
+	// dropped because a file's per-file budget was exhausted. These are lost
+	// before the global trim sees them, so they need their own figure:
+	// reporting only FindingsDropped understated the loss several-fold.
+	//
+	// It is a lower bound, not a total. A detector that stops at its budget
+	// stops before materialising the matches it has not looked at, so the true
+	// figure is at least this. The scan is flagged Incomplete regardless,
+	// which is the guarantee; this number is only an indication of scale.
+	FindingsDiscarded int `yaml:"findings_discarded,omitempty" json:"findings_discarded,omitempty"`
+	// global finding budget was already spent when they were reached.
 	// FindingsSuppressed counts findings removed by an inline suppression
 	// comment in the scanned content, or by the suppression file. A finding
 	// that was detected and then deliberately not reported is a coverage
