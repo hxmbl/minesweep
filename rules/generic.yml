@@ -33,8 +33,13 @@ rules:
     severity: medium
     tags: [credentials, password]
     patterns:
-      # Match password assignments with actual secret values (not placeholders)
-      - regex: (?i)(password|passwd|pwd)[ \t]*[:=][ \t]*['"]?([A-Za-z0-9@#$%^&+=]{8,})['"]?
+      # Match password assignments with actual secret values (not placeholders).
+      # The capture class is "any non-space, non-quote" rather than a curated
+      # punctuation list: a curated list stops at the first character it forgot
+      # (`!`), which both truncated the recorded value — and therefore the
+      # baseline hash — and left the remainder of the password in cleartext in
+      # the evidence line. require_value still discards expressions.
+      - regex: (?i)(password|passwd|pwd)[ \t]*[:=][ \t]*['"]?([^\s"']{8,})['"]?
         confidence: 0.70
         capture_group: 2
         require_value: true

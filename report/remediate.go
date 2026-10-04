@@ -4,6 +4,11 @@ import (
 	"minesweep/findings"
 )
 
+// The keys and values here are remediation prose, not credentials. G101's
+// pattern match on "secret"/"key" in string literals is unavoidable for a file
+// whose job is to talk about credentials.
+//
+//nolint:gosec // not a credential
 var ruleRemediations = map[string]string{
 	"aws-access-key-id":          "Rotate this key in the AWS IAM console, remove it from the file, and purge it from git history (e.g. git filter-repo). Consider switching to short-lived IAM roles.",
 	"aws-secret-key":             "Rotate this secret key in the AWS IAM console, then remove it from the file and purge git history. Store it in a secrets manager instead.",

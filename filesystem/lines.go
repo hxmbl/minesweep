@@ -3,6 +3,7 @@ package filesystem
 import (
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // lineIndex maps byte offsets in a file to 1-based line/column positions.
@@ -64,6 +65,19 @@ func (li *LineIndex) LineText(idx int) string {
 // context renders the classic "> " highlighted context block around a
 // 0-based center line, matching the previous extractContext output format.
 func (li *LineIndex) Context(center, radius int) string {
+	return li.ContextCapped(center, radius, 0)
+}
+
+// ContextCapped is Context with each rendered line truncated to maxLineBytes
+// (0 = unlimited).
+//
+// The ceiling exists because "a line" is not bounded by anything: a SQLite
+// database, a minified bundle or a single-line JSON blob has no newline for
+// megabytes, and every finding on that line then carried the whole thing in
+// its Context field — a 30 MB input produced a 60 MB report. Truncation is
+// applied per line after TrimSpace so the visible head of the line is what
+// survives, and it is applied on a rune boundary.
+func (li *LineIndex) ContextCapped(center, radius, maxLineBytes int) string {
 	start := center - radius
 	if start < 0 {
 		start = 0
@@ -79,8 +93,22 @@ func (li *LineIndex) Context(center, radius int) string {
 			prefix = "> "
 		}
 		sb.WriteString(prefix)
-		sb.WriteString(strings.TrimSpace(li.LineText(i)))
+		sb.WriteString(CapLine(strings.TrimSpace(li.LineText(i)), maxLineBytes))
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// CapLine truncates s to at most maxLineBytes bytes (0 = unlimited), never
+// splitting a UTF-8 rune. A cap that landed mid-rune produced replacement
+// characters in the middle of a security report.
+func CapLine(s string, maxLineBytes int) string {
+	if maxLineBytes <= 0 || len(s) <= maxLineBytes {
+		return s
+	}
+	cut := maxLineBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

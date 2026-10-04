@@ -297,8 +297,18 @@ func TestNewFileUTF16(t *testing.T) {
 	if err := f.LoadContent(); err != nil {
 		t.Fatalf("LoadContent: %v", err)
 	}
-	if !f.IsBinary {
-		t.Fatal("UTF-16 file should be detected as binary (null bytes)")
+	// UTF-16 text is text. Classifying it as binary made every content
+	// detector skip the file, so a UTF-16 .env holding a live credential
+	// reported only an info-level "Binary File" and exited 0.
+	if f.IsBinary {
+		t.Fatal("UTF-16 text must not be classified as binary")
+	}
+	data, err := f.GetContent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("UTF-16 content was not transcoded: %q", string(data))
 	}
 }
 
@@ -443,7 +453,12 @@ func TestWalkMaxFileSize(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("expected 1 file (small.txt only), got %d", len(files))
 	}
-	if files[0].Path != filepath.Join(dir, "small.txt") {
+	// WalkWithOptions resolves the root, so reported paths are canonical.
+	wantDir, err := ResolveRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files[0].Path != filepath.Join(wantDir, "small.txt") {
 		t.Fatalf("expected small.txt, got %s", files[0].Path)
 	}
 }
@@ -1054,7 +1069,12 @@ func TestWalkAncestorNamedLikeSkipDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0].Path != filepath.Join(root, "real.txt") {
+	// WalkWithOptions resolves the root, so reported paths are canonical.
+	wantRoot, err := ResolveRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Path != filepath.Join(wantRoot, "real.txt") {
 		for _, f := range files {
 			t.Logf("kept: %s", f.Path)
 		}

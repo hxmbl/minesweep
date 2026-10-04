@@ -44,6 +44,9 @@ const (
 	ReasonFileBudget  = "a file produced more findings than its budget allowed"
 	ReasonWorkerPanic = "a detector panicked; files it had not reached were not scanned"
 	ReasonMaxFiles    = "max files limit reached; only part of the tree was scanned"
+	// ReasonUnreadable records paths the walk could not open. A path that could
+	// not be read was not inspected, so the scan does not know what it holds.
+	ReasonUnreadable = "one or more paths could not be read; their contents were not inspected"
 )
 
 type Config struct {
@@ -108,10 +111,32 @@ type Engine struct {
 	// derived from what is actually left, rather than a guess up front.
 	findingsKept    atomic.Int64
 	findingsDropped atomic.Int64
+	// inlineSuppressed counts findings removed by an inline suppression
+	// comment in the scanned content.
+	inlineSuppressed atomic.Int64
+	// suppressionsApplied counts findings removed by the suppression file.
+	suppressionsApplied atomic.Int64
+	// baseline/baselineNew hold the loaded baseline and the findings that were
+	// new against it, so the save can happen after the report is final.
+	// suppressErr defers a suppression-file read failure to finalize's caller
+	// rather than reporting findings the user believes they silenced. Both are
+	// guarded by mu: Run resets them, and an Engine may be reused concurrently.
+	baseline    *findings.Baseline
+	baselineNew []findings.Finding
+	suppressErr error
+	// findingsDiscarded counts findings detectors dropped because a file's
+	// per-file budget was exhausted, plus findings dropped because the global
+	// budget was already spent when a file started.
+	findingsDiscarded atomic.Int64
 	// incompleteReasons records why a scan did not finish. Guarded by mu
 	// because workers and the memory monitor both append.
 	mu                sync.Mutex
 	incompleteReasons []string
+	// unreadablePaths is a bounded sample of paths the walk could not open,
+	// and unreadableSeen de-duplicates the walker's double report of an
+	// unreadable directory.
+	unreadablePaths []string
+	unreadableSeen  map[string]bool
 	// skipStats mirrors the walker's coverage accounting into the report.
 	skipStatsMu sync.Mutex
 	skipStats   *filesystem.WalkStats
@@ -126,6 +151,54 @@ func (e *Engine) maxFindings() int {
 		return DefaultMaxFindings
 	default:
 		return e.config.MaxFindings
+	}
+}
+
+// fileBudgetFor returns how many findings a single file may contribute when the
+// scan covers nFiles files.
+//
+// The share is a deterministic function of the cap and the file count, and is
+// uniform across files.
+//
+// This replaced a shared atomic pool that workers raced to draw from. A pool is
+// attractive — it never under-fills the cap — but "which files were admitted
+// before the pool ran dry" is a function of goroutine scheduling, so every
+// counter derived from it varied between identical runs of the same tree: the
+// retained finding set, the dropped count, and the number of files skipped.
+// With a pool, some files were also skipped wholesale, which is a coverage gap
+// no report described.
+//
+// The trade-off is explicit and deliberate: on a tree with many files each file
+// is capped at cap/nFiles, so a wide tree can under-fill the cap and a single
+// very noisy file is truncated. Total materialised findings stay bounded by the
+// cap, no file is ever skipped, and every reported number is reproducible.
+// `--max-findings 0` removes the cap entirely.
+func (e *Engine) fileBudgetFor(nFiles int) int {
+	limit := e.maxFindings()
+	if limit <= 0 {
+		return filesystem.FindingBudgetUnlimited
+	}
+	if nFiles <= 1 {
+		return limit
+	}
+	share := (limit + nFiles - 1) / nFiles // ceiling division
+	if share < 1 {
+		share = 1
+	}
+	return share
+}
+
+// noteBudgetDiscard records findings a detector had to drop because the file's
+// budget was spent. Without this the report understated how much was lost: the
+// per-file discard happened before trimToConfidenceCap ever saw the findings,
+// so it was counted nowhere.
+func (e *Engine) noteBudgetDiscard(file *filesystem.File, before int) {
+	if !file.FindingBudgetHit {
+		return
+	}
+	e.noteIncomplete(ReasonFileBudget)
+	if dropped := before - file.RemainingFindingBudget(); dropped > 0 {
+		e.findingsDiscarded.Add(int64(dropped))
 	}
 }
 
@@ -227,6 +300,88 @@ func New(cfg Config) (*Engine, error) {
 	}, nil
 }
 
+// onWalkError records a path the walk could not inspect.
+//
+// WalkOption.OnError was declared and invoked at three sites in the walker but
+// no caller ever set it, so an unreadable directory vanished with no
+// files_skipped, no files_failed, no coverage line and no Incomplete flag: a
+// tree containing `chmod 000 secrets/` reported "No secrets or sensitive data
+// detected" and exited 0. The walker's own contract — "a file that was not
+// inspected is a coverage gap, and a security scanner should make 'clean' hard
+// to reach by accident" — was not upheld by any of its callers.
+//
+// An unreadable path is now counted as a failed file and marks the scan
+// incomplete, so it exits 2 rather than reading as clean.
+//
+// The walker reports the same path twice for an unreadable directory — once for
+// the entry error and once for the failed directory read — so paths are
+// de-duplicated and counted once each.
+// walkErrorReporter returns an OnError callback bound to one scan's root, so
+// that walk failures are labelled relative to it. The root is captured rather
+// than stored because an Engine may have more than one scan in flight.
+func (e *Engine) walkErrorReporter(root string) func(string, error) {
+	return func(path string, err error) { e.onWalkError(root, path, err) }
+}
+
+func (e *Engine) onWalkError(root, path string, err error) {
+	label := relativeToRoot(root, path)
+	if e.recordUnreadable(label) {
+		e.filesFailed.Add(1)
+		e.noteIncomplete(ReasonUnreadable)
+	}
+	if e.config.Verbose {
+		fmt.Fprintf(os.Stderr, "minesweep: cannot inspect %s: %v\n", label, err)
+	}
+}
+
+// recordUnreadable notes a path that could not be inspected and reports whether
+// it was not already recorded. The walker reports the same directory twice (an
+// entry error and a failed read) and the same file can fail in more than one
+// place, so de-duplication happens here rather than at each call site.
+func (e *Engine) recordUnreadable(label string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.unreadableSeen == nil {
+		e.unreadableSeen = make(map[string]bool)
+	}
+	if e.unreadableSeen[label] {
+		return false
+	}
+	e.unreadableSeen[label] = true
+	if len(e.unreadablePaths) < maxRecordedUnreadable {
+		e.unreadablePaths = append(e.unreadablePaths, label)
+	}
+	return true
+}
+
+// relativeToRoot renders a walked path the way every other skip reason is
+// rendered: relative to the scan root, so the report is stable across machines
+// and does not disclose the local directory layout.
+func relativeToRoot(root, path string) string {
+	if root == "" {
+		return filepath.Base(path)
+	}
+	if rel, err := filepath.Rel(root, path); err == nil && rel != "" &&
+		rel != "." && !strings.HasPrefix(rel, "..") {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.Base(path)
+}
+
+// mustRel returns the slash-separated path of target relative to base, falling
+// back to the base name if the two are unrelated.
+func mustRel(base, target string) string {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return filepath.Base(target)
+	}
+	return rel
+}
+
+// maxRecordedUnreadable bounds how many unreadable paths are remembered for
+// the report. A hostile or damaged tree can make the count arbitrarily large.
+const maxRecordedUnreadable = 10
+
 // resolvePolicies loads policy rules from, in order of precedence:
 //  1. an explicit profile (from disk profiles dir if present, else embedded)
 //  2. an explicit policy file (must exist on disk)
@@ -297,23 +452,40 @@ func dirOrEmbedded(dir, embeddedSubtree string) (fs.FS, bool) {
 
 // finalize runs the post-detection pipeline: deduplication, baseline
 // filtering, suppression filtering, policy evaluation, and report generation.
+//
 // Filtering deliberately happens BEFORE evaluation so that baselines and
 // suppression patterns match raw secret values, not redacted ones.
+//
+// The baseline is the last thing written, and only after the result is
+// final. Recording it earlier meant a truncated scan, or one with findings
+// suppressed, wrote hashes for findings the user had never actually seen
+// triaged: --update-baseline --max-findings 5 reported 5 findings and wrote
+// 400 hashes, after which every run reported the tree clean.
 func (e *Engine) finalize(root string, allFindings []findings.Finding) (*findings.RiskReport, error) {
 	allFindings = relativizeFindings(root, allFindings)
 	// Several detectors can independently raise the same finding (regex,
 	// entropy, decoded base64 wrapping the same rule). Collapse identical
 	// ones before baselines and suppression so counts and hashes stay stable.
 	allFindings = dedupFindings(allFindings)
-	filtered, err := e.filterBaseline(allFindings)
+
+	filtered, err := e.filterBaselineLoad(allFindings)
 	if err != nil {
 		return nil, err
 	}
 
-	filtered, err = e.filterSuppressions(filtered)
-	if err != nil {
-		return nil, err
+	filtered = e.filterSuppressionsInPlace(filtered)
+	e.mu.Lock()
+	suppressErr := e.suppressErr
+	e.mu.Unlock()
+	if suppressErr != nil {
+		return nil, suppressErr
 	}
+
+	// Establish a total order BEFORE trimming. trimToConfidenceCap breaks ties
+	// on input order, and the input order was the order in which workers
+	// finished, which is not a function of the input: three identical runs of
+	// one tree over the cap produced three different result sets.
+	sortFindings(filtered)
 
 	// The per-file budget can overshoot the global cap by up to one file's
 	// worth per worker, so trim here too. When a scan is truncated, the
@@ -322,6 +494,10 @@ func (e *Engine) finalize(root string, allFindings []findings.Finding) (*finding
 	if dropped > 0 {
 		e.findingsDropped.Add(int64(dropped))
 		e.noteIncomplete(ReasonFindingCap)
+	}
+
+	if err := e.filterBaselineSave(filtered); err != nil {
+		return nil, err
 	}
 
 	evaluated := e.evaluate(filtered)
@@ -333,6 +509,9 @@ func (e *Engine) finalize(root string, allFindings []findings.Finding) (*finding
 // trimToConfidenceCap keeps the cap highest-confidence findings, preserving
 // input order among equal confidences so the result stays deterministic.
 // Returns the kept findings and how many were dropped.
+//
+// Callers must sortFindings first: the tie-break here is positional, so the
+// caller's order is part of the result.
 func trimToConfidenceCap(fs []findings.Finding, cap int) ([]findings.Finding, int) {
 	if cap <= 0 || len(fs) <= cap {
 		return fs, 0
@@ -348,40 +527,97 @@ func trimToConfidenceCap(fs []findings.Finding, cap int) ([]findings.Finding, in
 		}
 		return ia < ib
 	})
-	keep := make(map[int]struct{}, cap)
+	keep := make([]bool, len(fs))
 	for _, i := range order[:cap] {
-		keep[i] = struct{}{}
+		keep[i] = true
 	}
 	out := make([]findings.Finding, 0, cap)
 	for i, f := range fs {
-		if _, ok := keep[i]; ok {
+		if keep[i] {
 			out = append(out, f)
 		}
 	}
 	return out, len(fs) - cap
 }
 
-// dedupFindings removes duplicate findings sharing the same location, rule,
-// and value, keeping the first (detectors run in a stable order).
+// dedupFindings removes duplicate findings, keeping the most informative copy.
+//
+// Two passes, because two different problems were being conflated:
+//
+//   - Identical location, rule and value: the same detector (or a decoded
+//     base64 wrapper) raising the same finding twice. Collapsed exactly.
+//   - Identical location and value under *different* rule IDs: two rule sets
+//     describing the same credential. A PostgreSQL URL matched both
+//     rules/database.yml's `postgres-connection-string` and the database
+//     detector's `postgresql_connection_string`, and because the rule ID was
+//     part of the key they were both reported — the same secret, the same
+//     line, twice, inflating the count, burning twice the finding budget and
+//     producing two CI annotations for one problem. The higher-confidence copy
+//     wins; ties break on rule ID so the choice is deterministic.
 func dedupFindings(fs []findings.Finding) []findings.Finding {
-	seen := make(map[string]struct{}, len(fs))
+	exact := make(map[string]int, len(fs))
 	out := make([]findings.Finding, 0, len(fs))
 	for _, f := range fs {
 		key := f.File + "\x00" + strconv.Itoa(f.Line) + "\x00" + strconv.Itoa(f.Column) +
 			"\x00" + f.RuleID + "\x00" + f.Value
-		if _, ok := seen[key]; ok {
+		if _, ok := exact[key]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
+		exact[key] = len(out)
 		out = append(out, f)
 	}
-	return out
+
+	type secretKey struct {
+		loc string
+		val string
+	}
+	best := make(map[secretKey]int, len(out))
+	kept := make([]findings.Finding, 0, len(out))
+	for _, f := range out {
+		k := secretKey{
+			loc: f.File + "\x00" + strconv.Itoa(f.Line) + "\x00" + strconv.Itoa(f.Column),
+			val: f.Value,
+		}
+		if idx, ok := best[k]; ok {
+			// Same secret, same place, possibly a different rule: keep the
+			// stronger single report.
+			if preferFinding(f, kept[idx]) {
+				kept[idx] = f
+			}
+			continue
+		}
+		best[k] = len(kept)
+		kept = append(kept, f)
+	}
+	return kept
+}
+
+// preferFinding reports whether candidate should replace incumbent as the
+// representative of one secret at one location.
+func preferFinding(candidate, incumbent findings.Finding) bool {
+	if candidate.Confidence != incumbent.Confidence {
+		return candidate.Confidence > incumbent.Confidence
+	}
+	// A rule-scoped policy or remediation keyed on the incumbent's ID would
+	// stop applying if the ID changed, so prefer the ID already chosen, and
+	// break any remaining tie on the ID itself for determinism.
+	if candidate.RuleID == incumbent.RuleID {
+		return false
+	}
+	return candidate.RuleID < incumbent.RuleID
 }
 
 // sortFindings orders findings deterministically so identical scans produce
 // byte-identical reports regardless of worker scheduling.
+//
+// This must be a total order: two findings that agree on every field compared
+// here but differ elsewhere would still be ordered arbitrarily, and that
+// arbitrariness is what leaks worker scheduling into the output. Confidence is
+// not part of the key because it is the primary sort key of
+// trimToConfidenceCap, which runs after this and would otherwise have to
+// re-establish the order.
 func sortFindings(fs []findings.Finding) {
-	sort.SliceStable(fs, func(i, j int) bool {
+	sort.Slice(fs, func(i, j int) bool {
 		a, b := fs[i], fs[j]
 		if a.File != b.File {
 			return a.File < b.File
@@ -395,12 +631,39 @@ func sortFindings(fs []findings.Finding) {
 		if a.RuleID != b.RuleID {
 			return a.RuleID < b.RuleID
 		}
-		return a.Value < b.Value
+		if a.Value != b.Value {
+			return a.Value < b.Value
+		}
+		if a.Confidence != b.Confidence {
+			return a.Confidence > b.Confidence
+		}
+		if a.Type != b.Type {
+			return a.Type < b.Type
+		}
+		if len(a.Tags) != len(b.Tags) {
+			return len(a.Tags) < len(b.Tags)
+		}
+		for k := range a.Tags {
+			if a.Tags[k] != b.Tags[k] {
+				return a.Tags[k] < b.Tags[k]
+			}
+		}
+		if a.Reason != b.Reason {
+			return a.Reason < b.Reason
+		}
+		if a.Severity != b.Severity {
+			return a.Severity > b.Severity
+		}
+		if a.Context != b.Context {
+			return a.Context < b.Context
+		}
+		return a.SourceLine < b.SourceLine
 	})
 }
 
-// filterBaseline removes findings already recorded in the baseline file.
-func (e *Engine) filterBaseline(fs []findings.Finding) ([]findings.Finding, error) {
+// filterBaselineLoad removes findings already recorded in the baseline file and
+// remembers the loaded baseline for the later save.
+func (e *Engine) filterBaselineLoad(fs []findings.Finding) ([]findings.Finding, error) {
 	if e.config.BaselineFile == "" {
 		return fs, nil
 	}
@@ -408,33 +671,62 @@ func (e *Engine) filterBaseline(fs []findings.Finding) ([]findings.Finding, erro
 	if err != nil {
 		return nil, fmt.Errorf("load baseline: %w", err)
 	}
-	newFindings := findings.FilterNewFindings(fs, baseline)
-
-	if err := e.updateBaseline(baseline, newFindings); err != nil {
-		return nil, fmt.Errorf("save baseline: %w", err)
-	}
-	return newFindings, nil
+	e.mu.Lock()
+	e.baseline = baseline
+	e.baselineNew = findings.FilterNewFindings(fs, baseline)
+	out := e.baselineNew
+	e.mu.Unlock()
+	return out, nil
 }
 
-// filterSuppressions removes findings matching the suppression file.
-func (e *Engine) filterSuppressions(fs []findings.Finding) ([]findings.Finding, error) {
+// filterBaselineSave records the findings that are actually being reported.
+//
+// It refuses to write when the scan is incomplete. A baseline written from a
+// truncated or partially-unreadable scan permanently blesses findings nobody
+// reviewed: the next full scan then reports the tree clean, which is the exact
+// outcome the baseline feature exists to prevent.
+func (e *Engine) filterBaselineSave(reported []findings.Finding) error {
+	if e.config.BaselineFile == "" || !e.config.UpdateBaseline {
+		return nil
+	}
+	e.mu.Lock()
+	baseline := e.baseline
+	e.mu.Unlock()
+	if baseline == nil {
+		return nil
+	}
+	if reasons := e.incomplete(); len(reasons) > 0 {
+		return fmt.Errorf("refusing to update the baseline: this scan is incomplete (%s); "+
+			"re-run without the limits that truncated it, or without --update-baseline",
+			strings.Join(reasons, "; "))
+	}
+	findings.UpdateBaseline(baseline, reported)
+	if err := findings.SaveBaseline(e.config.BaselineFile, baseline); err != nil {
+		return fmt.Errorf("save baseline: %w", err)
+	}
+	return nil
+}
+
+// filterSuppressionsInPlace removes findings matching the suppression file.
+func (e *Engine) filterSuppressionsInPlace(fs []findings.Finding) []findings.Finding {
 	if e.config.SuppressFile == "" {
-		return fs, nil
+		return fs
 	}
 	suppressions, err := findings.LoadSuppressions(e.config.SuppressFile)
 	if err != nil {
-		return nil, fmt.Errorf("load suppressions: %w", err)
+		// A suppression file that cannot be read is a hard error. Silently
+		// ignoring it would report findings the user believes they silenced,
+		// and — worse, historically — baseline them.
+		e.mu.Lock()
+		e.suppressErr = fmt.Errorf("load suppressions: %w", err)
+		e.mu.Unlock()
+		return fs
 	}
-	return findings.FilterSuppressed(fs, suppressions), nil
-}
-
-// updateBaseline updates the baseline file with new findings
-func (e *Engine) updateBaseline(baseline *findings.Baseline, newFindings []findings.Finding) error {
-	if !e.config.UpdateBaseline {
-		return nil
+	out := findings.FilterSuppressed(fs, suppressions)
+	if n := len(fs) - len(out); n > 0 {
+		e.suppressionsApplied.Add(int64(n))
 	}
-	findings.UpdateBaseline(baseline, newFindings)
-	return findings.SaveBaseline(e.config.BaselineFile, baseline)
+	return out
 }
 
 func (e *Engine) Run(path string) (*findings.RiskReport, error) {
@@ -444,8 +736,16 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	e.filesFailed.Store(0)
 	e.findingsKept.Store(0)
 	e.findingsDropped.Store(0)
+	e.findingsDiscarded.Store(0)
+	e.inlineSuppressed.Store(0)
+	e.suppressionsApplied.Store(0)
 	e.mu.Lock()
+	e.baseline = nil
+	e.baselineNew = nil
+	e.suppressErr = nil
 	e.incompleteReasons = nil
+	e.unreadablePaths = nil
+	e.unreadableSeen = make(map[string]bool)
 	e.mu.Unlock()
 	e.setSkipStats(nil)
 
@@ -460,8 +760,13 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 		rep.FilesFailed = int(e.filesFailed.Load())
 		rep.DurationMs = time.Since(start).Milliseconds()
 		rep.FindingsDropped = int(e.findingsDropped.Load())
+		rep.FindingsDiscarded = int(e.findingsDiscarded.Load())
+		rep.FindingsSuppressed = int(e.inlineSuppressed.Load()) + int(e.suppressionsApplied.Load())
 		rep.IncompleteReasons = e.incomplete()
 		rep.Incomplete = len(rep.IncompleteReasons) > 0
+		if len(e.unreadablePaths) > 0 {
+			rep.UnreadablePaths = append([]string(nil), e.unreadablePaths...)
+		}
 		if st := e.getSkipStats(); st != nil {
 			rep.SkippedBy = st.Summary()
 		}
@@ -470,21 +775,60 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 }
 
 func (e *Engine) run(path string) (*findings.RiskReport, error) {
+	// Resolve the scan root once, up front, and use the resolved form for
+	// everything downstream: the walk, the containment checks, and the
+	// relativization of reported paths.
+	//
+	// os.Stat follows symlinks but filepath.WalkDir does not: it Lstats the
+	// root and hands a symlinked root to the walk function as a single
+	// non-directory entry. The tree was therefore never descended — scanning a
+	// symlinked directory reported one info-level "Symlink" finding, exit 0,
+	// and no secrets. `--diff`, `--staged` and `--history` resolve symlinks
+	// (via git rev-parse), so the four modes disagreed about the same tree.
+	//
+	// Canonicalising here is also what keeps reported paths stable: git
+	// reports the toplevel with symlinks resolved, so a root left unresolved
+	// produced absolute paths in every --staged report (and machine-specific
+	// baseline entries) whenever any ancestor was a symlink. That is H2, fixed
+	// at the same layer, because it is the same asymmetry.
+	resolved, err := filesystem.ResolveRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	path = resolved
+
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat path: %w", err)
 	}
 
+	// The scan mode is decided BEFORE the directory check. It used to be
+	// decided after, so any single-file path bypassed --staged, --diff and
+	// --history entirely and silently scanned the working tree instead. In a
+	// pre-commit scan that reads the wrong content in both directions: it
+	// reported unstaged edits as if they were staged, and — with the index
+	// holding a secret that the working tree no longer has — it reported
+	// nothing at all and exited 0.
+	// Per-run state is passed down rather than stored on the Engine: an Engine
+	// may legitimately have Run called on it more than once, including
+	// concurrently, so nothing about one scan may live in a field.
+	scope := ""
 	if !info.IsDir() {
-		return e.runSingleFile(path)
+		scope = path
 	}
 
 	if e.config.DiffMode || e.config.StagedOnly {
-		return e.runDiff(path)
+		return e.runScopedDiff(path, scope)
+	}
+	if e.config.HistoryMode {
+		if scope != "" {
+			return e.runHistory(filepath.Dir(scope), scope)
+		}
+		return e.runHistory(path, "")
 	}
 
-	if e.config.HistoryMode {
-		return e.runHistory(path)
+	if !info.IsDir() {
+		return e.runSingleFile(path)
 	}
 
 	report, err := e.runDirectory(path)
@@ -494,7 +838,21 @@ func (e *Engine) run(path string) (*findings.RiskReport, error) {
 	return report, nil
 }
 
-func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
+// runScopedDiff handles --staged/--diff against a target that may be a single
+// file.
+//
+// git needs a directory to answer rev-parse, so for a file target the git
+// operations run from the containing directory and the result is narrowed to
+// the file. Narrowing happens after the git queries rather than before, so
+// `--staged ./f` still sees the same index the full scan would.
+func (e *Engine) runScopedDiff(target, scope string) (*findings.RiskReport, error) {
+	if scope == "" {
+		return e.runDiff(target, "")
+	}
+	return e.runDiff(filepath.Dir(scope), scope)
+}
+
+func (e *Engine) runDiff(root, scopeFile string) (*findings.RiskReport, error) {
 	isStaged := e.config.StagedOnly
 	var diffFiles []string
 	var err error
@@ -535,6 +893,9 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 		absPath := filepath.Join(top, relPath)
 		if !withinDir(absPath, root) {
 			continue // changed file outside the requested scan root
+		}
+		if scopeFile != "" && absPath != scopeFile {
+			continue // a single file was named; only it is in scope
 		}
 		if e.config.MaxFiles > 0 && len(files) >= e.config.MaxFiles {
 			e.noteIncomplete(ReasonMaxFiles)
@@ -593,6 +954,10 @@ func (e *Engine) maxFileSize() int64 {
 // runSingleFile scans a path the user named explicitly. It still honors
 // .minesweepignore: an ignore file that quietly stops working when a file is
 // named directly is not a source of truth. --no-ignore is the override.
+//
+// It is only reachable when no git-scoped mode is set; --staged/--diff on a
+// single file is routed through runDiff so the index, not the working tree, is
+// what gets scanned.
 func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 	dir := filepath.Dir(path)
 	if !e.config.NoIgnore {
@@ -616,7 +981,7 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 	}
 	file.MaxContentBytes = e.maxFileSize()
 
-	allFindings := e.detect(file)
+	allFindings := e.detect(file, e.fileBudgetFor(1))
 	return e.finalize(dir, allFindings)
 }
 
@@ -624,7 +989,7 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 // with content diversity, not commit count: each object is fetched and
 // scanned exactly once, then findings are attributed to the commit that
 // introduced them.
-func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
+func (e *Engine) runHistory(root, scopeFile string) (*findings.RiskReport, error) {
 	maxFileSize := e.maxFileSize()
 
 	// History mode applies the same coverage filters as a working-tree scan.
@@ -686,18 +1051,30 @@ func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
 
 	files := make([]*filesystem.File, 0, len(objects))
 	displaySHA := make(map[string]string, len(objects))
-	var skippedOversize, skippedFiltered int
+	// primaryFiltered records that the path git named for a blob is excluded by
+	// the filters. The blob is still scanned: git names each object exactly
+	// once, so that one arbitrary name is not evidence about the others, and
+	// skipping on it meant a secret shared between vendor/foo.png and
+	// config.env was missed entirely whenever the name git happened to pick was
+	// the filtered one. The filter is a statement about paths, so it is applied
+	// to paths — in expandHistoryPaths, once all of them are known.
+	primaryFiltered := make(map[string]filesystem.SkipReason, len(objects))
+	var skippedOversize int
 	for _, obj := range objects {
 		obj := obj
 		if obj.Path == "" {
 			continue
 		}
-		// History paths are repository-relative with no filesystem entry, so
-		// the same filter set is applied to them directly.
-		if reason, skip := checker.ClassifyRel(obj.Path); skip {
-			stats.Note(reason, obj.Path)
-			skippedFiltered++
-			continue
+		// Restrict to the requested scope. runDiff has always done this, so
+		// `minesweep sub --diff` reported only files under sub/ while
+		// `minesweep sub --history` reported the whole repository — the same
+		// target, two different answers.
+		if scopeFile != "" {
+			if obj.Path != filepath.ToSlash(mustRel(top, scopeFile)) {
+				continue
+			}
+		} else if !withinDir(filepath.Join(top, filepath.FromSlash(obj.Path)), root) {
+			continue // history object outside the requested scan root
 		}
 		if obj.Size > maxFileSize {
 			stats.Note(filesystem.SkipReasonLarge, obj.Path)
@@ -707,27 +1084,142 @@ func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
 
 		display := fmt.Sprintf("%s@%s", obj.Path, shortSHA(obj.SHA))
 		displaySHA[display] = obj.SHA
+		// History paths are repository-relative with no filesystem entry, so
+		// the same filter set is applied to them directly.
+		if reason, skip := checker.ClassifyRel(obj.Path); skip {
+			primaryFiltered[display] = reason
+		}
 		bf := filesystem.NewBlobFile(display, obj.Size, func() ([]byte, error) {
 			return fetcher.Fetch(obj.SHA)
 		})
 		bf.MaxContentBytes = maxFileSize
 		files = append(files, bf)
 	}
-	total := skippedOversize + skippedFiltered
-	if total > 0 {
-		fmt.Fprintf(os.Stderr, "minesweep: note: %d of %d history objects were not scanned (%d by ignore/skip rules, %d larger than %d MB)\n",
-			total, len(objects), skippedFiltered, skippedOversize, maxFileSize/1024/1024)
-		e.filesSkipped.Add(int64(total))
+	if skippedOversize > 0 {
+		fmt.Fprintf(os.Stderr, "minesweep: note: %d of %d history objects were not scanned (%d larger than %d MB)\n",
+			skippedOversize, len(objects), skippedOversize, maxFileSize/1024/1024)
+		e.filesSkipped.Add(int64(skippedOversize))
 	}
 
 	allFindings := e.detectParallel(files)
-	attributed := e.attributeHistory(root, allFindings, displaySHA)
-	return e.finalize(root, attributed)
+	attributed, infos := e.attributeHistory(root, allFindings, displaySHA)
+	expanded := e.expandHistoryPaths(root, attributed, displaySHA, infos, checker, scopeFile,
+		primaryFiltered, stats)
+	// History skips are resolved after detection, once every path of a blob is
+	// known, so the totals are only final here.
+	if total := stats.Total(); total > 0 {
+		e.filesSkipped.Store(int64(total))
+		fmt.Fprintf(os.Stderr, "minesweep: note: %d history object(s) at filtered paths were not reported\n", total)
+	}
+	return e.finalize(root, expanded)
+}
+
+// expandHistoryPaths reports a history finding at every path its blob occupied.
+//
+// git's object listing names each object once, so a secret committed at two
+// paths — copied, moved, or written twice with identical content — was reported
+// under a single name and the other location was silently absent. A user who
+// cleaned up the named file would leave the credential in the tree believing it
+// was gone, and the next history scan would have nothing new to complain about,
+// because the one path it looks at had been fixed.
+//
+// The extra paths come from the --find-object query attributeHistory already
+// ran, so there is no additional git invocation.
+//
+// Each path goes through the same scope restriction and filter set as an
+// original history object: an expanded finding must not bypass a coverage
+// decision, and a path that would not have been scanned is not reported here.
+func (e *Engine) expandHistoryPaths(root string, fs []findings.Finding, displaySHA map[string]string,
+	infos map[string]*git.CommitInfo, checker *filesystem.SkipChecker, scopeFile string,
+	primaryFiltered map[string]filesystem.SkipReason, stats *filesystem.WalkStats) []findings.Finding {
+	if len(fs) == 0 {
+		return fs
+	}
+	top := git.TopLevel(root)
+	if top == "" {
+		return fs
+	}
+	// A single named file is its own scope. withinDir alone would not catch
+	// this: root is the file's directory, so every sibling is inside it.
+	var scopeRel string
+	if scopeFile != "" {
+		scopeRel = filepath.ToSlash(mustRel(top, scopeFile))
+	}
+	inScope := func(rel string) bool {
+		if rel == "" {
+			return false
+		}
+		if scopeRel != "" {
+			return rel == scopeRel
+		}
+		return withinDir(filepath.Join(top, filepath.FromSlash(rel)), root)
+	}
+
+	out := make([]findings.Finding, 0, len(fs))
+	for _, f := range fs {
+		sha, ok := displaySHA[f.File]
+		if !ok {
+			out = append(out, f)
+			continue
+		}
+		info := infos[sha]
+		primary := historyPrimaryPath(f.File)
+
+		// Report at the named path only if it survives the filters. The path
+		// git picked is not evidence about the others, so being blocked there
+		// does not make the blob unscannable — it means the finding belongs at
+		// one of its other locations, which are considered below.
+		reason, blocked := primaryFiltered[f.File]
+		if !blocked {
+			reason, blocked = checker.ClassifyRel(primary)
+		}
+		if blocked {
+			stats.Note(reason, primary)
+		} else if inScope(primary) {
+			out = append(out, f)
+		}
+
+		if info == nil {
+			continue
+		}
+		for _, occ := range info.Occurrences {
+			for _, alt := range occ.Paths {
+				if alt == primary {
+					continue
+				}
+				if altReason, blocked := checker.ClassifyRel(alt); blocked {
+					stats.Note(altReason, alt)
+					continue
+				}
+				if !inScope(alt) {
+					continue
+				}
+				clone := f
+				clone.File = alt + "@" + shortSHA(sha)
+				clone.Commit = occ.Commit
+				out = append(out, clone)
+			}
+		}
+	}
+	return out
+}
+
+// historyPrimaryPath strips the "@<blob>" suffix a history file path carries.
+func historyPrimaryPath(display string) string {
+	if i := strings.LastIndexByte(display, '@'); i > 0 {
+		return display[:i]
+	}
+	return display
 }
 
 // attributeHistory resolves the introducing commit for each flagged blob.
 // Queries run once per unique SHA — typically a handful — never per finding.
-func (e *Engine) attributeHistory(root string, fs []findings.Finding, displaySHA map[string]string) []findings.Finding {
+//
+// The CommitInfo values are returned alongside so expandHistoryPaths can reuse
+// them, including the paths the blob occupied in other commits, without issuing
+// a second query.
+func (e *Engine) attributeHistory(root string, fs []findings.Finding,
+	displaySHA map[string]string) ([]findings.Finding, map[string]*git.CommitInfo) {
 	shas := make(map[string]bool)
 	for _, f := range fs {
 		if sha, ok := displaySHA[f.File]; ok && !shas[sha] {
@@ -763,7 +1255,7 @@ func (e *Engine) attributeHistory(root string, fs []findings.Finding, displaySHA
 		out[i].Date = info.Date
 		out[i].CommitSummary = info.Summary
 	}
-	return out
+	return out, infos
 }
 
 func shortSHA(sha string) string {
@@ -781,6 +1273,7 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 		IncludeTestFiles: e.config.IncludeTestFiles,
 		NoIgnore:         e.config.NoIgnore,
 		Stats:            stats,
+		OnError:          e.walkErrorReporter(root),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("walk directory: %w", err)
@@ -819,12 +1312,14 @@ func relativizeFindings(root string, fs []findings.Finding) []findings.Finding {
 // detect runs every detector over one file, then filters, then attaches
 // evidence to the survivors.
 //
+// budget is how many findings this file may contribute; see fileBudgetFor.
+//
 // The order matters for memory. Content is loaded here and nowhere else, the
 // file is released before returning, and the surrounding source lines — the
 // largest field on a finding — are built only for findings that survive
 // filtering. Doing evidence first and filtering afterwards meant allocating
 // context blocks for the ~99% of findings that were about to be discarded.
-func (e *Engine) detect(file *filesystem.File) []findings.Finding {
+func (e *Engine) detect(file *filesystem.File, budget int) []findings.Finding {
 	if file == nil {
 		return nil
 	}
@@ -833,12 +1328,33 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	// total size of the tree.
 	defer file.Release()
 
+	file.SetFindingBudget(budget)
+	defer e.noteBudgetDiscard(file, budget)
+
+	// The read semaphore is acquired BEFORE the content is loaded, not after.
+	// It used to be taken once the file was already resident, so
+	// --max-concurrent-reads bounded nothing that allocated memory: 16 workers
+	// each held a 12 MB file while the semaphore was held to a width of one,
+	// and the heap reached 337 MB against 26 MB for a single worker. The
+	// permit is now held for the whole scan of this file, which is exactly the
+	// window in which the content and its derived views are live.
+	if e.readSemaphore != nil {
+		e.readSemaphore <- struct{}{}
+		defer func() { <-e.readSemaphore }()
+	}
+
 	// Accounting lives here, where the content is already in hand. A separate
 	// pre-pass would force every file resident before detection began,
 	// defeating lazy loading outright.
 	content, err := file.GetContent()
 	if err != nil {
+		// A file that could not be read was not inspected. Nothing is known
+		// about what it holds, so the scan cannot claim to be complete. This
+		// also covers content delivered by a loader — a git blob whose path
+		// git quoted, for instance — which fails the same way.
 		e.filesFailed.Add(1)
+		e.noteIncomplete(ReasonUnreadable)
+		e.recordUnreadable(file.Path)
 		if e.config.Verbose {
 			fmt.Fprintf(os.Stderr, "minesweep: %s: %v\n", file.Path, err)
 		}
@@ -847,28 +1363,9 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 	e.filesScanned.Add(1)
 	e.bytesScanned.Add(int64(len(content)))
 
-	// Bound this file's contribution from what is actually left of the global
-	// budget, so a single pathological input cannot outrun the cap.
-	if cap := e.maxFindings(); cap > 0 {
-		room := cap - int(e.findingsKept.Load())
-		if room <= 0 {
-			e.noteIncomplete(ReasonFindingCap)
-			return nil
-		}
-		file.SetFindingBudget(room)
-	}
-
-	if e.readSemaphore != nil {
-		e.readSemaphore <- struct{}{}
-		defer func() { <-e.readSemaphore }()
-	}
-
 	var all []findings.Finding
 	for _, d := range e.detectors {
 		all = append(all, d.Detect(file)...)
-	}
-	if file.FindingBudgetHit {
-		e.noteIncomplete(ReasonFileBudget)
 	}
 
 	minSev := findings.Severity(0)
@@ -899,7 +1396,15 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 		// into a []string: that split copied the whole file and allocated a
 		// string header per line, for every file that had any finding.
 		if li := file.Lines(); li != nil {
-			filtered = findings.FilterInlineSuppressionsLines(filtered, li)
+			kept := findings.FilterInlineSuppressionsLines(filtered, li)
+			// A finding removed by an inline suppression is a coverage gap
+			// like any other: it was detected and then deliberately not
+			// reported. It is counted so the report can say so, rather than
+			// vanishing without trace.
+			if n := len(filtered) - len(kept); n > 0 {
+				e.inlineSuppressed.Add(int64(n))
+			}
+			filtered = kept
 		}
 	}
 
@@ -911,8 +1416,28 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 }
 
 // attachEvidence fills in Context and SourceLine from the file's line index.
+//
+// Two guarantees are enforced here rather than at the output boundary, because
+// the output boundary is not the only consumer and it cannot undo an allocation
+// that has already been made:
+//
+//   - Binary content is never copied into a finding. Arbitrary bytes defeat
+//     every redaction heuristic in report/, and findings without a Value (the
+//     file-type and symlink detectors) bypass the heuristic pass entirely, so a
+//     SQLite database used to land its credentials in the report verbatim.
+//   - Every rendered line is capped. "A line" is not bounded by anything: a
+//     database, a minified bundle or a single-line JSON blob has no newline for
+//     megabytes.
 func attachEvidence(file *filesystem.File, fs []findings.Finding) {
 	if len(fs) == 0 {
+		return
+	}
+	if file.IsBinary {
+		note := findings.BinaryEvidence(int(file.Size))
+		for i := range fs {
+			fs[i].Context = note
+			fs[i].SourceLine = note
+		}
 		return
 	}
 	li := file.Lines()
@@ -923,9 +1448,29 @@ func attachEvidence(file *filesystem.File, fs []findings.Finding) {
 		if fs[i].Line <= 0 {
 			continue
 		}
-		fs[i].Context = li.Context(fs[i].Line-1, 2)
-		fs[i].SourceLine = strings.TrimSpace(li.LineText(fs[i].Line - 1))
+		fs[i].Context = li.ContextCapped(fs[i].Line-1, evidenceRadius, maxEvidenceLineBytes)
+		fs[i].SourceLine = clampEvidenceLine(strings.TrimSpace(li.LineText(fs[i].Line - 1)))
 	}
+}
+
+const (
+	// evidenceRadius is the number of lines of context rendered either side
+	// of a finding.
+	evidenceRadius = 2
+	// maxEvidenceLineBytes caps one rendered evidence line. 512 keeps a
+	// credential assignment and its neighbours readable while making the
+	// report size proportional to the finding count, not to the file size.
+	maxEvidenceLineBytes = 512
+)
+
+// clampEvidenceLine truncates one evidence line to maxEvidenceLineBytes,
+// marking the cut so a reader can tell the line was clipped rather than short.
+func clampEvidenceLine(s string) string {
+	capped := filesystem.CapLine(s, maxEvidenceLineBytes)
+	if capped == s {
+		return s
+	}
+	return capped + " " + findings.TruncatedEvidenceSuffix
 }
 
 func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
@@ -942,6 +1487,10 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 
 	type result struct {
 		findings []findings.Finding
+		// skipped records that this file was never scanned because the scan was
+		// cancelled (memory limit). It distinguishes "the scan stopped early"
+		// from "the scan had already finished when the limit tripped".
+		skipped bool
 	}
 
 	fileCh := make(chan *filesystem.File, len(files))
@@ -954,6 +1503,10 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 
 	totalFiles := int64(len(files))
 
+	// One deterministic allowance for every file, so the run is reproducible
+	// and no file is skipped outright. See fileBudgetFor.
+	budget := e.fileBudgetFor(len(files))
+
 	// Cancelling ctx stops processing of remaining files without closing fileCh,
 	// which is owned by the producer below (closing it from a worker would risk
 	// a send-on-closed-channel panic).
@@ -961,11 +1514,17 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 	defer cancel()
 
 	var memCancelWarned atomic.Bool
+	var memCancelFired atomic.Bool
 	if e.config.MemoryLimitMB > 0 {
-		// One coordinator measures heap growth on a slow ticker. Measuring
-		// from inside each worker forced runtime.ReadMemStats (a full
+		// One coordinator measures heap growth on a fast ticker. Measuring from
+		// inside each worker forced runtime.ReadMemStats (a full
 		// stop-the-world) on every worker on every interval. Reading it once
 		// here is both cheaper and equally accurate for a soft early-exit.
+		//
+		// The tick is 25 ms rather than 250 ms. A scan of a handful of large
+		// files can blow past its budget in well under a quarter of a second,
+		// and at that cadence the limit never fired at all — the flag was
+		// unenforceable for any fast scan, which is where it matters most.
 		initialAlloc := e.allocBytes()
 		monitorStop := make(chan struct{})
 		var monitorWG sync.WaitGroup
@@ -973,7 +1532,7 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 		go func() {
 			defer monitorWG.Done()
 			limit := uint64(e.config.MemoryLimitMB) * 1024 * 1024 //nolint:gosec // guarded by > 0 check above
-			ticker := time.NewTicker(250 * time.Millisecond)
+			ticker := time.NewTicker(25 * time.Millisecond)
 			defer ticker.Stop()
 			for {
 				select {
@@ -982,7 +1541,7 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 						if memCancelWarned.CompareAndSwap(false, true) {
 							fmt.Fprintf(os.Stderr, "warning: memory limit (%d MB) reached; stopping scan early\n", e.config.MemoryLimitMB)
 						}
-						e.noteIncomplete(ReasonMemoryLimit)
+						memCancelFired.Store(true)
 						cancel()
 						return
 					}
@@ -1015,7 +1574,10 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 			}()
 			for file := range fileCh {
 				if ctx.Err() != nil {
-					continue // drain the channel without processing
+					// Drain the channel without processing, but say so: this is
+					// the evidence that the cancellation actually cost coverage.
+					resultCh <- result{skipped: true}
+					continue
 				}
 
 				func() {
@@ -1025,7 +1587,7 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 							e.filesFailed.Add(1)
 						}
 					}()
-					fResults := e.detect(file)
+					fResults := e.detect(file, budget)
 					findingsFound.Add(int64(len(fResults)))
 					filesProcessed.Add(1)
 					resultCh <- result{findings: fResults}
@@ -1049,8 +1611,21 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 	}()
 
 	var allFindings []findings.Finding
+	skippedByCancel := int64(0)
 	for r := range resultCh {
+		if r.skipped {
+			skippedByCancel++
+			continue
+		}
 		allFindings = append(allFindings, r.findings...)
+	}
+
+	// The memory limit is only a *reason the scan is incomplete* if it actually
+	// left work undone. Cancelling after the last file had already been read
+	// produced a complete result that announced itself as truncated, which
+	// trains a reader to distrust a notice that should be trusted.
+	if memCancelFired.Load() && skippedByCancel > 0 {
+		e.noteIncomplete(ReasonMemoryLimit)
 	}
 
 	if e.config.Verbose && totalFiles > 100 {

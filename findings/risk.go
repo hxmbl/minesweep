@@ -24,12 +24,32 @@ type RiskReport struct {
 	// in every output format and forces a distinct exit code.
 	Incomplete        bool     `yaml:"incomplete,omitempty" json:"incomplete,omitempty"`
 	IncompleteReasons []string `yaml:"incomplete_reasons,omitempty" json:"incomplete_reasons,omitempty"`
-	// FindingsDropped counts findings removed by the finding cap.
+	// FindingsDropped counts findings removed by the global finding cap during
+	// the final trim.
 	FindingsDropped int `yaml:"findings_dropped,omitempty" json:"findings_dropped,omitempty"`
+	// FindingsDiscarded counts findings that were materialised and then
+	// dropped because a file's per-file budget was exhausted. These are lost
+	// before the global trim sees them, so they need their own figure:
+	// reporting only FindingsDropped understated the loss several-fold.
+	//
+	// It is a lower bound, not a total. A detector that stops at its budget
+	// stops before materialising the matches it has not looked at, so the true
+	// figure is at least this. The scan is flagged Incomplete regardless,
+	// which is the guarantee; this number is only an indication of scale.
+	FindingsDiscarded int `yaml:"findings_discarded,omitempty" json:"findings_discarded,omitempty"`
+	// global finding budget was already spent when they were reached.
+	// FindingsSuppressed counts findings removed by an inline suppression
+	// comment in the scanned content, or by the suppression file. A finding
+	// that was detected and then deliberately not reported is a coverage
+	// decision the user is entitled to see.
+	FindingsSuppressed int `yaml:"findings_suppressed,omitempty" json:"findings_suppressed,omitempty"`
 	// SkippedBy is a per-cause breakdown of files that were NOT inspected.
 	// A file that was skipped is a coverage gap, and the user is entitled to
 	// know which ones and why.
 	SkippedBy []string `yaml:"skipped_by,omitempty" json:"skipped_by,omitempty"`
+	// UnreadablePaths names paths the walk could not open. They were not
+	// inspected, so nothing is known about what they contain.
+	UnreadablePaths []string `yaml:"unreadable_paths,omitempty" json:"unreadable_paths,omitempty"`
 }
 
 func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {

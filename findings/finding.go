@@ -1,5 +1,27 @@
 package findings
 
+import "fmt"
+
+// BinaryEvidence is the Context/SourceLine value used in place of raw content
+// for a finding in a file that was classified as binary.
+//
+// Binary content cannot be meaningfully redacted: the censoring heuristics work
+// on credential-shaped text and pass arbitrary bytes straight through, which
+// meant a SQLite database or any other undetected binary format put its entire
+// first "line" — and therefore its credentials — into the report verbatim.
+// Withholding the bytes is the only guarantee that holds for every format.
+func BinaryEvidence(size int) string {
+	if size <= 0 {
+		return "<binary content withheld: size unknown>"
+	}
+	return fmt.Sprintf("<binary content withheld: %d bytes>", size)
+}
+
+// TruncatedEvidenceSuffix marks evidence that was clipped at the per-line
+// ceiling. A file with no newlines at all (many database and archive formats)
+// otherwise put an arbitrarily large line into every finding.
+const TruncatedEvidenceSuffix = "… (line truncated)"
+
 type Finding struct {
 	Type       string   `yaml:"type" json:"type"`
 	Severity   Severity `yaml:"severity" json:"severity"`

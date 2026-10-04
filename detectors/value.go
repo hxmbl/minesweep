@@ -72,9 +72,10 @@ func isQuotedLiteral(v string) bool {
 }
 
 // assignmentValueLooksLikeCredential judges a capture that spans a whole
-// assignment ("db_password=whatever") rather than just the value. The value is
-// whatever follows the first sign; the identifier in front of it is the whole
-// point of the match and must not be mistaken for the secret.
+// assignment — an identifier, a separator, and a value — rather than just the
+// value. The value is whatever follows the first sign; the identifier in front
+// of it is the whole point of the match and must not be mistaken for the
+// secret.
 func assignmentValueLooksLikeCredential(assignment string) bool {
 	i := strings.IndexAny(assignment, ":=")
 	if i < 0 || i == len(assignment)-1 {

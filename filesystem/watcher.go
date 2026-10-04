@@ -31,6 +31,10 @@ type Watcher struct {
 	pending    map[string]bool
 	fileStates map[string]time.Time
 	mu         sync.RWMutex
+	// outputs caches this process's own output paths so the watcher's own
+	// output cannot retrigger it. See isSelfOutput.
+	outputs     []os.FileInfo
+	outputsOnce sync.Once
 }
 
 type WatchOption struct {
@@ -83,7 +87,7 @@ func (w *Watcher) Start() error {
 			if err != nil {
 				return nil
 			}
-			if !info.IsDir() {
+			if !info.IsDir() && !w.isSelfOutput(path) {
 				w.mu.Lock()
 				w.fileStates[path] = info.ModTime()
 				w.mu.Unlock()
@@ -194,6 +198,43 @@ func (w *Watcher) shouldIgnore(path string) bool {
 	for _, pattern := range w.ignore {
 		match, err := filepath.Match(pattern, base)
 		if err == nil && match {
+			return true
+		}
+	}
+	return w.isSelfOutput(path)
+}
+
+// isSelfOutput reports whether path is the watcher's own output.
+//
+// `minesweep --watch . > report.txt` puts the report inside the watched tree,
+// and the report is rewritten on every scan. Each write is therefore a change,
+// which triggers another scan, which rewrites the report: a hot loop that
+// never settles. Measured at the 200 ms interval, two real changes produced
+// nine rescans with the output inside the tree and two with it outside.
+//
+// Identification is by device and inode, not by name. os.Stdout.Name() is
+// "/dev/stdout" for an inherited descriptor, and the redirect target the shell
+// opened is not reachable from it, so name comparison — however carefully
+// canonicalised — never matches.
+func (w *Watcher) isSelfOutput(path string) bool {
+	w.outputsOnce.Do(func() {
+		for _, f := range []*os.File{os.Stdout, os.Stderr} {
+			info, err := f.Stat()
+			if err != nil || info.Mode()&os.ModeCharDevice != 0 || !info.Mode().IsRegular() {
+				continue
+			}
+			w.outputs = append(w.outputs, info)
+		}
+	})
+	if len(w.outputs) == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	for _, out := range w.outputs {
+		if os.SameFile(info, out) {
 			return true
 		}
 	}

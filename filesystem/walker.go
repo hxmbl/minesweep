@@ -235,7 +235,7 @@ func EmptyIgnoreSet() *IgnoreSet { return NewIgnoreSet(NewIgnorePattern(nil)) }
 // silently scanning with fewer rules than the user wrote is a false negative
 // wearing a success message.
 func LoadIgnoreFile(path string) ([]string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // reading an ignore file the caller named
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -350,7 +350,7 @@ func isWithin(path, dir string) bool {
 }
 
 func runGitTopLevel(dir string) (string, error) {
-	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel") //nolint:gosec // fixed arguments
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -607,6 +607,35 @@ type WalkOption struct {
 	ignoreRoot string
 }
 
+// ResolveRoot returns the canonical absolute form of a scan target.
+//
+// Symlinks are resolved as far as they exist and the missing tail of a
+// not-yet-created path is re-attached, so the result is stable for both
+// existing and not-yet-existing targets. A path that cannot be resolved at all
+// falls back to the lexical absolute form, which is the best answer available.
+func ResolveRoot(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve path %q: %w", path, err)
+	}
+	if resolved, rErr := filepath.EvalSymlinks(abs); rErr == nil {
+		return resolved, nil
+	}
+	dir, tail := abs, ""
+	for range 256 { // bounded: a path this deep is pathological
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return abs, nil
+		}
+		tail = filepath.Join(filepath.Base(dir), tail)
+		dir = parent
+		if resolved, rErr := filepath.EvalSymlinks(dir); rErr == nil {
+			return filepath.Join(resolved, tail), nil
+		}
+	}
+	return abs, nil
+}
+
 func Walk(root string, ignore *IgnorePattern, ignoreFilePath string) ([]*File, error) {
 	return WalkWithOptions(root, WalkOption{
 		Ignore:         ignore,
@@ -646,6 +675,14 @@ func resolveIgnoreSet(root string, opts WalkOption) (*IgnoreSet, error) {
 }
 
 func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
+	// Resolve the root before walking. filepath.WalkDir Lstats the root, so a
+	// symlinked root is handed to the walk function as a single non-directory
+	// entry and the tree is never descended — the walk "succeeds", reports
+	// nothing, and the caller concludes the target was clean. Resolving here
+	// makes the function safe to call directly, not only through the engine.
+	if resolved, err := ResolveRoot(root); err == nil {
+		root = resolved
+	}
 	opts.ignoreRoot = root
 	fs, err := newFilterSet(opts)
 	if err != nil {
@@ -788,10 +825,36 @@ func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
 	return files, nil
 }
 
+// testSourceExts are the extensions for which a `.test` or `.spec` segment
+// denotes a test file. `secrets.test.json` is not one: Terraform tfvars and
+// fixture files routinely carry live credentials under exactly that name, and
+// skipping them was a false negative with a plausible real-world trigger.
+var testSourceExts = map[string]bool{
+	".go": true, ".js": true, ".jsx": true, ".ts": true, ".tsx": true,
+	".mjs": true, ".cjs": true, ".rb": true, ".py": true, ".rs": true,
+	".java": true, ".kt": true, ".swift": true, ".cs": true, ".c": true,
+	".cc": true, ".cpp": true, ".h": true, ".hpp": true, ".php": true,
+	".scala": true, ".dart": true, ".ex": true, ".exs": true,
+}
+
+// isTestFile reports whether path is a test file.
+//
+// The `_test`/`_spec` forms apply to any extension, matching the conventions of
+// the languages that use them. The `.test`/`.spec` segment forms apply only to
+// known test-source extensions: filepath.Ext returns the suffix from the last
+// dot, so `foo.test` and `foo.spec` did not match at all (dead code), while
+// `prod.test.tfvars` and `secrets.test.json` did.
 func isTestFile(path string) bool {
 	base := filepath.Base(path)
-	name := strings.TrimSuffix(base, filepath.Ext(base))
-	return strings.HasSuffix(name, "_test") || strings.HasSuffix(name, ".test") || strings.HasSuffix(name, ".spec")
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	if strings.HasSuffix(name, "_test") || strings.HasSuffix(name, "_spec") {
+		return true
+	}
+	if strings.HasSuffix(name, ".test") || strings.HasSuffix(name, ".spec") {
+		return testSourceExts[strings.ToLower(ext)]
+	}
+	return false
 }
 
 // filterSet holds the resolved per-file filters shared by the walker and the
@@ -830,10 +893,25 @@ func newFilterSet(opts WalkOption) (*filterSet, error) {
 	}
 	fs.skipExtSet = make(map[string]bool, len(skipExts))
 	for _, e := range skipExts {
+		if e == "" {
+			// An empty entry used to reach e[1:] and panic with
+			// "slice bounds out of range [1:0]". Go exits 2 on panic, which is
+			// the same code the tool reserves for "this scan is incomplete",
+			// so a one-character typo in a config file reported itself as a
+			// truncated scan.
+			continue
+		}
+		// Normalise a leading dot: an entry such as "env" could never match,
+		// because filepath.Ext always returns a dot-prefixed suffix.
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
 		if strings.Contains(e[1:], ".") {
+			// An interior dot means the entry is a suffix pattern
+			// (".min.js"), not a plain extension.
 			fs.skipSfx = append(fs.skipSfx, e)
 		} else {
-			fs.skipExtSet[e] = true
+			fs.skipExtSet[strings.ToLower(e)] = true
 		}
 	}
 	return fs, nil
@@ -861,7 +939,7 @@ func (fs *filterSet) reasonExcludingSkipDir(rel string) (SkipReason, bool) {
 	if fs.ignore.Ignored(filepath.ToSlash(rel)) {
 		return SkipReasonIgnore, true
 	}
-	if fs.skipExtSet[filepath.Ext(base)] {
+	if fs.skipExtSet[strings.ToLower(filepath.Ext(base))] {
 		return SkipReasonExt, true
 	}
 	for _, sfx := range fs.skipSfx {

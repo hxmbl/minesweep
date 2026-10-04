@@ -125,16 +125,34 @@ func TestEngineEdgeCases(t *testing.T) {
 
 	t.Run("UTF-16 file", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "unicode.txt")
-		utf16 := []byte{0xFF, 0xFE, 'p', 0x00, 'a', 0x00, 's', 0x00, 's', 0x00, ':', 0x00, 's', 0x00, 'e', 0x00, 'c', 0x00, 'r', 0x00, 'e', 0x00, 't', 0x00}
-		os.WriteFile(path, utf16, 0644)
+		path := filepath.Join(dir, "unicode.env")
+		// UTF-16LE with a BOM. This file was previously classified binary and
+		// produced only an info-level "Binary File" finding, so the test passed
+		// for the wrong reason and the credential went unreported.
+		plain := "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"
+		utf16 := []byte{0xFF, 0xFE}
+		for _, r := range plain {
+			utf16 = append(utf16, byte(r), 0x00)
+		}
+		if err := os.WriteFile(path, utf16, 0644); err != nil {
+			t.Fatal(err)
+		}
 
 		report, err := eng.Run(dir)
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if len(report.Findings) == 0 {
-			t.Fatal("expected findings for UTF-16 file with password-like content")
+		var found bool
+		for _, f := range report.Findings {
+			if f.RuleID == "aws-secret-key" {
+				found = true
+			}
+			if f.RuleID == "binary-file-detected" {
+				t.Error("UTF-16 text was classified as binary")
+			}
+		}
+		if !found {
+			t.Fatalf("expected aws-secret-key for UTF-16 content, got %d findings", len(report.Findings))
 		}
 	})
 

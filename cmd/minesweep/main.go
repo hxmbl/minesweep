@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -48,8 +49,10 @@ var (
 	// -ldflags "-X main.toolVersion=x.y.z".
 	// It must NOT have a package-level constant initializer, otherwise the
 	// compiler folds the value into call sites and -X silently no-ops.
-	toolVersion   string
-	configPath    string
+	toolVersion string
+	configPath  string
+	// hookForce allows install-hooks to replace a third-party hook.
+	hookForce     bool
 	watchMode     bool
 	watchInterval time.Duration
 )
@@ -96,13 +99,25 @@ func main() {
 			if cfg.HistoryMode && (cfg.DiffMode || cfg.StagedOnly) {
 				return fmt.Errorf("--history scans all refs and cannot be combined with --diff or --staged")
 			}
+			if err := validateNumericFlags(cmd, cfg); err != nil {
+				return err
+			}
+			// An explicitly requested rules path must exist. Without this a typo
+			// in --rules, or a file passed where a directory was meant, silently
+			// produced a scan using only the embedded rules: the user got fewer
+			// detections and no indication why.
+			if cmd.Flags().Changed("rules") && cfg.RulesDir != "" {
+				if _, statErr := os.Stat(cfg.RulesDir); statErr != nil {
+					return fmt.Errorf("--rules %q: %w", cfg.RulesDir, statErr)
+				}
+			}
 			return loadConfig(cmd, args[0])
 		},
 		RunE: runScan,
 	}
 
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		fmt.Fprint(cmd.OutOrStdout(), renderGroupedHelp(cmd))
+		fmt.Fprint(cmd.OutOrStdout(), renderGroupedHelp(cmd)) //nolint:errcheck // best-effort help; the exit code is what matters
 	})
 
 	// --rules is persistent so subcommands like `explain` resolve the same
@@ -146,14 +161,21 @@ func main() {
 	root.Flags().BoolVar(&cfg.NoIgnore, "no-ignore", false, "Scan everything, ignoring .minesweepignore and .msignore")
 	root.Flags().BoolVar(&cfg.ShowIgnored, "show-ignored", false, "List every skipped file path (default: sample per cause)")
 	root.Flags().BoolVar(&cfg.IncludeLowConfidence, "include-low-confidence", false, "Report findings below the default confidence floor")
+	root.Flags().BoolVar(&cfg.DisableInlineSuppression, "no-inline-suppressions", false,
+		"Ignore 'minesweep: ignore' comments in scanned files (use in CI to stop content suppressing itself)")
 	root.Flags().BoolVar(&cfg.DangerouslyShowSecrets, "dangerously-show-secrets", false, "Print raw secret values instead of hashes")
 
-	root.AddCommand(&cobra.Command{
+	installHooks := &cobra.Command{
 		Use:   "install-hooks",
 		Short: "Install git pre-commit hook",
-		Long:  "Install a pre-commit hook that runs minesweep on staged files",
-		RunE:  runInstallHooks,
-	})
+		Long: "Install a pre-commit hook that runs minesweep on staged files.\n\n" +
+			"An existing hook that minesweep did not install is never overwritten\n" +
+			"unless --force is given; with --force the original is backed up first.",
+		RunE: runInstallHooks,
+	}
+	installHooks.Flags().BoolVar(&hookForce, "force", false,
+		"Replace an existing pre-commit hook that minesweep did not install")
+	root.AddCommand(installHooks)
 
 	root.AddCommand(&cobra.Command{
 		Use:   "uninstall-hooks",
@@ -229,7 +251,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.Workers) },
 		func(f *config.FileConfig) bool { return f.Workers > 0 }),
-	numField("max_files", "max-files", false,
+	numField("max_files", "max-files", true,
 		func(f *config.FileConfig) string {
 			if f.MaxFiles > 0 {
 				return fmt.Sprint(f.MaxFiles)
@@ -238,7 +260,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MaxFiles) },
 		func(f *config.FileConfig) bool { return f.MaxFiles > 0 }),
-	numField("max_findings", "max-findings", false,
+	numField("max_findings", "max-findings", true,
 		func(f *config.FileConfig) string {
 			if f.MaxFindings > 0 {
 				return fmt.Sprint(f.MaxFindings)
@@ -247,7 +269,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MaxFindings) },
 		func(f *config.FileConfig) bool { return f.MaxFindings > 0 }),
-	numField("memory_limit_mb", "memory-limit-mb", false,
+	numField("memory_limit_mb", "memory-limit-mb", true,
 		func(f *config.FileConfig) string {
 			if f.MemoryLimitMB > 0 {
 				return fmt.Sprint(f.MemoryLimitMB)
@@ -256,7 +278,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MemoryLimitMB) },
 		func(f *config.FileConfig) bool { return f.MemoryLimitMB > 0 }),
-	numField("max_file_size_mb", "max-file-size-mb", false,
+	numField("max_file_size_mb", "max-file-size-mb", true,
 		func(f *config.FileConfig) string {
 			if f.MaxFileSizeMB > 0 {
 				return fmt.Sprint(f.MaxFileSizeMB)
@@ -269,7 +291,7 @@ var configFields = []configField{
 			c.MaxFileSizeMB = n
 		},
 		func(f *config.FileConfig) bool { return f.MaxFileSizeMB > 0 }),
-	numField("max_concurrent_reads", "max-concurrent-reads", false,
+	numField("max_concurrent_reads", "max-concurrent-reads", true,
 		func(f *config.FileConfig) string {
 			if f.MaxConcurrentReads > 0 {
 				return fmt.Sprint(f.MaxConcurrentReads)
@@ -280,6 +302,15 @@ var configFields = []configField{
 		func(f *config.FileConfig) bool { return f.MaxConcurrentReads > 0 }),
 
 	// ---- security-relevant: ignored from discovered configs ----
+	//
+	// Everything here either removes coverage, weakens a gate, or decides what
+	// counts as a finding. A config file found by walking up from the scan
+	// target is, by construction, supplied by whatever is being scanned, so it
+	// may not be allowed to reduce what the scan looks at. That includes the
+	// resource limits: max_file_size_mb was previously classed as a
+	// performance knob, and a repository could ship `max_file_size_mb: 1` and
+	// have every file holding a credential skipped while the scan still
+	// reported "No secrets" and exited 0.
 	strField("no_ignore", "no-ignore", true,
 		func(f *config.FileConfig) string {
 			if f.NoIgnore {
@@ -298,6 +329,19 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { c.IncludeLowConfidence = v == "true" },
 		func(f *config.FileConfig) bool { return f.IncludeLowConfidence }),
+	// Disabling inline suppression only ever surfaces MORE findings, so an
+	// untrusted config may set it. Suppression itself is never enabled from a
+	// config file: there is no way to grant a repository the power to silence
+	// its own findings.
+	strField("no_inline_suppressions", "no-inline-suppressions", false,
+		func(f *config.FileConfig) string {
+			if f.NoInlineSuppressions {
+				return "true"
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { c.DisableInlineSuppression = v == "true" },
+		func(f *config.FileConfig) bool { return f.NoInlineSuppressions }),
 	// Intentionally has no config-file entry: raw secret values must be
 	// opted into on the command line, never by a file in the repository.
 	pathField("rules_dir", "rules", func(c *engine.Config, v string) { c.RulesDir = v }, func(f *config.FileConfig) bool { return f.RulesDir != "" }),
@@ -410,7 +454,9 @@ func applyConfigValues(cfg *engine.Config, fc *config.FileConfig, cfgDir string,
 	}
 	if len(ignored) > 0 && warn != nil {
 		sort.Strings(ignored)
-		fmt.Fprintf(warn, "minesweep: warning: ignoring security-relevant settings from untrusted config:\n"+
+		// Best-effort diagnostic. A failure to print the warning must not fail
+		// the scan, but it is deliberately visible in --verbose output.
+		fmt.Fprintf(warn, "minesweep: warning: ignoring security-relevant settings from untrusted config:\n"+ //nolint:errcheck // diagnostic only
 			"  %s\n"+
 			"  Discovered configs cannot weaken scans. Pass --config <file> to honor them explicitly.\n",
 			strings.Join(ignored, ", "))
@@ -418,28 +464,104 @@ func applyConfigValues(cfg *engine.Config, fc *config.FileConfig, cfgDir string,
 	return ignored
 }
 
+// validateNumericFlags rejects out-of-range numeric settings.
+//
+// Every one of these had a way to turn into a silently clean scan. A confidence
+// threshold above 1 filters out every finding and reports "No secrets or
+// sensitive data detected" with exit 0, which is the worst possible failure for
+// a gate: it looks like success. A negative --min-confidence disabled the
+// default floor as a side effect. `--min-confidence 0` cannot "keep everything"
+// despite a comment in engine.go saying so — only --include-low-confidence does
+// — so it is rejected as ambiguous rather than silently meaning something
+// else.
+func validateNumericFlags(cmd *cobra.Command, cfg engine.Config) error {
+	// Only flags the user actually named are validated: several of these have a
+	// zero default that is a legitimate value (--min-confidence, --workers,
+	// --max-files), and rejecting the default would fail every invocation.
+	explicit := map[string]bool{}
+	cmd.Flags().Visit(func(f *pflag.Flag) { explicit[f.Name] = true })
+
+	if explicit["min-confidence"] {
+		if cfg.MinConfidence < 0 || cfg.MinConfidence > 1 {
+			return fmt.Errorf("--min-confidence must be between 0.0 and 1.0 (got %g); "+
+				"to report findings below the default confidence floor use --include-low-confidence",
+				cfg.MinConfidence)
+		}
+		if cfg.MinConfidence == 0 {
+			// Ambiguous rather than merely useless: a comment in engine.go says
+			// setting this to 0 keeps everything, and it does not. Saying so is
+			// better than quietly applying the default floor.
+			return fmt.Errorf("--min-confidence 0 keeps the default confidence floor; " +
+				"use --include-low-confidence to disable it")
+		}
+	}
+	nonNegative := []struct {
+		flag string
+		val  int64
+	}{
+		{"workers", int64(cfg.Workers)},
+		{"max-files", int64(cfg.MaxFiles)},
+		{"memory-limit-mb", int64(cfg.MemoryLimitMB)},
+		{"max-file-size-mb", cfg.MaxFileSizeMB},
+		{"max-concurrent-reads", int64(cfg.MaxConcurrentReads)},
+	}
+	for _, f := range nonNegative {
+		if explicit[f.flag] && f.val < 0 {
+			return fmt.Errorf("--%s must not be negative (got %d)", f.flag, f.val)
+		}
+	}
+	if explicit["max-findings"] && cfg.MaxFindings < -1 {
+		return fmt.Errorf("--max-findings must be positive, 0 (engine default) or -1 (unlimited) (got %d)",
+			cfg.MaxFindings)
+	}
+	if explicit["runs"] && benchRuns < 1 {
+		return fmt.Errorf("--runs must be at least 1 (got %d)", benchRuns)
+	}
+	if watchMode && watchInterval < 100*time.Millisecond {
+		fmt.Fprintf(os.Stderr, "minesweep: warning: --watch-interval raised to 100ms (got %v)\n", watchInterval)
+		watchInterval = 100 * time.Millisecond
+	}
+	return nil
+}
+
 func loadConfig(cmd *cobra.Command, scanPath string) error {
 	var fileCfg *config.FileConfig
 	var cfgPath string
 	var err error
+	trusted := configPath != ""
 
-	if configPath != "" {
+	// A config the caller named is parsed strictly. A config found by walking
+	// up from the scan target belongs to whatever is being scanned — or to an
+	// unrelated project, or to a parent directory — and it must not be able to
+	// abort the scan. Unknown keys there are reported and ignored.
+	unknown := map[string]bool{}
+	reportUnknown := func(key string) { unknown[key] = true }
+
+	if trusted {
 		fileCfg, err = config.LoadFile(configPath)
 		if err != nil {
 			return fmt.Errorf("load config file: %w", err)
 		}
 		cfgPath = configPath
 	} else {
-		fileCfg, cfgPath, err = config.FindAndLoad(scanPath)
+		fileCfg, cfgPath, err = config.FindAndLoadLax(scanPath, reportUnknown)
 		if err != nil {
 			return fmt.Errorf("load config file: %w", err)
 		}
+	}
+	if len(unknown) > 0 {
+		keys := make([]string, 0, len(unknown))
+		for k := range unknown {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		fmt.Fprintf(os.Stderr, "minesweep: warning: ignoring unrecognised key(s) in %s: %s\n",
+			cfgPath, strings.Join(keys, ", "))
 	}
 	if fileCfg == nil {
 		return nil
 	}
 
-	trusted := configPath != ""
 	if cfg.Verbose {
 		fmt.Fprintf(os.Stderr, "Using config file: %s (%s)\n", cfgPath,
 			map[bool]string{true: "trusted", false: "discovered"}[trusted])
@@ -578,6 +700,9 @@ func scanAndReport(scanPath string) (int, error) {
 		if reportData.FindingsDropped > 0 {
 			fmt.Fprintf(os.Stderr, "  - %s\n", fmt.Sprintf("%d findings dropped by the --max-findings cap", reportData.FindingsDropped))
 		}
+		if reportData.FindingsDiscarded > 0 {
+			fmt.Fprintf(os.Stderr, "  - %s\n", fmt.Sprintf("at least %d findings dropped by the per-file finding budget (further matches went uncounted)", reportData.FindingsDiscarded))
+		}
 	}
 
 	if outputJSON {
@@ -618,8 +743,15 @@ func scanAndReport(scanPath string) (int, error) {
 	}
 	if reportData != nil {
 		minSev := findings.ParseSeverity(cfg.FailOn)
+		// --fail-on is documented as "minimum severity that exits non-zero",
+		// so it must fire on any finding at or above the threshold regardless
+		// of the policy action. The previous implementation also required a
+		// non-allow action, and since the default policy maps low and info to
+		// allow, `--fail-on low` — the documented default — could never fail on
+		// a low-severity finding. A gate that silently does not gate is worse
+		// than one that gates too eagerly, because it is trusted.
 		for _, f := range reportData.Findings {
-			if f.Severity >= minSev && f.Action != findings.ActionAllow {
+			if f.Severity >= minSev {
 				return 1, nil
 			}
 		}
@@ -660,16 +792,29 @@ func nextStepHints(scanPath string, data *findings.RiskReport) []string {
 	return hints
 }
 
+// hasPreCommitHook reports whether minesweep's pre-commit hook is installed.
+//
+// It uses the same marker test as install-hooks/uninstall-hooks. The previous
+// substring search for "minesweep" reported a hook installed whenever any hook
+// merely mentioned the tool — including one whose comment said not to run it —
+// so the hint told users to run `minesweep init` for a hook already in place,
+// which then refused to overwrite it.
 func hasPreCommitHook(repoTop string) bool {
-	data, err := os.ReadFile(filepath.Join(repoTop, ".git", "hooks", "pre-commit"))
+	hookPath, err := hooksDir(repoTop)
 	if err != nil {
 		return false
 	}
-	return strings.Contains(strings.ToLower(string(data)), "minesweep")
+	data, err := os.ReadFile(hookPath) //nolint:gosec // hook path inside the named repository
+	if err != nil {
+		return false
+	}
+	return isOurHook(string(data))
 }
 
 const preCommitHook = `#!/bin/sh
 # MineSweep pre-commit hook
+# minesweep-pre-commit-hook v1
+#
 # Scans staged files for secrets before every commit.
 
 # Resolve the scanner binary. We deliberately never execute a minesweep
@@ -712,23 +857,49 @@ fi
 exit 0
 `
 
+// hookMarker identifies a hook this tool installed. Ownership is checked
+// against this exact line rather than a substring test for "minesweep", which
+// matched any hook that merely mentioned the tool — including a comment in
+// somebody else's script — and uninstall-hooks then deleted it.
+const hookMarker = "# minesweep-pre-commit-hook v1"
+
 func runInstallHooks(cmd *cobra.Command, args []string) error {
 	wd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
 	}
 
-	gitDir := filepath.Join(wd, ".git")
-	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		return fmt.Errorf("not a git repository (no .git directory found)")
+	hookPath, err := hooksDir(wd)
+	if err != nil {
+		return err
 	}
-
-	hooksDir := filepath.Join(gitDir, "hooks")
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0750); err != nil {
 		return fmt.Errorf("create hooks directory: %w", err)
 	}
 
-	hookPath := filepath.Join(hooksDir, "pre-commit")
+	// Refuse to destroy an existing hook. os.WriteFile replaced whatever was
+	// there — husky, lint-staged, the pre-commit framework — with no warning,
+	// no backup and no --force, while `init` guarded its own output the same
+	// way. Losing a team's commit pipeline silently is not recoverable from
+	// inside this tool.
+	if existing, readErr := os.ReadFile(hookPath); readErr == nil { //nolint:gosec // hook path from git rev-parse
+		if !isOurHook(string(existing)) && !hookForce {
+			return fmt.Errorf("a pre-commit hook already exists at %s and was not installed by minesweep\n"+
+				"  refusing to overwrite it; re-run with --force to replace it, or merge the hook yourself:\n"+
+				"    %s",
+				hookPath, strings.TrimSpace(firstLines(string(existing), 3)))
+		}
+		if !isOurHook(string(existing)) {
+			backup := hookPath + ".pre-minesweep"
+			if err := os.WriteFile(backup, existing, 0o755); err != nil { //nolint:gosec // preserving an executable hook
+				return fmt.Errorf("back up existing hook: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "Existing hook backed up to %s\n", backup)
+		}
+	} else if !os.IsNotExist(readErr) {
+		return fmt.Errorf("read existing hook: %w", readErr)
+	}
+
 	if err := os.WriteFile(hookPath, []byte(preCommitHook), 0755); err != nil { //nolint:gosec // pre-commit hook must be executable
 		return fmt.Errorf("write pre-commit hook: %w", err)
 	}
@@ -743,19 +914,21 @@ func runUninstallHooks(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get working directory: %w", err)
 	}
 
-	hookPath := filepath.Join(wd, ".git", "hooks", "pre-commit")
+	hookPath, err := hooksDir(wd)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(hookPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "No pre-commit hook found at %s\n", hookPath)
 		return nil
 	}
 
-	// Check if it's our hook
-	content, err := os.ReadFile(hookPath)
+	content, err := os.ReadFile(hookPath) //nolint:gosec // hook path from git rev-parse
 	if err != nil {
 		return fmt.Errorf("read hook: %w", err)
 	}
-	if !strings.Contains(strings.ToLower(string(content)), "minesweep") {
-		return fmt.Errorf("pre-commit hook does not appear to be a minesweep hook")
+	if !isOurHook(string(content)) {
+		return fmt.Errorf("%s was not installed by minesweep; refusing to remove it", hookPath)
 	}
 
 	if err := os.Remove(hookPath); err != nil {
@@ -764,4 +937,70 @@ func runUninstallHooks(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "Removed pre-commit hook: %s\n", hookPath)
 	return nil
+}
+
+// legacyHookHeader is the first line of the hook this tool installed before the
+// marker existed. It is still recognised, so a repository that installed the
+// hook with an older version can still recognise and uninstall it; refusing to
+// would leave those users with a hook they could not remove and an
+// install-hooks that refused to replace it.
+const legacyHookHeader = "# MineSweep pre-commit hook"
+
+// isOurHook reports whether a hook script was installed by this tool.
+//
+// Both the marker line and the legacy header count. The test is deliberately
+// not a bare substring search for "minesweep": that matched any hook which
+// merely mentioned the tool, including one whose comment said not to run it, and
+// uninstall-hooks then deleted somebody else's hook.
+func isOurHook(content string) bool {
+	if strings.Contains(content, hookMarker) {
+		return true
+	}
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == legacyHookHeader {
+			return true
+		}
+	}
+	return false
+}
+
+// hooksDir locates the pre-commit hook for the repository containing dir.
+//
+// `git rev-parse --git-path hooks` is the authoritative answer. In a linked
+// worktree, a submodule, or any checkout reached through GIT_DIR, `.git` is a
+// *file* pointing elsewhere, so joining dir/.git/hooks failed with "not a
+// directory" and install-hooks simply could not be used there.
+//
+// When git cannot answer — a directory that has a .git entry but is not a usable
+// repository — the conventional <dir>/.git/hooks layout is used if it exists,
+// so a read-only probe such as hasPreCommitHook still works. Writing a hook
+// through that fallback is not possible in practice, because install-hooks also
+// requires a repository and reports one clearly.
+func hooksDir(dir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--git-path", "hooks")
+	cmd.Dir = dir
+	if out, err := cmd.Output(); err == nil {
+		p := strings.TrimSpace(string(out))
+		if p != "" {
+			if !filepath.IsAbs(p) {
+				p = filepath.Join(dir, p)
+			}
+			return filepath.Join(p, "pre-commit"), nil
+		}
+	}
+
+	fallback := filepath.Join(dir, ".git", "hooks")
+	info, statErr := os.Stat(fallback)
+	if statErr != nil || !info.IsDir() {
+		return "", fmt.Errorf("not a git repository (no .git directory found in %s)", dir)
+	}
+	return filepath.Join(fallback, "pre-commit"), nil
+}
+
+func firstLines(s string, n int) string {
+	lines := strings.SplitN(s, "\n", n+1)
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
 }

@@ -130,11 +130,22 @@ func TestHasPreCommitHook(t *testing.T) {
 	if err := os.MkdirAll(hooks, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// The current marker line.
+	if err := os.WriteFile(filepath.Join(hooks, "pre-commit"),
+		[]byte("#!/bin/sh\n# MineSweep pre-commit hook\n# minesweep-pre-commit-hook v1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !hasPreCommitHook(top) {
+		t.Fatal("expected MineSweep hook detection via the marker line")
+	}
+
+	// A hook installed by a version predating the marker must still be
+	// recognised, or those users could neither uninstall it nor replace it.
 	if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte("# MineSweep pre-commit hook\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if !hasPreCommitHook(top) {
-		t.Fatal("expected MineSweep hook detection")
+		t.Fatal("expected legacy Minesweep hook detection")
 	}
 
 	other := filepath.Join(hooks, "unrelated.sh")

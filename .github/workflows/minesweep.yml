@@ -29,25 +29,56 @@ jobs:
       - name: Build minesweep
         run: go build -o minesweep ./cmd/minesweep
 
-      - name: Run minesweep (diff mode for PRs)
-        if: github.event_name == 'pull_request'
+      # One scan, one result set. The SARIF step previously re-ran a *second*
+      # full scan, so the gate and the published artifact were produced by
+      # different invocations and could disagree. The log is now written once
+      # and reused.
+      - name: Scan
+        id: scan
         run: |
-          ./minesweep --diff --diff-base ${{ github.base_ref }} --fail-on high .
+          set +e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            ./minesweep --diff --diff-base "${{ github.base_ref }}" --fail-on high \
+              --sarif --no-pager . > results.sarif
+          else
+            ./minesweep --fail-on high --sarif --no-pager . > results.sarif
+          fi
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          # Always succeed: the exit code is the verdict and is enforced by the
+          # next step, which distinguishes 1 (findings) from 2 (incomplete).
+          # Failing here would skip the SARIF upload entirely.
+          exit 0
 
-      - name: Run minesweep (full scan on main)
-        if: github.event_name == 'push'
+      - name: Enforce the gate
+        # Exit 2 means "the scan did not cover the whole target". Treating that
+        # as a pass would publish a partial result as if it were complete, so
+        # it fails here too.
         run: |
-          ./minesweep --fail-on high .
+          code="${{ steps.scan.outputs.exit_code }}"
+          if [ -z "$code" ]; then
+            echo "::error::the scan step reported no exit code"
+            exit 1
+          fi
+          if [ "$code" = "0" ]; then
+            echo "no findings at or above --fail-on high"
+          elif [ "$code" = "1" ]; then
+            echo "::error::secrets detected at or above --fail-on high"
+            exit 1
+          elif [ "$code" = "2" ]; then
+            echo "::error::scan was incomplete; results are partial (see the incompleteness reasons in results.sarif)"
+            exit 2
+          else
+            echo "::error::minesweep failed with exit code $code"
+            exit "$code"
+          fi
 
       - name: Upload SARIF to GitHub Code Scanning
-        if: always()
-        run: |
-          ./minesweep --sarif . > results.sarif
-        continue-on-error: true
-
-      - name: Upload SARIF results
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results.sarif
+        # continue-on-error is kept deliberately: an incomplete or failing scan
+        # must still publish what it found. The SARIF now carries
+        # invocations[].executionSuccessful=false and properties.scanComplete
+        # for that case, so the artifact is self-describing.
         continue-on-error: true

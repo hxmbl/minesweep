@@ -9,7 +9,11 @@ import (
 
 // dbPattern is one compiled detection pattern of the DatabaseDetector.
 type dbPattern struct {
+	// name is the rule ID: stable and machine-facing. label is what the report
+	// shows. They used to be one string, so the report headlined findings with
+	// internal identifiers and `explain` could not find them.
 	name        string
+	label       string
 	regex       *regexp.Regexp
 	gate        literalGate
 	severity    findings.Severity
@@ -21,9 +25,10 @@ type dbPattern struct {
 	requireValue bool
 }
 
-func newDBPattern(name, pattern string, severity findings.Severity, confidence float64, tags []string, description string) dbPattern {
+func newDBPattern(name, label, pattern string, severity findings.Severity, confidence float64, tags []string, description string) dbPattern {
 	return dbPattern{
 		name:        name,
+		label:       label,
 		regex:       regexp.MustCompile(pattern),
 		gate:        extractLiteralGate(pattern),
 		severity:    severity,
@@ -35,8 +40,8 @@ func newDBPattern(name, pattern string, severity findings.Severity, confidence f
 
 // newDBAssignmentPattern is newDBPattern for rules that capture an assignment
 // rather than a bare token.
-func newDBAssignmentPattern(name, pattern string, severity findings.Severity, confidence float64, tags []string, description string) dbPattern {
-	p := newDBPattern(name, pattern, severity, confidence, tags, description)
+func newDBAssignmentPattern(name, label, pattern string, severity findings.Severity, confidence float64, tags []string, description string) dbPattern {
+	p := newDBPattern(name, label, pattern, severity, confidence, tags, description)
 	p.requireValue = true
 	return p
 }
@@ -50,32 +55,32 @@ type DatabaseDetector struct {
 func NewDatabaseDetector() *DatabaseDetector {
 	return &DatabaseDetector{
 		patterns: []dbPattern{
-			newDBPattern("postgresql_connection_string",
+			newDBPattern("postgresql_connection_string", "PostgreSQL Connection String",
 				`(?i)postgres(?:ql)?(?:\+\w+)?://([^:\s]+):([^@\s]+)@[^\s]+`,
 				findings.SeverityCritical, 0.90,
 				[]string{"database", "postgresql", "credentials"}, "PostgreSQL connection string with credentials"),
 
-			newDBPattern("mysql_connection_string",
+			newDBPattern("mysql_connection_string", "MySQL Connection String",
 				`(?i)mysql://([^:\s]+):([^@\s]+)@[^\s]+`,
 				findings.SeverityCritical, 0.90,
 				[]string{"database", "mysql", "credentials"}, "MySQL connection string with credentials"),
 
-			newDBPattern("mongodb_connection_string",
+			newDBPattern("mongodb_connection_string", "MongoDB Connection String",
 				`(?i)mongodb(?:\+srv)?://([^:\s]+):([^@\s]+)@[^\s]+`,
 				findings.SeverityCritical, 0.90,
 				[]string{"database", "mongodb", "credentials"}, "MongoDB connection string with credentials"),
 
-			newDBPattern("redis_connection_string",
+			newDBPattern("redis_connection_string", "Redis Connection String",
 				`(?i)redis://([^:\s]+):([^@\s]+)@[^\s]+`,
 				findings.SeverityHigh, 0.85,
 				[]string{"database", "redis", "credentials"}, "Redis connection string with credentials"),
 
-			newDBPattern("generic_database_url",
+			newDBPattern("generic_database_url", "Generic Database URL",
 				`(?i)(oracle|mssql|sqlite|mariadb|cockroachdb|clickhouse)://([^:\s]+):([^@\s]+)@[^\s]+`,
 				findings.SeverityHigh, 0.80,
 				[]string{"database", "credentials"}, "Generic database connection URL with credentials"),
 
-			newDBAssignmentPattern("database_credentials_kv",
+			newDBAssignmentPattern("database_credentials_kv", "Database Credentials",
 				`(?i)(?:db|database)[_-]?(?:user|username|user_name|pwd|password|passwd)[ \t]*[:=][ \t]*['"]?[^\s'"]+['"]?`,
 				findings.SeverityHigh, 0.75,
 				[]string{"database", "credentials"}, "Database credentials in key-value format"),
@@ -83,12 +88,12 @@ func NewDatabaseDetector() *DatabaseDetector {
 			// ODBC-style chain: Server=...;...;User Id=...;Password=...
 			// Must require the credential keys — an ungrouped alternation
 			// here once made the bare word "Server" a HIGH finding.
-			newDBPattern("sql_connection_string",
+			newDBPattern("sql_connection_string", "SQL Connection String",
 				`(?i)(?:server|data\s*source)=[^;]+(?:;[^;]+)*;(?:user\s*(?:id)?|uid)=[^;]+(?:;[^;]+)*;p(?:assword|wd)=[^;]+`,
 				findings.SeverityHigh, 0.85,
 				[]string{"database", "sql", "credentials"}, "SQL connection string with credentials"),
 
-			newDBPattern("jdbc_connection_string",
+			newDBPattern("jdbc_connection_string", "JDBC Connection String",
 				`(?i)jdbc:[a-z0-9]+://[^:\s]+:[^@\s]+@[^\s]+`,
 				findings.SeverityHigh, 0.85,
 				[]string{"database", "jdbc", "credentials"}, "JDBC connection string with credentials"),
@@ -138,7 +143,7 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 				return fResults
 			}
 			fResults = append(fResults, findings.Finding{
-				Type:       pattern.name,
+				Type:       pattern.label,
 				Severity:   pattern.severity,
 				Confidence: pattern.confidence,
 				File:       file.Path,
@@ -153,4 +158,27 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	return fResults
+}
+
+// BuiltInRules describes the DatabaseDetector's patterns as Rule values so
+// `minesweep explain <rule-id>` can account for them.
+//
+// The detector's patterns are compiled in Go rather than loaded from YAML, so
+// they were invisible to `explain`, which only reads the rule directory. A
+// finding whose rule ID could not be explained was an internal identifier
+// leaking into the user's workflow.
+func (d *DatabaseDetector) BuiltInRules() []Rule {
+	out := make([]Rule, 0, len(d.patterns))
+	for _, p := range d.patterns {
+		out = append(out, Rule{
+			ID:          p.name,
+			Type:        "regex",
+			Name:        p.label,
+			Description: p.description,
+			Severity:    p.severity.String(),
+			Tags:        append([]string(nil), p.tags...),
+			BuiltIn:     true,
+		})
+	}
+	return out
 }

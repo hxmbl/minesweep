@@ -9,7 +9,11 @@ import (
 
 // oauthPattern is one compiled detection pattern of the OAuthDetector.
 type oauthPattern struct {
+	// name is the rule ID: stable and machine-facing. label is what the report
+	// shows. They used to be one string, so the report headlined findings with
+	// internal identifiers and `explain` could not find them.
 	name        string
+	label       string
 	regex       *regexp.Regexp
 	gate        literalGate
 	severity    findings.Severity
@@ -24,9 +28,10 @@ type OAuthDetector struct {
 	patterns []oauthPattern
 }
 
-func newOAuthPattern(name, pattern string, severity findings.Severity, confidence float64, tags []string, description string) oauthPattern {
+func newOAuthPattern(name, label, pattern string, severity findings.Severity, confidence float64, tags []string, description string) oauthPattern {
 	return oauthPattern{
 		name:        name,
+		label:       label,
 		regex:       regexp.MustCompile(pattern),
 		gate:        extractLiteralGate(pattern),
 		severity:    severity,
@@ -40,34 +45,34 @@ func newOAuthPattern(name, pattern string, severity findings.Severity, confidenc
 func NewOAuthDetector() *OAuthDetector {
 	return &OAuthDetector{
 		patterns: []oauthPattern{
-			newOAuthPattern("oauth_client_secret",
+			newOAuthPattern("oauth_client_secret", "OAuth Client Secret",
 				`(?i)(oauth|client)[_-]?secret[ \t]*[:=][ \t]*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
 				findings.SeverityHigh, 0.80,
 				[]string{"oauth", "secret", "credentials"}, "OAuth client secret"),
 
-			newOAuthPattern("oauth_access_token",
+			newOAuthPattern("oauth_access_token", "OAuth Access Token",
 				`(?i)(oauth|access)[_-]?token[ \t]*[:=][ \t]*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
 				findings.SeverityHigh, 0.80,
 				[]string{"oauth", "token", "credentials"}, "OAuth access token"),
 
-			newOAuthPattern("gitlab_token",
+			newOAuthPattern("gitlab_token", "GitLab Personal Access Token",
 				`\b(glpat-[A-Za-z0-9\-_]{20,})\b`,
 				findings.SeverityHigh, 0.95,
 				[]string{"gitlab", "token", "credentials", "vcs"}, "GitLab personal access token"),
 
 			// Anchored to an explicit key/value context: an unanchored
 			// fixed-length match would flag every git SHA-1 in sight.
-			newOAuthPattern("bitbucket_token",
+			newOAuthPattern("bitbucket_token", "Bitbucket App Password",
 				`(?i)bitbucket[_-]?(?:token|app[_-]?password)[ \t]*[:=][ \t]*['"]?[A-Za-z0-9\-_]{20,}['"]?`,
 				findings.SeverityHigh, 0.85,
 				[]string{"bitbucket", "token", "credentials", "vcs"}, "Bitbucket app password or token"),
 
-			newOAuthPattern("session_cookie",
+			newOAuthPattern("session_cookie", "Session Cookie",
 				`(?i)(PHPSESSID|JSESSIONID|ASP\.NET_SessionId|sessionid|sessid|sid)\s*[=:]\s*["']?[A-Za-z0-9\-_]{20,}['"]?`,
 				findings.SeverityMedium, 0.75,
 				[]string{"session", "cookie", "credentials"}, "Session cookie or ID"),
 
-			newOAuthPattern("cloud_storage_credentials",
+			newOAuthPattern("cloud_storage_credentials", "Cloud Storage Credentials",
 				`(?i)(aws|gcp|azure|s3|gs|blob)\s*(access|secret|key|token|password)[ \t]*[:=][ \t]*['"]?[A-Za-z0-9/+=@\-_]{20,}['"]?`,
 				findings.SeverityHigh, 0.80,
 				[]string{"cloud", "storage", "credentials"}, "Cloud storage credentials"),
@@ -113,7 +118,7 @@ func (d *OAuthDetector) Detect(file *filesystem.File) []findings.Finding {
 				return fResults
 			}
 			fResults = append(fResults, findings.Finding{
-				Type:       pattern.name,
+				Type:       pattern.label,
 				Severity:   pattern.severity,
 				Confidence: pattern.confidence,
 				File:       file.Path,
@@ -128,4 +133,22 @@ func (d *OAuthDetector) Detect(file *filesystem.File) []findings.Finding {
 	}
 
 	return fResults
+}
+
+// BuiltInRules describes the OAuthDetector's patterns as Rule values. See
+// DatabaseDetector.BuiltInRules.
+func (d *OAuthDetector) BuiltInRules() []Rule {
+	out := make([]Rule, 0, len(d.patterns))
+	for _, p := range d.patterns {
+		out = append(out, Rule{
+			ID:          p.name,
+			Type:        "regex",
+			Name:        p.label,
+			Description: p.description,
+			Severity:    p.severity.String(),
+			Tags:        append([]string(nil), p.tags...),
+			BuiltIn:     true,
+		})
+	}
+	return out
 }

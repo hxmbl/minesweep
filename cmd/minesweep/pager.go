@@ -94,7 +94,9 @@ func renderTextInteractive(r *findings.RiskReport, opts *report.TextOptions) err
 	paged.Color = report.ColorAlways
 
 	writeErr := report.WriteText(stdin, r, paged)
-	stdin.Close()
+	// Closing the pipe is what makes the pager see EOF; an error here means the
+	// pager already exited, which the wait below will report.
+	_ = stdin.Close()
 	waitErr := cmd.Wait()
 
 	if writeErr != nil && errors.Is(writeErr, syscall.EPIPE) {

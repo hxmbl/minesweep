@@ -2,9 +2,11 @@ package git
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,7 +32,9 @@ func ValidSHA(s string) bool {
 }
 
 func gitCmd(root string, args ...string) *exec.Cmd {
-	cmd := exec.Command("git", args...)
+	// Callers pass only fixed git subcommands and SHAs validated by ValidSHA;
+	// repository data arrives via stdout parsing and is never an argument.
+	cmd := exec.Command("git", args...) //nolint:gosec // see comment above
 	cmd.Dir = root
 	return cmd
 }
@@ -52,12 +56,15 @@ func ListHistoryObjects(root string) ([]HistoryObject, error) {
 	if err := revList.Start(); err != nil {
 		return nil, fmt.Errorf("git rev-list: %w", err)
 	}
+	// Best-effort child cleanup on early-return paths. A failure here is not
+	// actionable — the caller is already unwinding for a real reason — but it
+	// must not be discarded silently, so it is assigned to blank identifiers.
 	defer func() {
 		if stdout != nil {
-			io.Copy(io.Discard, stdout) //nolint:errcheck // drain so git can exit cleanly
-			stdout.Close()
+			_, _ = io.Copy(io.Discard, stdout) // drain so git can exit cleanly
+			_ = stdout.Close()
 		}
-		revList.Wait() //nolint:errcheck // best-effort reaping on early return paths
+		_ = revList.Wait()
 	}()
 
 	checker, err := newBatchChecker(top)
@@ -143,8 +150,12 @@ func (b *batchChecker) Check(sha string) (string, int64, error) {
 }
 
 func (b *batchChecker) Close() {
-	b.stdin.Close()
-	b.cmd.Wait() //nolint:errcheck // child cleanup; errors are not actionable
+	// Best-effort child cleanup. A failure here is not actionable — every caller
+	// is finishing with this child either way — but it is discarded explicitly
+	// rather than ignored.
+	_, _ = b.stdin.Write(nil)
+	_ = b.stdin.Close()
+	_ = b.cmd.Wait()
 }
 
 // blobBufRetainBytes is the scratch-buffer size above which the BlobFetcher
@@ -240,8 +251,9 @@ func (f *BlobFetcher) Fetch(sha string) ([]byte, error) {
 }
 
 func (f *BlobFetcher) Close() {
-	f.in.Close()
-	f.cmd.Wait() //nolint:errcheck // child cleanup; errors are not actionable
+	// Best-effort child cleanup; see batchChecker.Close.
+	_ = f.in.Close()
+	_ = f.cmd.Wait()
 	f.buf = nil
 }
 
@@ -251,6 +263,22 @@ type CommitInfo struct {
 	Author  string
 	Date    string
 	Summary string
+	// Occurrences lists every commit the blob appears in together with the
+	// paths it occupied there, oldest last.
+	//
+	// `git rev-list --objects` names each object exactly once, so a secret
+	// living at two paths in history was reported under one of them: the other
+	// location was silently absent, and a user who cleaned up the named file
+	// would leave the secret behind. The paths come from the
+	// --find-object query that was already being run, so they cost nothing
+	// extra.
+	Occurrences []BlobOccurrence
+}
+
+// BlobOccurrence pairs a commit with the paths the blob occupied in it.
+type BlobOccurrence struct {
+	Commit string
+	Paths  []string
 }
 
 // FindOriginCommit identifies the oldest commit in which the given blob
@@ -266,34 +294,73 @@ func FindOriginCommit(root, blobSHA string) (*CommitInfo, error) {
 	}
 
 	// NUL-separated fields: author names and summaries may contain anything.
+	// --name-only adds, after each commit record, the paths the object
+	// occupied in that commit. Only fixed git subcommands are executed; the
+	// blob name was validated above.
 	args := []string{
 		"log", "--all",
 		"--find-object=" + blobSHA,
 		"--format=%H%x00%an%x00%aI%x00%s",
+		"--name-only",
 	}
 	cmd := gitCmd(top, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git log --find-object: %w", err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) == 0 || lines[0] == "" {
+	if len(bytes.TrimSpace(out)) == 0 {
 		return nil, nil // unreachable from any ref, e.g. orphaned blob
 	}
-	last := lines[len(lines)-1] // oldest commit that touched the object
-	fields := strings.SplitN(last, "\x00", 4)
-	info := &CommitInfo{SHA: fields[0]}
-	if len(fields) > 1 {
-		info.Author = fields[1]
+
+	info := &CommitInfo{}
+	seen := false
+	occurrences := 0
+	// --name-only interleaves commit records with path lines. A commit record
+	// is the only line that can carry a NUL, and a path can never contain one,
+	// so the two are unambiguously distinguishable.
+	//
+	// git emits commits newest-first and the commit reported is the oldest one,
+	// so each commit record overwrites the metadata while occurrences
+	// accumulate on the single result. Building a fresh CommitInfo per record
+	// kept only the last record's paths, which is the same defect in a new place.
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" {
+			continue
+		}
+		if idx := strings.IndexByte(line, 0); idx > 0 && ValidSHA(line[:idx]) {
+			fields := strings.SplitN(line, "\x00", 4)
+			info.SHA = fields[0]
+			if len(fields) > 1 {
+				info.Author = fields[1]
+			}
+			if len(fields) > 2 {
+				info.Date = fields[2]
+			}
+			if len(fields) > 3 {
+				info.Summary = fields[3]
+			}
+			info.Occurrences = append(info.Occurrences, BlobOccurrence{Commit: info.SHA})
+			occurrences++
+			seen = true
+			continue
+		}
+		if seen {
+			info.Occurrences[occurrences-1].Paths = append(
+				info.Occurrences[occurrences-1].Paths, filepath.ToSlash(line))
+		}
 	}
-	if len(fields) > 2 {
-		info.Date = fields[2]
-	}
-	if len(fields) > 3 {
-		info.Summary = fields[3]
+	if !seen {
+		return nil, nil // no commit record: nothing to attribute
 	}
 	if !ValidSHA(info.SHA) {
 		return nil, fmt.Errorf("git returned malformed commit id")
+	}
+	// Occurrences arrive newest-first; reverse for a stable oldest-last order,
+	// so identical history produces identical output regardless of git's
+	// traversal details.
+	for i, j := 0, len(info.Occurrences)-1; i < j; i, j = i+1, j-1 {
+		info.Occurrences[i], info.Occurrences[j] = info.Occurrences[j], info.Occurrences[i]
 	}
 	return info, nil
 }
