@@ -53,9 +53,17 @@ minesweep --baseline .minesweep-baseline.json .
 
 # Filters
 minesweep --min-severity high --tag aws .
+minesweep --include-tests .            # test files are skipped by default
 ```
 
-Subcommands: `init`, `version`, `explain`, `install-hooks`, `uninstall-hooks`.
+Test files are recognised by the conventions their languages use: `*_test.go`,
+`*_spec.rb`, `test_*.py`, `spec_*.js`, and `.test`/`.spec` segments — the prefix
+forms are restricted to known test-source extensions, so `test.json` and
+`test.tfvars` are still scanned. Skipped files are named in the report's skip
+breakdown rather than passing in silence, and `--include-tests` scans them.
+
+Subcommands: `init`, `version`, `explain`, `install-hooks`, `uninstall-hooks`,
+`trust`, `untrust`.
 
 Run `minesweep --help` for the full flag list. Exit codes: `0` clean or below
 `--fail-on`; `1` findings at or above it; `2` the scan is incomplete and its
@@ -271,7 +279,8 @@ In CI, where nothing in the repository should be able to silence itself:
 minesweep --no-inline-suppressions .
 ```
 
-**A suppression file.** Matching is by `rule_id`, by value regex, or by path:
+**A suppression file.** Matching is by `rule_id`, `tags`, value regex, or path
+glob:
 
 ```json
 {
@@ -679,6 +688,48 @@ go test -race ./...
 go build ./cmd/minesweep
 golangci-lint run
 ```
+
+### Test fixtures: never write a credential-shaped literal
+
+GitHub's push protection rejects the **whole push** if any committed file
+contains a credential-shaped token, and it does not care that the file is a
+test. The failure is invisible until then:
+
+```
+remote: - Push cannot contain secrets
+remote:      —— Amazon AWS Access Key ID ———
+remote:        paths: engine/engine_test.go:37
+```
+
+Two ways to write a fixture that a detector will accept:
+
+**Build it from fragments** — `internal/fixtures` provides well-formed fictional
+values for every vendor shape:
+
+```go
+body := "AWS_ACCESS_KEY_ID=" + fixtures.AWSAccessKeyID() + "\n"
+```
+
+**Or escape the first character.** Go interprets `\xNN` in an interpreted string
+literal, so the decoded value is byte-identical and the detector still sees
+exactly what it must, while the raw file no longer contains the token:
+
+```go
+// AKIAZQ4TLN2XRH7JWBVG
+body := "AWS_ACCESS_KEY_ID=\x41KIAZQ4TLN2XRH7JWBVG\n"
+```
+
+Both are checked. `TestNoCredentialShapedLiteralInAnyGoSource` walks every `.go`
+file in the repository and fails on any unescaped token, so the convention cannot
+rot — but the raw-string and comment cases are the ones it will catch first, since
+neither can hold a `\xNN` escape.
+
+Do not use a vendor's published documentation credentials as a stand-in for "a
+real secret". They are allowlisted by GitHub, so they push cleanly, which is
+exactly the problem: a suppression or a fixture tuned to `AKIAIOSFODNN7EXAMPLE`
+looks like it is handling a credential *class* when it is handling two literals,
+and a real AWS key in a real file gets the same treatment. `internal/fixtures`
+exists so that distinction does not have to be made by eye.
 
 ## License
 
