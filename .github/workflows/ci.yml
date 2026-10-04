@@ -74,7 +74,12 @@ jobs:
           go-version: "1.26"
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v4
+        # v6 was the first release to drop the default `github-actions` output
+        # format and the `--out-format` flag it passed to the binary. Both were
+        # removed in golangci-lint v2, so on v4 the action installed the linter
+        # correctly and then failed to invoke it:
+        #   Error: unknown flag: --out-format
+        uses: golangci/golangci-lint-action@v9
         with:
           # Pinned to the release the v2 .golangci.yml was verified against,
           # and pinned rather than `latest`: `version: latest` with
