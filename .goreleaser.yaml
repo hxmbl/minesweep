@@ -25,7 +25,7 @@ archives:
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else }}{{ .Arch }}{{ end }}
-    formats: ["tar.gz"]
+    format: tar.gz
 
 checksum:
   name_template: "checksums.txt"
