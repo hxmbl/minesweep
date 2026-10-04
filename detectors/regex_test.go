@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	fx "minesweep/internal/fixtures"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ func BenchmarkRegexDetector(b *testing.B) {
 	}
 
 	// Create test content with a secret
-	content := []byte(strings.Repeat("safe content\n", 1000) + "AKIAIOSFODNN7EXAMPLE\n" + strings.Repeat("more safe content\n", 1000))
+	content := []byte(strings.Repeat("safe content\n", 1000) + fx.AWSAccessKeyID() + "\n" + strings.Repeat("more safe content\n", 1000))
 	file := &filesystem.File{
 		Path:    "test.txt",
 		Content: content,
@@ -61,7 +62,7 @@ func BenchmarkRegexDetectorManySecrets(b *testing.B) {
 	// Create content with many secrets
 	var secrets []string
 	for i := 0; i < 100; i++ {
-		secrets = append(secrets, "AKIAIOSFODNN7EXAMPLE")
+		secrets = append(secrets, fx.AWSAccessKeyID())
 	}
 	content := []byte(strings.Join(secrets, "\n"))
 	file := &filesystem.File{

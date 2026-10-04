@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"minesweep/filesystem"
+	fx "minesweep/internal/fixtures"
 )
 
 func TestRegexDetectorNoFalsePositives(t *testing.T) {
@@ -70,10 +71,9 @@ func TestRegexDetectorEdgeCases(t *testing.T) {
 		},
 		{
 			name: "AWS key in code example",
-			content: `# Example configuration
-# AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-# aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-`,
+			content: "# Example configuration\n" +
+				"# AWS_ACCESS_KEY_ID=" + fx.AWSAccessKeyID() + "\n" +
+				"# aws_secret_access_key=" + fx.AWSSecretKey() + "\n",
 			wantMin: 1,
 		},
 		{
@@ -88,12 +88,12 @@ func TestRegexDetectorEdgeCases(t *testing.T) {
 		},
 		{
 			name:    "Slack token",
-			content: `slack_token=xoxb-123456789012-1234567890123-abc123def456ghi789jkl`,
+			content: `slack_token=\x78oxb-123456789012-1234567890123-abc123def456ghi789jkl`,
 			wantMin: 1,
 		},
 		{
 			name:    "GitHub PAT",
-			content: `GITHUB_TOKEN=ghp_abc123def456ghi789jkl012mno345pqr678stu901vwx234yz0`,
+			content: `GITHUB_TOKEN=\x67hp_abc123def456ghi789jkl012mno345pqr678stu901vwx234yz0`,
 			wantMin: 1,
 		},
 	}
@@ -121,7 +121,8 @@ func TestRegexDetectorLargeInput(t *testing.T) {
 		t.Fatalf("NewRegexDetector: %v", err)
 	}
 
-	largeContent := strings.Repeat("hello world this is a safe file\n", 10000) + "AKIAIOSFODNN7EXAMPLE\n"
+	largeContent := strings.Repeat("hello world this is a safe file\n", 10000) +
+		"AWS_ACCESS_KEY_ID=" + fx.AWSAccessKeyID() + "\n"
 	file := &filesystem.File{
 		Path:    "large.txt",
 		Content: []byte(largeContent),
@@ -261,12 +262,11 @@ func TestRegexDetectorUnicodeContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRegexDetector: %v", err)
 	}
-	content := `# ☕ java config
-DB_PASSWORD=☕☕☕☕☕☕☕☕☕☕
-AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-# 你好世界
-SECRET=秘密
-`
+	content := "# ☕ java config\n" +
+		"DB_PASSWORD=☕☕☕☕☕☕☕☕☕☕\n" +
+		"AWS_ACCESS_KEY_ID=" + fx.AWSAccessKeyID() + "\n" +
+		"# 你好世界\n" +
+		"SECRET=秘密\n"
 	file := &filesystem.File{
 		Path:    "unicode.txt",
 		Content: []byte(content),
@@ -308,7 +308,8 @@ func TestRegexDetectorSecretsAtPositions(t *testing.T) {
 	}
 
 	t.Run("secret_at_end_of_large", func(t *testing.T) {
-		content := strings.Repeat("safe line\n", 5000) + "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"
+		content := strings.Repeat("safe line\n", 5000) +
+			"AWS_ACCESS_KEY_ID=" + fx.AWSAccessKeyID() + "\n"
 		file := &filesystem.File{
 			Path:    "large.txt",
 			Content: []byte(content),
@@ -331,8 +332,8 @@ func TestRegexDetectorSecretsAtPositions(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			lines = append(lines, fmt.Sprintf("line%d = safe\n", i))
 		}
-		lines[0] = "GITHUB_TOKEN=ghp_abc123def456ghi789jkl012mno345pqr678stu901vwx234yz0\n"
-		lines[50] = "slack_token=xoxb-123456789012-1234567890123-abc123def456ghi789jkl\n"
+		lines[0] = "GITHUB_TOKEN=\x67hp_abc123def456ghi789jkl012mno345pqr678stu901vwx234yz0\n"
+		lines[50] = "slack_token=\x78oxb-123456789012-1234567890123-abc123def456ghi789jkl\n"
 		lines[99] = "-----BEGIN RSA PRIVATE KEY-----\n"
 		content := strings.Join(lines, "")
 
@@ -370,9 +371,9 @@ func TestRegexDetectorSecretsInComments(t *testing.T) {
 	}
 
 	content := `// TODO: remove this before commit
-// AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+// AWS_ACCESS_KEY_ID=\x41KIAIOSFODNN7EXAMPLE
 // password = super-secret-12345
-// slack token: xoxb-123456789012-1234567890123-abc123def456ghi789jkl
+// slack token: \x78oxb-123456789012-1234567890123-abc123def456ghi789jkl
 //
 // func main() {
 //     db.connect("postgres://user:pass@localhost/db")

@@ -132,9 +132,20 @@ func (d *DatabaseDetector) Detect(file *filesystem.File) []findings.Finding {
 				li = file.Lines()
 			}
 			lineNum, col := li.LineCol(start)
-			value := string(data[start:end])
-			if pattern.requireValue && !assignmentValueLooksLikeCredential(value) {
+			// A documentation example, or a comment-only line, is held to a
+			// stricter bar: see heldBackByLineContext.
+			if heldBackByLineContext(file, lineNum, sourceLineOf(li, lineNum), pattern.confidence) {
 				continue
+			}
+			value := string(data[start:end])
+			if pattern.requireValue {
+				// Judge the value, report the value. The offsets stay on the
+				// whole match so the finding still points at the assignment.
+				narrowed, ok := credentialValue(value)
+				if !ok {
+					continue
+				}
+				value = narrowed
 			}
 
 			// Evidence is attached by the engine to findings that survive

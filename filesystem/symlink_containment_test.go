@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	fx "minesweep/internal/fixtures"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,7 @@ func TestSymlinkChainCannotEscapeRoot(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
 	secret := filepath.Join(outside, "creds.env")
-	if err := os.WriteFile(secret, []byte("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"), 0o600); err != nil {
+	if err := os.WriteFile(secret, []byte("AWS_ACCESS_KEY_ID="+fx.AWSAccessKeyID()+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -54,7 +55,7 @@ func TestSymlinkChainCannotEscapeRoot(t *testing.T) {
 func TestSymlinkChainInsideRootIsFollowed(t *testing.T) {
 	root := t.TempDir()
 	real := filepath.Join(root, "real.env")
-	if err := os.WriteFile(real, []byte("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"), 0o600); err != nil {
+	if err := os.WriteFile(real, []byte("AWS_ACCESS_KEY_ID="+fx.AWSAccessKeyID()+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(real, filepath.Join(root, "hop")); err != nil {

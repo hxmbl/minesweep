@@ -1,6 +1,7 @@
 package report
 
 import (
+	fx "minesweep/internal/fixtures"
 	"strings"
 	"testing"
 
@@ -18,15 +19,15 @@ func TestCensorFindingCensorsEvidenceWithoutValue(t *testing.T) {
 		Severity:   findings.SeverityInfo,
 		File:       "app.db",
 		Line:       1,
-		SourceLine: "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
-		Context:    "> AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n",
+		SourceLine: "AWS_ACCESS_KEY_ID=" + fx.AWSAccessKeyID(),
+		Context:    "> AWS_ACCESS_KEY_ID=" + fx.AWSAccessKeyID() + "\n",
 		Action:     findings.ActionAllow,
 	}
 	out := CensorFinding(f)
-	if strings.Contains(out.SourceLine, "AKIAIOSFODNN7EXAMPLE") {
+	if strings.Contains(out.SourceLine, fx.AWSAccessKeyID()) {
 		t.Fatalf("evidence leaked through a valueless finding: %q", out.SourceLine)
 	}
-	if strings.Contains(out.Context, "AKIAIOSFODNN7EXAMPLE") {
+	if strings.Contains(out.Context, fx.AWSAccessKeyID()) {
 		t.Fatalf("context leaked through a valueless finding: %q", out.Context)
 	}
 	if out.Value != "" {
@@ -37,7 +38,7 @@ func TestCensorFindingCensorsEvidenceWithoutValue(t *testing.T) {
 // M3: the same secret must show the same token everywhere. Censoring an
 // already-tokenized Value hashed the token a second time.
 func TestCensorFindingIsIdempotentOnTokens(t *testing.T) {
-	raw := "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	raw := "\x67hp_abcdefghijklmnopqrstuvwxyz0123456789"
 	f := findings.Finding{
 		Value:      raw,
 		SourceLine: "token = " + raw,

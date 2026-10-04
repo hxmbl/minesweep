@@ -1,6 +1,7 @@
 package findings
 
 import (
+	fx "minesweep/internal/fixtures"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +12,7 @@ func TestFindingHash(t *testing.T) {
 		Type:   "AWS Access Key ID",
 		File:   ".env",
 		Line:   5,
-		Value:  "AKIAIOSFODNN7EXAMPLE",
+		Value:  fx.AWSAccessKeyID(),
 		RuleID: "aws-access-key",
 	}
 

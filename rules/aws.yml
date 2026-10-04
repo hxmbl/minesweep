@@ -21,6 +21,15 @@ rules:
       - regex: (?i)aws_secret_access_key[ \t]*[:=][ \t]*["']?([A-Za-z0-9/+=]{40})["']?
         confidence: 0.95
         capture_group: 1
+      # `aws configure set aws_secret_access_key <value>` is how the key most
+      # often reaches a shell history and a CI log, and it has no `=` for the
+      # pattern above to key on — so it was caught only by the entropy detector,
+      # at low severity, which the pre-commit gate does not block on. Requiring
+      # the keyword keeps a bare 40-character string out of the report, which is
+      # the whole reason the context form exists.
+      - regex: (?i)aws_secret_access_key[ \t]+["']?([A-Za-z0-9/+=]{40})["']?
+        confidence: 0.90
+        capture_group: 1
 
   - id: aws-session-token
     type: regex

@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	fx "minesweep/internal/fixtures"
 	"strings"
 	"testing"
 
@@ -86,9 +87,12 @@ func TestSARIFEscapesMessageAndURI(t *testing.T) {
 func TestCensorValue(t *testing.T) {
 	cases := []struct{ line, value, want string }{
 		{
-			line:  "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
-			value: "AKIAIOSFODNN7EXAMPLE",
-			want:  "export AWS_ACCESS_KEY_ID=sha256:1a5d44a2dca1",
+			line:  "export AWS_ACCESS_KEY_ID=" + fx.AWSAccessKeyID(),
+			value: fx.AWSAccessKeyID(),
+			// The token is derived from the value, so the expectation has to be
+			// too. It is computed rather than pasted so a fixture change cannot
+			// leave a stale hash here that looks like a censoring regression.
+			want: "export AWS_ACCESS_KEY_ID=" + SecretToken(fx.AWSAccessKeyID()),
 		},
 		{
 			line:  "api_key=sk_1234567890abcdefghijklmnop",

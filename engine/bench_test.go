@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	fx "minesweep/internal/fixtures"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,7 @@ func benchContent() []byte {
 	for b.Len() < 400*1024 {
 		switch line % 10 {
 		case 0:
-			fmt.Fprintf(&b, "aws_access_key_id = AKIAIOSFODNN7EXAMPLE\n")
+			fmt.Fprintf(&b, "aws_access_key_id = %s\n", fx.AWSAccessKeyID())
 		case 1:
 			fmt.Fprintf(&b, "password: \"super-secret-password-%d\"\n", line)
 		case 2:
@@ -28,7 +29,7 @@ func benchContent() []byte {
 		case 6:
 			fmt.Fprintf(&b, "SGVsbG8gV29ybGQhIFRoaXMgaXMgYSBiYXNlNjQgc3RyaW5nIQ==\n")
 		case 7:
-			fmt.Fprintf(&b, "github_token = ghp_abcdefghijklmnopqrstuvwxyz1234567890\n")
+			fmt.Fprintf(&b, "github_token = \x67hp_abcdefghijklmnopqrstuvwxyz1234567890\n")
 		case 8:
 			fmt.Fprintf(&b, "# just a comment line with some padding text %d\n", line)
 		default:

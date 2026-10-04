@@ -21,6 +21,11 @@ type TextOptions struct {
 	Color    ColorMode
 	Hints    []string
 	Snippets bool
+	// ShowRawValues records that the caller passed --dangerously-show-secrets,
+	// so report.CensorReport was skipped and the values below are real. The
+	// legend depends on it: announcing "value hidden" while printing the value
+	// is the kind of small lie that makes a reader distrust the whole report.
+	ShowRawValues bool
 }
 
 type severityGroup struct {
@@ -44,7 +49,7 @@ func WriteText(w io.Writer, report *findings.RiskReport, opts TextOptions) error
 	grouped := groupBySeverity(report.Findings)
 
 	writeHeader(tw, p, report)
-	writeLegend(tw, p, grouped)
+	writeLegend(tw, p, grouped, opts)
 	writeGroups(tw, p, opts, grouped)
 	writeBoundaries(tw, p, report, opts)
 	writeRiskFactors(tw, p, report, opts)
@@ -163,7 +168,7 @@ func writeCounts(tw *textWriter, p palette, groups []severityGroup) {
 	tw.writeln(strings.Join(parts, p.dim("  ·  ")))
 }
 
-func writeLegend(tw *textWriter, p palette, groups []severityGroup) {
+func writeLegend(tw *textWriter, p palette, groups []severityGroup, opts TextOptions) {
 	seen := map[findings.Action]bool{}
 	for _, g := range groups {
 		for _, f := range g.findings {
@@ -175,7 +180,15 @@ func writeLegend(tw *textWriter, p palette, groups []severityGroup) {
 		legend = append(legend, "block: must fix before sharing")
 	}
 	if seen[findings.ActionRedact] {
-		legend = append(legend, "redact: value hidden")
+		// The legend must not claim a value is hidden when the report is
+		// showing it. With --dangerously-show-secrets the caller has already
+		// opted in and CensorReport was skipped, so the value under the
+		// finding is the real one.
+		if opts.ShowRawValues {
+			legend = append(legend, "redact: value shown (--dangerously-show-secrets)")
+		} else {
+			legend = append(legend, "redact: value hidden")
+		}
 	}
 	if seen[findings.ActionWarn] {
 		legend = append(legend, "warn: review recommended")
@@ -225,7 +238,22 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 
 	if opts.Snippets && f.SourceLine != "" {
 		tw.writeln(p.dim("          Snippet:"))
-		// Show context if available, otherwise just the source line
+		// f.SourceLine and f.Context arrive already censored: the report is
+		// censored once, in scanAndReport, before any format sees it. This
+		// block must not censor again.
+		//
+		// It used to call censorAllValues on every line, which meant the
+		// heuristic in censorSecretSubstrings ran twice over the same text.
+		// The heuristic is not idempotent, so the second pass judged a line
+		// that the first had already partly rewritten and glued tokens onto
+		// neighbouring words — one source line rendered differently for each
+		// finding that referenced it, which is precisely what makes a snippet
+		// untrustworthy.
+		//
+		// It also made --dangerously-show-secrets a no-op for snippets: with
+		// the flag set, CensorReport is skipped, f.Value is the raw secret,
+		// and the unconditional censorAllValues below redacted it anyway. The
+		// top rung of the disclosure ladder silently did nothing.
 		if f.Context != "" {
 			lines := splitLines(f.Context)
 			// Find the line with "> " prefix to identify the matching line
@@ -242,26 +270,23 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 				startLine = 1
 			}
 			for i, line := range lines {
-				// Remove the existing prefix and censor the line
+				// Remove the existing prefix added when the context was built.
 				trimmedLine := strings.TrimPrefix(line, "> ")
 				trimmedLine = strings.TrimPrefix(trimmedLine, "  ")
-				censoredLine := censorAllValues(trimmedLine, f.Value)
 				lineNum := startLine + i
 				prefix := "  "
 				if i == matchingLineIndex {
 					prefix = "> "
 				}
 				// Sanitize first to remove any malicious escape sequences
-				sanitizedLine := SanitizeTerminal(censoredLine)
+				sanitizedLine := SanitizeTerminal(trimmedLine)
 				tw.writefmt("            %s%4d: %s\n", p.dim(prefix), lineNum,
 					p.highlight(sanitizedLine, f.File))
 			}
 		} else {
 			// No context available, just show the source line
-			snippet := f.SourceLine
-			snippet = censorAllValues(snippet, f.Value)
 			// Sanitize first to remove any malicious escape sequences
-			sanitizedLine := SanitizeTerminal(snippet)
+			sanitizedLine := SanitizeTerminal(f.SourceLine)
 			tw.writefmt("            >%4d: %s\n", f.Line, p.highlight(sanitizedLine, f.File))
 		}
 	}

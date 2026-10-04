@@ -25,7 +25,24 @@ profile: default
 
 # Minimum severity that makes the scanner exit non-zero (useful as a CI gate).
 # One of: info, low, medium, high, critical
+#
+# Append @CONFIDENCE to require confidence as well as severity, so a finding has
+# to clear both bars before it blocks: high@60% means severity >= high AND
+# confidence >= 60%. A bare severity gates on severity alone, which is the
+# historical behaviour and the default.
+#
+# Findings that clear the severity bar but not the confidence bar are reported
+# and named on stderr rather than silently dropped — a gate that lets something
+# through in silence is the failure this whole mechanism exists to avoid.
 fail_on: low
+
+# A .minesweep.yml found by walking up from the scan target belongs to whatever is
+# being scanned, so its security-relevant keys — fail_on, profile, suppress_file
+# and the resource limits — are IGNORED unless you name the config with --config
+# or list the directory with "minesweep trust <path>".
+#
+# "minesweep trust" is the one that works from inside the pre-commit hook, which
+# cannot pass flags. See "minesweep trust --help".
 
 # Only report findings at or above this severity.
 # min_severity: low
@@ -46,7 +63,15 @@ include_test_files: false
 # Create once with: minesweep --update-baseline --baseline .minesweep-baseline.json .
 # baseline_file: .minesweep-baseline.json
 
-# Ignore specific findings listed in a suppression file.
+# Ignore specific findings listed in a suppression file. A suppression entry may
+# name a single finding or a whole class of them:
+#
+#   - {rule_id: env-password}       every finding from one rule
+#   - {tags: [database]}            every finding carrying a tag
+#   - {file: "docs/**/*.md"}        every finding under matching paths
+#   - {rule_id: x, file: "docs/**"} the intersection
+#
+# A file value with no wildcard keeps its exact-match meaning.
 # suppress_file: .minesweep-suppress.yml
 
 # Directories with custom detection rules, policies, and profiles.

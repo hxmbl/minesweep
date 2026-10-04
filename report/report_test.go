@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"fmt"
+	fx "minesweep/internal/fixtures"
 	"strings"
 	"testing"
 
@@ -17,7 +18,7 @@ func TestWriteText(t *testing.T) {
 			Confidence: 0.95,
 			File:       ".env",
 			Line:       1,
-			Value:      "AKIAIOSFODNN7EXAMPLE",
+			Value:      fx.AWSAccessKeyID(),
 			Reason:     "test",
 			RuleID:     "aws-access-key-id",
 			Tags:       []string{"aws", "cloud", "credentials"},

@@ -10,9 +10,15 @@ rules:
       - regex: (?i)(api[_-]?key|apikey|secret[_-]?key|access[_-]?key|auth[_-]?token|api[_-]?secret)[ \t]*[:=][ \t]*['"]?([A-Za-z0-9\-_]{20,})['"]?
         confidence: 0.45
         capture_group: 2
+      # require_value is what keeps `api_key = os.environ["API_KEY"]` out of the
+      # report: the capture is a credential value, so it is judged as one. It
+      # also runs the placeholder check, which is why a checked-in
+      # `GITHUB_TOKEN=dummy-value-not-real` is not reported while a real token
+      # is.
       - regex: (?i)(key|token|secret|password|credential)[ \t]*[:=][ \t]*['"]?([A-Za-z0-9\-_]{20,})['"]?
         confidence: 0.35
         capture_group: 2
+        require_value: true
     file_filter:
       exclude:
         - "*.md"

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	fx "minesweep/internal/fixtures"
 	"strings"
 	"testing"
 
@@ -42,7 +43,7 @@ func TestWriteSARIFWithFindings(t *testing.T) {
 			File:       ".env",
 			Line:       5,
 			Column:     16,
-			Value:      "AKIAIOSFODNN7EXAMPLE",
+			Value:      fx.AWSAccessKeyID(),
 			Reason:     "high-entropy credential",
 			RuleID:     "aws-access-key",
 			Tags:       []string{"aws", "cloud"},
