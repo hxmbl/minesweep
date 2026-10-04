@@ -47,6 +47,9 @@ type RiskReport struct {
 	// A file that was skipped is a coverage gap, and the user is entitled to
 	// know which ones and why.
 	SkippedBy []string `yaml:"skipped_by,omitempty" json:"skipped_by,omitempty"`
+	// UnreadablePaths names paths the walk could not open. They were not
+	// inspected, so nothing is known about what they contain.
+	UnreadablePaths []string `yaml:"unreadable_paths,omitempty" json:"unreadable_paths,omitempty"`
 }
 
 func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {

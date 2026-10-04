@@ -231,7 +231,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.Workers) },
 		func(f *config.FileConfig) bool { return f.Workers > 0 }),
-	numField("max_files", "max-files", false,
+	numField("max_files", "max-files", true,
 		func(f *config.FileConfig) string {
 			if f.MaxFiles > 0 {
 				return fmt.Sprint(f.MaxFiles)
@@ -240,7 +240,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MaxFiles) },
 		func(f *config.FileConfig) bool { return f.MaxFiles > 0 }),
-	numField("max_findings", "max-findings", false,
+	numField("max_findings", "max-findings", true,
 		func(f *config.FileConfig) string {
 			if f.MaxFindings > 0 {
 				return fmt.Sprint(f.MaxFindings)
@@ -249,7 +249,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MaxFindings) },
 		func(f *config.FileConfig) bool { return f.MaxFindings > 0 }),
-	numField("memory_limit_mb", "memory-limit-mb", false,
+	numField("memory_limit_mb", "memory-limit-mb", true,
 		func(f *config.FileConfig) string {
 			if f.MemoryLimitMB > 0 {
 				return fmt.Sprint(f.MemoryLimitMB)
@@ -258,7 +258,7 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { _, _ = fmt.Sscanf(v, "%d", &c.MemoryLimitMB) },
 		func(f *config.FileConfig) bool { return f.MemoryLimitMB > 0 }),
-	numField("max_file_size_mb", "max-file-size-mb", false,
+	numField("max_file_size_mb", "max-file-size-mb", true,
 		func(f *config.FileConfig) string {
 			if f.MaxFileSizeMB > 0 {
 				return fmt.Sprint(f.MaxFileSizeMB)
@@ -271,7 +271,7 @@ var configFields = []configField{
 			c.MaxFileSizeMB = n
 		},
 		func(f *config.FileConfig) bool { return f.MaxFileSizeMB > 0 }),
-	numField("max_concurrent_reads", "max-concurrent-reads", false,
+	numField("max_concurrent_reads", "max-concurrent-reads", true,
 		func(f *config.FileConfig) string {
 			if f.MaxConcurrentReads > 0 {
 				return fmt.Sprint(f.MaxConcurrentReads)
@@ -282,6 +282,15 @@ var configFields = []configField{
 		func(f *config.FileConfig) bool { return f.MaxConcurrentReads > 0 }),
 
 	// ---- security-relevant: ignored from discovered configs ----
+	//
+	// Everything here either removes coverage, weakens a gate, or decides what
+	// counts as a finding. A config file found by walking up from the scan
+	// target is, by construction, supplied by whatever is being scanned, so it
+	// may not be allowed to reduce what the scan looks at. That includes the
+	// resource limits: max_file_size_mb was previously classed as a
+	// performance knob, and a repository could ship `max_file_size_mb: 1` and
+	// have every file holding a credential skipped while the scan still
+	// reported "No secrets" and exited 0.
 	strField("no_ignore", "no-ignore", true,
 		func(f *config.FileConfig) string {
 			if f.NoIgnore {
@@ -437,24 +446,40 @@ func loadConfig(cmd *cobra.Command, scanPath string) error {
 	var fileCfg *config.FileConfig
 	var cfgPath string
 	var err error
+	trusted := configPath != ""
 
-	if configPath != "" {
+	// A config the caller named is parsed strictly. A config found by walking
+	// up from the scan target belongs to whatever is being scanned — or to an
+	// unrelated project, or to a parent directory — and it must not be able to
+	// abort the scan. Unknown keys there are reported and ignored.
+	unknown := map[string]bool{}
+	reportUnknown := func(key string) { unknown[key] = true }
+
+	if trusted {
 		fileCfg, err = config.LoadFile(configPath)
 		if err != nil {
 			return fmt.Errorf("load config file: %w", err)
 		}
 		cfgPath = configPath
 	} else {
-		fileCfg, cfgPath, err = config.FindAndLoad(scanPath)
+		fileCfg, cfgPath, err = config.FindAndLoadLax(scanPath, reportUnknown)
 		if err != nil {
 			return fmt.Errorf("load config file: %w", err)
 		}
+	}
+	if len(unknown) > 0 {
+		keys := make([]string, 0, len(unknown))
+		for k := range unknown {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		fmt.Fprintf(os.Stderr, "minesweep: warning: ignoring unrecognised key(s) in %s: %s\n",
+			cfgPath, strings.Join(keys, ", "))
 	}
 	if fileCfg == nil {
 		return nil
 	}
 
-	trusted := configPath != ""
 	if cfg.Verbose {
 		fmt.Fprintf(os.Stderr, "Using config file: %s (%s)\n", cfgPath,
 			map[bool]string{true: "trusted", false: "discovered"}[trusted])
