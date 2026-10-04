@@ -101,7 +101,8 @@ func LoadFileLax(path string, onUnknown func(key string)) (*FileConfig, error) {
 }
 
 func loadFile(path string, strict bool, onUnknown ...func(string)) (*FileConfig, error) {
-	data, err := os.ReadFile(path)
+	// Reading a path the caller named is the whole purpose of this function.
+	data, err := os.ReadFile(path) //nolint:gosec // caller-specified config path
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}

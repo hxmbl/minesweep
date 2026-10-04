@@ -33,14 +33,14 @@ func ASCIIFoldRune(r rune) (byte, bool) {
 			if f >= 'A' && f <= 'Z' {
 				f += 'a' - 'A'
 			}
-			return byte(f), true
+			return uint8(f), true //nolint:gosec // guarded by f < utf8.RuneSelf above
 		}
 	}
 	if r >= 'A' && r <= 'Z' {
 		r += 'a' - 'A'
 	}
 	if r < utf8.RuneSelf {
-		return byte(r), true
+		return uint8(r), true //nolint:gosec // guarded by r < utf8.RuneSelf above
 	}
 	return 0, false
 }

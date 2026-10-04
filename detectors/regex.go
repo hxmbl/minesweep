@@ -106,9 +106,10 @@ func NewRegexDetector(rulesDir string) (*RegexDetector, error) {
 		}
 		rules = mergeRules(rules, fileRules)
 	default:
-		// No such directory or file. The caller is expected to have validated
-		// an explicitly requested path; here the embedded rules stand in, which
-		// is what an installed binary with no local rules directory needs.
+		// Neither a directory nor a file at the requested path. The caller is
+		// expected to have validated a path the user named explicitly; here the
+		// embedded rules stand in, which is what an installed binary with no
+		// local rules directory needs.
 		return &RegexDetector{rules: rules}, nil
 	}
 
@@ -137,7 +138,7 @@ func isRegularFile(path string) bool {
 
 // loadRulesFile loads one rule file, dispatching on its extension.
 func loadRulesFile(path string) ([]Rule, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // caller-specified rules file
 	if err != nil {
 		return nil, err
 	}
@@ -501,7 +502,7 @@ func getUserRulesDir() string {
 	}
 
 	rulesDir := filepath.Join(configDir, "minesweep", "rules")
-	if _, err := os.Stat(rulesDir); os.IsNotExist(err) {
+	if _, err := os.Stat(rulesDir); os.IsNotExist(err) { //nolint:gosec // fixed path under the user's config dir
 		return ""
 	}
 	return rulesDir

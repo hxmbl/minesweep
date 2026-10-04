@@ -59,8 +59,8 @@ func isBase64(s string) bool {
 	// Check if it only contains base64 characters
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-			(c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') {
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') &&
+			(c < '0' || c > '9') && c != '+' && c != '/' && c != '=' {
 			return false
 		}
 	}
@@ -189,7 +189,15 @@ func (d *Base64Detector) Detect(file *filesystem.File) []findings.Finding {
 		// If we have a regex detector, use it to scan the decoded content
 		if d.regexDetector != nil {
 			decodedFile := &filesystem.File{
-				Path:     file.Path + " (base64 decoded)",
+				// Path stays the real file's path so reported findings point at
+				// something the user can open. The base name is derived from
+				// this, which is how a rule's file_filter was bypassed: the
+				// synthetic path used to carry a " (base64 decoded)" suffix, so
+				// `filepath.Base` never matched an exclusion such as *.md and a
+				// rule that excluded documentation reported base64 payloads
+				// from documentation files.
+				Path:     file.Path,
+				Root:     file.Root,
 				Content:  decoded,
 				Size:     int64(len(decoded)),
 				Mode:     file.Mode,

@@ -32,7 +32,8 @@ type BaselineEntry struct {
 }
 
 func LoadBaseline(path string) (*Baseline, error) {
-	data, err := os.ReadFile(path)
+	// Reading a path the caller named is the whole purpose of this function.
+	data, err := os.ReadFile(path) //nolint:gosec // caller-specified baseline path
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &Baseline{

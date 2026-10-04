@@ -15,13 +15,18 @@ on:
         type: boolean
         default: false
 
+# Least privilege by default. The previous workflow-level
+# `permissions: contents: write` handed write access to the repository to every
+# job, including test and lint, which run third-party actions.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         go-version: ["1.26"]
@@ -44,6 +49,9 @@ jobs:
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
 
+      - name: Run tests repeatedly to shake out order-dependent failures
+        run: go test -count=3 ./...
+
       - name: Upload coverage
         if: matrix.go-version == '1.26'
         uses: actions/upload-artifact@v4
@@ -54,6 +62,8 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -66,13 +76,19 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v4
         with:
-          version: latest
+          # Pinned, not `latest`. `version: latest` with
+          # `install-mode: goinstall` also silently resolved to a v1.x release,
+          # which is why the v1-schema .golangci.yml had never been noticed as
+          # a problem: the linter could not upgrade.
+          version: v2.1.6
           install-mode: goinstall
 
   build:
     name: Build (Linux)
     runs-on: ubuntu-latest
     needs: [test, lint]
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -95,6 +111,8 @@ jobs:
     name: Build (macOS)
     runs-on: macos-latest
     needs: [test, lint]
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -117,23 +135,40 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     needs: [test, lint]
+    # Write access is scoped to this job alone: it is the only one that needs it.
+    permissions:
+      contents: write
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.run_release == true)
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          # Do not leave the job token in .git/config. The release job is the
+          # one that also holds the Homebrew tap credential, so a stray token in
+          # the remote config widens the blast radius of anything that runs
+          # git against the checkout.
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.26"
 
+      # `go mod tidy` used to run as a goreleaser before-hook, on the release
+      # path: it could add or upgrade dependencies as part of producing a
+      # release. `go mod verify` is the check that belongs there.
+      - name: Verify dependencies are unchanged
+        run: |
+          go mod download
+          go mod verify
+          git diff --exit-code -- go.mod go.sum
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: latest
+          version: v2.5.0
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -212,7 +212,7 @@ func shortLabel(s string) string {
 }
 
 func runImportIgnores(in, out string) error {
-	data, err := os.ReadFile(in)
+	data, err := os.ReadFile(in) //nolint:gosec // the caller named both input and output
 	if err != nil {
 		return fmt.Errorf("read %s: %w", in, err)
 	}

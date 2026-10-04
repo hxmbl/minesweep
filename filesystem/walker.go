@@ -235,7 +235,7 @@ func EmptyIgnoreSet() *IgnoreSet { return NewIgnoreSet(NewIgnorePattern(nil)) }
 // silently scanning with fewer rules than the user wrote is a false negative
 // wearing a success message.
 func LoadIgnoreFile(path string) ([]string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // reading an ignore file the caller named
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -350,7 +350,7 @@ func isWithin(path, dir string) bool {
 }
 
 func runGitTopLevel(dir string) (string, error) {
-	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel") //nolint:gosec // fixed arguments
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err

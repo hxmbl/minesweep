@@ -39,24 +39,27 @@ func SanitizeTerminal(s string) string {
 	b.Grow(len(s))
 
 	for _, r := range s {
-		switch {
-		case r == 0x1b:
+		switch r {
+		case 0x1b:
 			b.WriteString(`\e`)
-		case r == 0x7f:
+		case 0x7f:
 			b.WriteString("^?")
-		case r == 0x9b:
-			b.WriteString("[CSI]")
-		case r == 0x9d:
-			b.WriteString("[OSC]")
-		case r >= 0x90 && r <= 0x9f:
-			b.WriteString("[C1]")
-		case r == 0x85:
+		case 0x85:
 			b.WriteString("[NEL]")
-		case r < 0x20 && r != '\n' && r != '\t':
-			b.WriteByte('^')
-			b.WriteByte(byte(r) + '@')
+		case 0x9b:
+			b.WriteString("[CSI]")
+		case 0x9d:
+			b.WriteString("[OSC]")
 		default:
-			b.WriteRune(r)
+			switch {
+			case r >= 0x90 && r <= 0x9f:
+				b.WriteString("[C1]")
+			case r < 0x20 && r != '\n' && r != '\t':
+				b.WriteByte('^')
+				b.WriteByte(uint8(r) + '@') //nolint:gosec // guarded by r < 0x20
+			default:
+				b.WriteRune(r)
+			}
 		}
 	}
 
@@ -78,12 +81,12 @@ func SanitizeTerminalInline(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		switch {
-		case r == '\n':
+		switch r {
+		case '\n':
 			b.WriteString(`\n`)
-		case r == '\r':
+		case '\r':
 			b.WriteString(`\r`)
-		case r == '\t':
+		case '\t':
 			b.WriteString(`\t`)
 		default:
 			b.WriteRune(r)
@@ -331,7 +334,7 @@ func censorableSpans(line string, start, end int) []span {
 	// No separator: the whole run is one opaque token, judged as such. The
 	// decision must not be taken here when separators are present — the
 	// combined run of an identifier and its value is judged as neither.
-	if strings.IndexAny(whole, spanSeparators) < 0 {
+	if !strings.ContainsAny(whole, spanSeparators) {
 		if secretish(whole) {
 			return []span{{start: start, end: end, value: whole}}
 		}
@@ -496,7 +499,7 @@ func looksLikeIdentifier(s string) bool {
 			return false
 		}
 		for _, c := range seg {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
 				return false
 			}
 		}

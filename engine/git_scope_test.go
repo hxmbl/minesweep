@@ -34,7 +34,9 @@ func initRepo(t *testing.T) string {
 	return dir
 }
 
-func scopedGit(t *testing.T, dir string, args ...string) {
+// scopedGit runs a git command in dir with a fixed identity, for the staged and
+// history scope tests.
+func scopedGit(t *testing.T, dir string, args ...string) { //nolint:unused // used by the scoping tests below
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir

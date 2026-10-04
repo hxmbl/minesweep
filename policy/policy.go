@@ -73,8 +73,11 @@ func hasMatchingTag(f findings.Finding, tags []string) bool {
 	return false
 }
 
+// LoadPolicyFile reads a policy file the caller named. That is the entire
+// purpose of the function, and the path is either a --policy flag or a file
+// inside the scanned tree.
 func LoadPolicyFile(path string) ([]PolicyRule, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // caller- or tree-supplied policy path
 	if err != nil {
 		return nil, fmt.Errorf("read policy %q: %w", path, err)
 	}
@@ -122,7 +125,7 @@ func ValidateRules(rules []PolicyRule) error {
 }
 
 func LoadProfile(path string) (Profile, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // caller- or tree-supplied profile path
 	if err != nil {
 		return Profile{}, fmt.Errorf("read profile %q: %w", path, err)
 	}

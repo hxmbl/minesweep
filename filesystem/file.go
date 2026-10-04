@@ -391,11 +391,18 @@ func decodeUTF16(data []byte) []byte {
 		case u == 0xFEFF:
 			// Byte-order mark in the middle of the content; skip.
 		case u < 0x80:
-			out = append(out, byte(u))
+			out = append(out, uint8(u))
 		case u < 0x800:
-			out = append(out, byte(0xC0|u>>6), byte(0x80|u&0x3F))
+			// Each operand is masked or bounded by the branch above, so every
+			// conversion is provably in range.
+			out = append(out,
+				uint8(0xC0|(u>>6)&0x1F), //nolint:gosec // u < 0x800 ⇒ u>>6 < 0x20
+				uint8(0x80|u&0x3F))      //nolint:gosec // masked with 0x3F
 		default:
-			out = append(out, byte(0xE0|u>>12), byte(0x80|(u>>6)&0x3F), byte(0x80|u&0x3F))
+			out = append(out,
+				uint8(0xE0|(u>>12)&0x0F), //nolint:gosec // u>>12 <= 0x0F
+				uint8(0x80|(u>>6)&0x3F),  //nolint:gosec // masked with 0x3F
+				uint8(0x80|u&0x3F))       //nolint:gosec // masked with 0x3F
 		}
 	}
 	if len(out) == 0 {
@@ -424,9 +431,9 @@ func (f *File) readSymlinkBounded() ([]byte, error) {
 // path so symlink targets cannot be re-interpreted mid-read.
 func readFileBounded(path string, max int64) ([]byte, error) {
 	if max <= 0 {
-		return os.ReadFile(path)
+		return os.ReadFile(path) //nolint:gosec // path is a resolved member of the scan tree
 	}
-	fh, err := os.Open(path)
+	fh, err := os.Open(path) //nolint:gosec // path is a resolved member of the scan tree
 	if err != nil {
 		return nil, err
 	}

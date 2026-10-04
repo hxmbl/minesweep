@@ -30,7 +30,9 @@ func ValidSHA(s string) bool {
 }
 
 func gitCmd(root string, args ...string) *exec.Cmd {
-	cmd := exec.Command("git", args...)
+	// Callers pass only fixed git subcommands and SHAs validated by ValidSHA;
+	// repository data arrives via stdout parsing and is never an argument.
+	cmd := exec.Command("git", args...) //nolint:gosec // see comment above
 	cmd.Dir = root
 	return cmd
 }
@@ -52,12 +54,15 @@ func ListHistoryObjects(root string) ([]HistoryObject, error) {
 	if err := revList.Start(); err != nil {
 		return nil, fmt.Errorf("git rev-list: %w", err)
 	}
+	// Best-effort child cleanup on early-return paths. A failure here is not
+	// actionable — the caller is already unwinding for a real reason — but it
+	// must not be discarded silently, so it is assigned to blank identifiers.
 	defer func() {
 		if stdout != nil {
-			io.Copy(io.Discard, stdout) //nolint:errcheck // drain so git can exit cleanly
-			stdout.Close()
+			_, _ = io.Copy(io.Discard, stdout) // drain so git can exit cleanly
+			_ = stdout.Close()
 		}
-		revList.Wait() //nolint:errcheck // best-effort reaping on early return paths
+		_ = revList.Wait()
 	}()
 
 	checker, err := newBatchChecker(top)
@@ -143,8 +148,12 @@ func (b *batchChecker) Check(sha string) (string, int64, error) {
 }
 
 func (b *batchChecker) Close() {
-	b.stdin.Close()
-	b.cmd.Wait() //nolint:errcheck // child cleanup; errors are not actionable
+	// Best-effort child cleanup. A failure here is not actionable — every caller
+	// is finishing with this child either way — but it is discarded explicitly
+	// rather than ignored.
+	_, _ = b.stdin.Write(nil)
+	_ = b.stdin.Close()
+	_ = b.cmd.Wait()
 }
 
 // blobBufRetainBytes is the scratch-buffer size above which the BlobFetcher
@@ -240,8 +249,9 @@ func (f *BlobFetcher) Fetch(sha string) ([]byte, error) {
 }
 
 func (f *BlobFetcher) Close() {
-	f.in.Close()
-	f.cmd.Wait() //nolint:errcheck // child cleanup; errors are not actionable
+	// Best-effort child cleanup; see batchChecker.Close.
+	_ = f.in.Close()
+	_ = f.cmd.Wait()
 	f.buf = nil
 }
 

@@ -1057,14 +1057,16 @@ func (e *Engine) runHistory(root, scopeFile string) (*findings.RiskReport, error
 		if obj.Path == "" {
 			continue
 		}
+		// Restrict to the requested scope. runDiff has always done this, so
+		// `minesweep sub --diff` reported only files under sub/ while
+		// `minesweep sub --history` reported the whole repository — the same
+		// target, two different answers.
 		if scopeFile != "" {
-			// A single file was named. History object paths are
-			// repository-relative and have no filesystem entry, so compare
-			// against the named file's path relative to the repository.
-			want := filepath.ToSlash(mustRel(top, scopeFile))
-			if obj.Path != want {
+			if obj.Path != filepath.ToSlash(mustRel(top, scopeFile)) {
 				continue
 			}
+		} else if !withinDir(filepath.Join(top, filepath.FromSlash(obj.Path)), root) {
+			continue // history object outside the requested scan root
 		}
 		// History paths are repository-relative with no filesystem entry, so
 		// the same filter set is applied to them directly.

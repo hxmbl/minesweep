@@ -105,7 +105,7 @@ func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 // into two.
 func nameListCommand(dir string, args ...string) *exec.Cmd {
 	full := append([]string{"-c", "core.quotePath=false"}, args...)
-	cmd := exec.Command("git", full...)
+	cmd := exec.Command("git", full...) //nolint:gosec // fixed subcommands; branch names are sanitized, paths are NUL-split
 	cmd.Dir = dir
 	return cmd
 }
@@ -179,32 +179,19 @@ func GetFileContent(root, path, rev string) ([]byte, error) {
 	return out, nil
 }
 
-// parseFileList splits a newline-separated, unquoted path list.
-//
-// It is retained for callers that already have line-oriented output; the git
-// queries themselves use parseNULFileList, because a newline in a filename
-// cannot be told from a record separator there.
-func parseFileList(out string) []string {
-	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			files = append(files, filepath.ToSlash(filepath.Clean(line)))
-		}
-	}
-	return files
-}
-
 // IsGitRepo checks if a path is a git repository
 func IsGitRepo(path string) bool {
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd := exec.Command("git", "rev-parse", "--git-dir") //nolint:gosec // fixed arguments
 	cmd.Dir = path
 	return cmd.Run() == nil
 }
 
-// ReadFileLines reads a file and returns its lines
+// ReadFileLines reads a file and returns its lines.
+//
+// The path comes from a git-tracked file name. It is read rather than executed,
+// and the scan is already operating inside the tree the user pointed it at.
 func ReadFileLines(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // git-tracked path inside the scan tree
 	if err != nil {
 		return nil, err
 	}

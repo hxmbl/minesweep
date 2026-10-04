@@ -99,6 +99,9 @@ func main() {
 			if cfg.HistoryMode && (cfg.DiffMode || cfg.StagedOnly) {
 				return fmt.Errorf("--history scans all refs and cannot be combined with --diff or --staged")
 			}
+			if err := validateNumericFlags(cmd, cfg); err != nil {
+				return err
+			}
 			// An explicitly requested rules path must exist. Without this a typo
 			// in --rules, or a file passed where a directory was meant, silently
 			// produced a scan using only the embedded rules: the user got fewer
@@ -114,7 +117,7 @@ func main() {
 	}
 
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		fmt.Fprint(cmd.OutOrStdout(), renderGroupedHelp(cmd))
+		fmt.Fprint(cmd.OutOrStdout(), renderGroupedHelp(cmd)) //nolint:errcheck // best-effort help; the exit code is what matters
 	})
 
 	// --rules is persistent so subcommands like `explain` resolve the same
@@ -451,12 +454,74 @@ func applyConfigValues(cfg *engine.Config, fc *config.FileConfig, cfgDir string,
 	}
 	if len(ignored) > 0 && warn != nil {
 		sort.Strings(ignored)
-		fmt.Fprintf(warn, "minesweep: warning: ignoring security-relevant settings from untrusted config:\n"+
+		// Best-effort diagnostic. A failure to print the warning must not fail
+		// the scan, but it is deliberately visible in --verbose output.
+		fmt.Fprintf(warn, "minesweep: warning: ignoring security-relevant settings from untrusted config:\n"+ //nolint:errcheck // diagnostic only
 			"  %s\n"+
 			"  Discovered configs cannot weaken scans. Pass --config <file> to honor them explicitly.\n",
 			strings.Join(ignored, ", "))
 	}
 	return ignored
+}
+
+// validateNumericFlags rejects out-of-range numeric settings.
+//
+// Every one of these had a way to turn into a silently clean scan. A confidence
+// threshold above 1 filters out every finding and reports "No secrets or
+// sensitive data detected" with exit 0, which is the worst possible failure for
+// a gate: it looks like success. A negative --min-confidence disabled the
+// default floor as a side effect. `--min-confidence 0` cannot "keep everything"
+// despite a comment in engine.go saying so — only --include-low-confidence does
+// — so it is rejected as ambiguous rather than silently meaning something
+// else.
+func validateNumericFlags(cmd *cobra.Command, cfg engine.Config) error {
+	// Only flags the user actually named are validated: several of these have a
+	// zero default that is a legitimate value (--min-confidence, --workers,
+	// --max-files), and rejecting the default would fail every invocation.
+	explicit := map[string]bool{}
+	cmd.Flags().Visit(func(f *pflag.Flag) { explicit[f.Name] = true })
+
+	if explicit["min-confidence"] {
+		if cfg.MinConfidence < 0 || cfg.MinConfidence > 1 {
+			return fmt.Errorf("--min-confidence must be between 0.0 and 1.0 (got %g); "+
+				"to report findings below the default confidence floor use --include-low-confidence",
+				cfg.MinConfidence)
+		}
+		if cfg.MinConfidence == 0 {
+			// Ambiguous rather than merely useless: a comment in engine.go says
+			// setting this to 0 keeps everything, and it does not. Saying so is
+			// better than quietly applying the default floor.
+			return fmt.Errorf("--min-confidence 0 keeps the default confidence floor; " +
+				"use --include-low-confidence to disable it")
+		}
+	}
+	nonNegative := []struct {
+		flag string
+		val  int64
+	}{
+		{"workers", int64(cfg.Workers)},
+		{"max-files", int64(cfg.MaxFiles)},
+		{"memory-limit-mb", int64(cfg.MemoryLimitMB)},
+		{"max-file-size-mb", cfg.MaxFileSizeMB},
+		{"max-concurrent-reads", int64(cfg.MaxConcurrentReads)},
+	}
+	for _, f := range nonNegative {
+		if explicit[f.flag] && f.val < 0 {
+			return fmt.Errorf("--%s must not be negative (got %d)", f.flag, f.val)
+		}
+	}
+	if explicit["max-findings"] && cfg.MaxFindings < -1 {
+		return fmt.Errorf("--max-findings must be positive, 0 (engine default) or -1 (unlimited) (got %d)",
+			cfg.MaxFindings)
+	}
+	if explicit["runs"] && benchRuns < 1 {
+		return fmt.Errorf("--runs must be at least 1 (got %d)", benchRuns)
+	}
+	if watchMode && watchInterval < 100*time.Millisecond {
+		fmt.Fprintf(os.Stderr, "minesweep: warning: --watch-interval raised to 100ms (got %v)\n", watchInterval)
+		watchInterval = 100 * time.Millisecond
+	}
+	return nil
 }
 
 func loadConfig(cmd *cobra.Command, scanPath string) error {
@@ -678,8 +743,15 @@ func scanAndReport(scanPath string) (int, error) {
 	}
 	if reportData != nil {
 		minSev := findings.ParseSeverity(cfg.FailOn)
+		// --fail-on is documented as "minimum severity that exits non-zero",
+		// so it must fire on any finding at or above the threshold regardless
+		// of the policy action. The previous implementation also required a
+		// non-allow action, and since the default policy maps low and info to
+		// allow, `--fail-on low` — the documented default — could never fail on
+		// a low-severity finding. A gate that silently does not gate is worse
+		// than one that gates too eagerly, because it is trusted.
 		for _, f := range reportData.Findings {
-			if f.Severity >= minSev && f.Action != findings.ActionAllow {
+			if f.Severity >= minSev {
 				return 1, nil
 			}
 		}
@@ -720,12 +792,23 @@ func nextStepHints(scanPath string, data *findings.RiskReport) []string {
 	return hints
 }
 
+// hasPreCommitHook reports whether minesweep's pre-commit hook is installed.
+//
+// It uses the same marker test as install-hooks/uninstall-hooks. The previous
+// substring search for "minesweep" reported a hook installed whenever any hook
+// merely mentioned the tool — including one whose comment said not to run it —
+// so the hint told users to run `minesweep init` for a hook already in place,
+// which then refused to overwrite it.
 func hasPreCommitHook(repoTop string) bool {
-	data, err := os.ReadFile(filepath.Join(repoTop, ".git", "hooks", "pre-commit"))
+	hookPath, err := hooksDir(repoTop)
 	if err != nil {
 		return false
 	}
-	return strings.Contains(strings.ToLower(string(data)), "minesweep")
+	data, err := os.ReadFile(hookPath) //nolint:gosec // hook path inside the named repository
+	if err != nil {
+		return false
+	}
+	return isOurHook(string(data))
 }
 
 const preCommitHook = `#!/bin/sh
@@ -790,7 +873,7 @@ func runInstallHooks(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(hookPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0750); err != nil {
 		return fmt.Errorf("create hooks directory: %w", err)
 	}
 
@@ -799,7 +882,7 @@ func runInstallHooks(cmd *cobra.Command, args []string) error {
 	// no backup and no --force, while `init` guarded its own output the same
 	// way. Losing a team's commit pipeline silently is not recoverable from
 	// inside this tool.
-	if existing, readErr := os.ReadFile(hookPath); readErr == nil {
+	if existing, readErr := os.ReadFile(hookPath); readErr == nil { //nolint:gosec // hook path from git rev-parse
 		if !isOurHook(string(existing)) && !hookForce {
 			return fmt.Errorf("a pre-commit hook already exists at %s and was not installed by minesweep\n"+
 				"  refusing to overwrite it; re-run with --force to replace it, or merge the hook yourself:\n"+
@@ -840,7 +923,7 @@ func runUninstallHooks(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	content, err := os.ReadFile(hookPath)
+	content, err := os.ReadFile(hookPath) //nolint:gosec // hook path from git rev-parse
 	if err != nil {
 		return fmt.Errorf("read hook: %w", err)
 	}
@@ -856,34 +939,62 @@ func runUninstallHooks(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// legacyHookHeader is the first line of the hook this tool installed before the
+// marker existed. It is still recognised, so a repository that installed the
+// hook with an older version can still recognise and uninstall it; refusing to
+// would leave those users with a hook they could not remove and an
+// install-hooks that refused to replace it.
+const legacyHookHeader = "# MineSweep pre-commit hook"
+
+// isOurHook reports whether a hook script was installed by this tool.
+//
+// Both the marker line and the legacy header count. The test is deliberately
+// not a bare substring search for "minesweep": that matched any hook which
+// merely mentioned the tool, including one whose comment said not to run it, and
+// uninstall-hooks then deleted somebody else's hook.
 func isOurHook(content string) bool {
-	return strings.Contains(content, hookMarker)
+	if strings.Contains(content, hookMarker) {
+		return true
+	}
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == legacyHookHeader {
+			return true
+		}
+	}
+	return false
 }
 
 // hooksDir locates the pre-commit hook for the repository containing dir.
 //
-// `git rev-parse --git-path hooks` is the only correct answer. In a linked
-// worktree, submodule, or any checkout reached through GIT_DIR, `.git` is a
-// *file* pointing elsewhere, so joining wd/.git/hooks failed with "not a
-// directory" and install-hooks simply could not be used.
+// `git rev-parse --git-path hooks` is the authoritative answer. In a linked
+// worktree, a submodule, or any checkout reached through GIT_DIR, `.git` is a
+// *file* pointing elsewhere, so joining dir/.git/hooks failed with "not a
+// directory" and install-hooks simply could not be used there.
+//
+// When git cannot answer — a directory that has a .git entry but is not a usable
+// repository — the conventional <dir>/.git/hooks layout is used if it exists,
+// so a read-only probe such as hasPreCommitHook still works. Writing a hook
+// through that fallback is not possible in practice, because install-hooks also
+// requires a repository and reports one clearly.
 func hooksDir(dir string) (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--git-path", "hooks")
 	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		if _, statErr := os.Stat(filepath.Join(dir, ".git")); os.IsNotExist(statErr) {
-			return "", fmt.Errorf("not a git repository (no .git directory found)")
+	if out, err := cmd.Output(); err == nil {
+		p := strings.TrimSpace(string(out))
+		if p != "" {
+			if !filepath.IsAbs(p) {
+				p = filepath.Join(dir, p)
+			}
+			return filepath.Join(p, "pre-commit"), nil
 		}
-		return "", fmt.Errorf("not a git repository: %s", dir)
 	}
-	p := strings.TrimSpace(string(out))
-	if p == "" {
-		return "", fmt.Errorf("could not determine the hooks directory for %s", dir)
+
+	fallback := filepath.Join(dir, ".git", "hooks")
+	info, statErr := os.Stat(fallback)
+	if statErr != nil || !info.IsDir() {
+		return "", fmt.Errorf("not a git repository (no .git directory found in %s)", dir)
 	}
-	if !filepath.IsAbs(p) {
-		p = filepath.Join(dir, p)
-	}
-	return filepath.Join(p, "pre-commit"), nil
+	return filepath.Join(fallback, "pre-commit"), nil
 }
 
 func firstLines(s string, n int) string {
