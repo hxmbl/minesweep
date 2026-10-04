@@ -183,4 +183,55 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_GITHUB_TOKEN: ${{ secrets.TAP_RELEASE_KEY }}
+
+      # GoReleaser writes the formula to dist/homebrew/minesweep.rb but does not
+      # upload it (skip_upload in .goreleaser.yaml): the GitHub API has no way to
+      # authenticate for the tap repo, and the token that used to be passed there
+      # was an SSH private key, which net/http cannot serialize into an
+      # Authorization header. Committing over SSH with a deploy key sidesteps the
+      # header entirely, and matches how separator and the other formulae in the
+      # tap are already published.
+      #
+      # continue-on-error: the GitHub release has already been published by the
+      # time this runs. A tap failure leaves `brew install` serving the previous
+      # version, which is bad, but it must not retroactively mark the release as
+      # failed — the artifacts exist and are valid either way.
+      - name: Update Homebrew tap
+        if: always() && github.ref_type == 'tag'
+        continue-on-error: true
+        env:
+          HOMEBREW_TAP_SSH_KEY: ${{ secrets.HOMEBREW_TAP_SSH_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOMEBREW_TAP_SSH_KEY}" ]; then
+            echo "::error::HOMEBREW_TAP_SSH_KEY is unset; cannot update the tap"
+            exit 1
+          fi
+          if [ ! -f dist/homebrew/minesweep.rb ]; then
+            echo "::error::GoReleaser did not produce dist/homebrew/minesweep.rb"
+            exit 1
+          fi
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${HOMEBREW_TAP_SSH_KEY}" > ~/.ssh/homebrew_tap_key
+          chmod 600 ~/.ssh/homebrew_tap_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/homebrew_tap_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+
+          git clone --depth 1 git@github.com:hxmbl/homebrew-tap.git tap
+          cp dist/homebrew/minesweep.rb tap/minesweep.rb
+
+          cd tap
+          if git diff --quiet -- minesweep.rb; then
+            echo "tap formula already current for ${TAG}; nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add minesweep.rb
+          git commit -m "Update minesweep to ${TAG}"
+          git push origin HEAD:main
+          echo "tap updated to ${TAG}"

@@ -40,13 +40,27 @@ changelog:
 brews:
   - name: minesweep
     repository:
-      owner: Hxmbl
+      owner: hxmbl
       name: homebrew-tap
-      token: "{{ .Env.GORELEASER_GITHUB_TOKEN }}"
+    # The formula is still generated here, but it is NOT pushed from this
+    # step. `skip_upload` leaves publishing to the tap to the release job's
+    # SSH step, which commits the file this step writes to
+    # dist/homebrew/minesweep.rb.
+    #
+    # GoReleaser pushed the formula over the GitHub API using
+    # GORELEASER_GITHUB_TOKEN, and every release since 2026-09-27 failed on it
+    # with `net/http: invalid header field value for "Authorization"`. The
+    # secret held an SSH private key: multi-line by construction, so net/http
+    # refused to serialize it as a bearer token. Reproduced locally — a trailing
+    # newline is the only input that produces that exact error, and GoReleaser
+    # passes the value through unstripped. A key cannot be read back out of a
+    # GitHub secret to fix it, so the transport changed instead: a deploy key
+    # over SSH has no Authorization header to malform.
+    skip_upload: true
     commit_author:
       name: hxmbl
       email: hxmbl@users.noreply.github.com
-    homepage: https://github.com/Hxmbl/minesweep
+    homepage: https://github.com/hxmbl/minesweep
     description: Policy-driven secrets and sensitive data scanner with git history forensics
     test: |
       system "#{bin}/minesweep", "version"
