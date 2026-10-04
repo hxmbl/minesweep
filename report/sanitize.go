@@ -246,9 +246,11 @@ func censorAllValues(line, primaryValue string) string {
 //
 // The character class is deliberately broad. A narrower one fragments the
 // credential and censors only the fragment it happened to cover: with
-// `[A-Za-z0-9_.:/=-]` the token in `admin_password = "P@ssw0rd$ecret!2024"`
-// was cut at the `!`, so `sha256:…` replaced the first half and the remaining
-// characters printed verbatim. A partial redaction is a leaked redaction.
+// `[A-Za-z0-9_.:/=-]` a password containing several kinds of punctuation was
+// cut at the first character not in the class, so `sha256:…` replaced only the
+// leading fragment and the remainder printed verbatim. A partial redaction is a
+// leaked redaction, which is why the class is broad enough to cover the
+// punctuation that actually appears in passwords.
 //
 // The class still excludes brackets, quotes, parentheses, commas, whitespace
 // and semicolons, so ordinary code structure, paths with many segments and
@@ -267,8 +269,9 @@ type span struct {
 //
 // A candidate that is an assignment is split at the "=" and each side judged
 // separately. Judging the whole run conflated the identifier with its value:
-// `AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE` is one candidate whose
-// unique-character ratio sits just under the threshold, so the key survived.
+// a cloud key assignment is one candidate whose unique-character ratio sits
+// just under the threshold, so the key survived while the identifier beside it
+// did not.
 //
 // "=" is the only split point. Splitting on ":" or "/" as well seemed tidier
 // but destroyed the very signal being measured — a secret with no digits, such

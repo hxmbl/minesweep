@@ -34,15 +34,19 @@ jobs:
       # different invocations and could disagree. The log is now written once
       # and reused.
       - name: Scan
+        id: scan
         run: |
           set +e
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             ./minesweep --diff --diff-base "${{ github.base_ref }}" --fail-on high \
-              --sarif --json --no-pager . > results.sarif
+              --sarif --no-pager . > results.sarif
           else
-            ./minesweep --fail-on high --sarif --json --no-pager . > results.sarif
+            ./minesweep --fail-on high --sarif --no-pager . > results.sarif
           fi
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          # Always succeed: the exit code is the verdict and is enforced by the
+          # next step, which distinguishes 1 (findings) from 2 (incomplete).
+          # Failing here would skip the SARIF upload entirely.
           exit 0
 
       - name: Enforce the gate
@@ -50,7 +54,11 @@ jobs:
         # as a pass would publish a partial result as if it were complete, so
         # it fails here too.
         run: |
-          code="${{ steps.Scan.outputs.exit_code }}"
+          code="${{ steps.scan.outputs.exit_code }}"
+          if [ -z "$code" ]; then
+            echo "::error::the scan step reported no exit code"
+            exit 1
+          fi
           if [ "$code" = "0" ]; then
             echo "no findings at or above --fail-on high"
           elif [ "$code" = "1" ]; then
