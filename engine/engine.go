@@ -911,8 +911,28 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 }
 
 // attachEvidence fills in Context and SourceLine from the file's line index.
+//
+// Two guarantees are enforced here rather than at the output boundary, because
+// the output boundary is not the only consumer and it cannot undo an allocation
+// that has already been made:
+//
+//   - Binary content is never copied into a finding. Arbitrary bytes defeat
+//     every redaction heuristic in report/, and findings without a Value (the
+//     file-type and symlink detectors) bypass the heuristic pass entirely, so a
+//     SQLite database used to land its credentials in the report verbatim.
+//   - Every rendered line is capped. "A line" is not bounded by anything: a
+//     database, a minified bundle or a single-line JSON blob has no newline for
+//     megabytes.
 func attachEvidence(file *filesystem.File, fs []findings.Finding) {
 	if len(fs) == 0 {
+		return
+	}
+	if file.IsBinary {
+		note := findings.BinaryEvidence(int(file.Size))
+		for i := range fs {
+			fs[i].Context = note
+			fs[i].SourceLine = note
+		}
 		return
 	}
 	li := file.Lines()
@@ -923,9 +943,29 @@ func attachEvidence(file *filesystem.File, fs []findings.Finding) {
 		if fs[i].Line <= 0 {
 			continue
 		}
-		fs[i].Context = li.Context(fs[i].Line-1, 2)
-		fs[i].SourceLine = strings.TrimSpace(li.LineText(fs[i].Line - 1))
+		fs[i].Context = li.ContextCapped(fs[i].Line-1, evidenceRadius, maxEvidenceLineBytes)
+		fs[i].SourceLine = clampEvidenceLine(strings.TrimSpace(li.LineText(fs[i].Line - 1)))
 	}
+}
+
+const (
+	// evidenceRadius is the number of lines of context rendered either side
+	// of a finding.
+	evidenceRadius = 2
+	// maxEvidenceLineBytes caps one rendered evidence line. 512 keeps a
+	// credential assignment and its neighbours readable while making the
+	// report size proportional to the finding count, not to the file size.
+	maxEvidenceLineBytes = 512
+)
+
+// clampEvidenceLine truncates one evidence line to maxEvidenceLineBytes,
+// marking the cut so a reader can tell the line was clipped rather than short.
+func clampEvidenceLine(s string) string {
+	capped := filesystem.CapLine(s, maxEvidenceLineBytes)
+	if capped == s {
+		return s
+	}
+	return capped + " " + findings.TruncatedEvidenceSuffix
 }
 
 func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
