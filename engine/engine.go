@@ -47,6 +47,17 @@ const (
 	// ReasonUnreadable records paths the walk could not open. A path that could
 	// not be read was not inspected, so the scan does not know what it holds.
 	ReasonUnreadable = "one or more paths could not be read; their contents were not inspected"
+	// ReasonBinaryTarget records a directly-named scan target that turned out to
+	// be binary. Content detectors do not run on binary files, so the scan read
+	// none of it: reporting "no secrets" and exiting 0 there would be a clean
+	// answer to a question nobody asked, and safe_to_share came back all-true
+	// from a risk score of 0 computed over zero bytes. The file may be perfectly
+	// safe, but nothing here knows that.
+	//
+	// Only a target the user named by hand is treated this way. In a directory
+	// scan binaries are expected, are already reported as a per-cause skip, and
+	// flagging every repo containing a PNG would make exit 2 meaningless.
+	ReasonBinaryTarget = "the named target is binary; its contents were not inspected and it may be unsafe"
 )
 
 type Config struct {
@@ -980,6 +991,20 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 		return nil, err
 	}
 	file.MaxContentBytes = e.maxFileSize()
+
+	// The user named this exact file, so "binary" is the answer to the question
+	// they asked, not a filter that happened to drop one item from a tree. The
+	// filetype detector already emits the informational "Binary File" finding
+	// that says so in the report body; this makes the exit code agree, because
+	// the scan cannot know what the file holds and must not read as clean.
+	//
+	// IsBinary is only computed once content has been loaded, so force it here
+	// rather than reading a field that is still false. The cost is zero in the
+	// common case: detect() loads the same bytes immediately afterwards.
+	_, _ = file.GetContent()
+	if file.IsBinary {
+		e.noteIncomplete(ReasonBinaryTarget)
+	}
 
 	allFindings := e.detect(file, e.fileBudgetFor(1))
 	return e.finalize(dir, allFindings)

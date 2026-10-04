@@ -62,6 +62,7 @@ evaluates them against policies, and produces a risk report.
 
 Quickstart:
   minesweep .                    scan the current directory (sensible defaults)
+  minesweep .env.production      scan a single file
   minesweep -p developer .       relaxed policy for local development
   minesweep init                 create a starter config file
   minesweep install-hooks        block secrets before every commit
@@ -73,7 +74,8 @@ Typical workflows:
   SARIF for GitHub ... minesweep --sarif . > results.sarif
   Known findings ..... minesweep --update-baseline --baseline .ms-baseline.json .
 
-Exit codes: 0 = clean (or below --fail-on), 1 = findings at or above threshold.`
+Exit codes: 0 = clean (or below --fail-on), 1 = findings at or above threshold,
+2 = the scan was incomplete, so its answer is not trustworthy.`
 
 func main() {
 	root := &cobra.Command{

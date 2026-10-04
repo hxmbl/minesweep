@@ -21,6 +21,7 @@ go build -o minesweep ./cmd/minesweep
 
 ```bash
 minesweep .                    # scan current directory
+minesweep config/database.yml  # scan a single file
 minesweep -p developer .       # relaxed policy for local work
 minesweep init                 # write a starter .minesweep.yml
 minesweep explain aws-access-key-id
@@ -96,6 +97,10 @@ section linked from its entry.
 - **Binary content never reaches a report.** A finding in a database or bundle
   now shows a descriptor instead of the file's raw bytes, in every output format.
   → [What is never in a report](#what-is-never-in-a-report)
+- **Naming a binary file directly exits `2`.** Pointing minesweep at one file
+  that turns out to be binary used to report "no secrets", a risk score of 0 and
+  `safe_to_share: true` — having read none of it.
+  → [Scanning a single file](#scanning-a-single-file)
 - **Non-ASCII and renamed files are scanned in `--staged`/`--diff`.** Git's path
   quoting previously made a filename like `café-secrets.env` unmatchable, and
   `--diff-filter=ACM` skipped renames.
@@ -167,6 +172,44 @@ Each blob is scanned once (a secret in 400 commits costs one scan), then attribu
 `--history` is scoped to the requested target, the same as `--diff` and the same
 as `--staged` on a single file: `minesweep sub --history` reports findings only
 under `sub/`. `--history` cannot be combined with `--diff` or `--staged`.
+
+### Scanning a single file
+
+The target may be a file rather than a directory:
+
+```bash
+minesweep .env.production          # one file
+minesweep -v config/database.yml   # matched values and context
+```
+
+A named file is still filtered: `.minesweepignore` applies to it, and so do
+`skip_extensions` — naming a file does not buy it an exemption. `--no-ignore` is
+the override.
+
+**Binaries are not scanned, and saying so is not the same as passing.** Content
+detectors never run on binary content, so naming one reports:
+
+```
+minesweep: INCOMPLETE SCAN — results do not cover the whole target.
+  - the named target is binary; its contents were not inspected and it may be unsafe
+
+  [allow] Binary File
+  app.exe:1 · 100% confident
+          ↳ Binary files were skipped during scanning; secrets inside them
+            (e.g. baked-in config) would not be detected.
+```
+
+That is exit `2`, not `0`. A binary holds whatever it holds, and a credential
+baked into a bundle is a real leak; a scan that read none of the bytes has no
+business reporting a risk score of 0 and `safe_to_share: true`. Previously it
+did exactly that.
+
+The signal is scoped to a hand-named target on purpose. In a **directory** scan
+binaries are expected, are already counted in the skip breakdown
+(`skipped_by`), and do not make the scan incomplete — otherwise every repository
+containing a PNG would exit `2` and the code would mean nothing. `--staged`,
+`--diff` and `--history` read from git rather than the working tree, so they are
+unaffected.
 
 ### Pre-commit
 
@@ -366,7 +409,8 @@ present only when they apply:
 
 Exit 2 outranks the findings check. A caller that receives 2 must not read it as
 "clean". It fires on a truncated scan, an unreadable path, an exhausted memory or
-finding budget, or `--max-files` stopping early.
+finding budget, `--max-files` stopping early, or a [named target that turned out
+to be binary](#scanning-a-single-file).
 
 `--fail-on` is a severity threshold and nothing more: it fires on any finding at
 or above it, regardless of what the policy decided to do with it.
