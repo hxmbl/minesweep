@@ -851,6 +851,22 @@ func isTestFile(path string) bool {
 	if strings.HasSuffix(name, "_test") || strings.HasSuffix(name, "_spec") {
 		return true
 	}
+	// The `test_`/`spec_` prefix forms are also recognised, because
+	// --include-tests documents that test files are skipped by default and
+	// `test_daemon.go` was plainly not being skipped. Django names its tests
+	// `test_*.py`; a large part of the Go ecosystem uses `test_*.go`. Both are
+	// as conventional as `*_test.go`, and a test-file skip rule that misses
+	// them is worse than not having one, because the coverage report then
+	// claims test files were scanned when the convention in use says otherwise.
+	//
+	// The prefix form is restricted to known test-source extensions for the same
+	// reason the `.test`/`.spec` form is: `test.json`, `test.tfvars` and
+	// `test.properties` are ordinary fixtures, and silently dropping those would
+	// hide credentials in them.
+	lower := strings.ToLower(name)
+	if strings.HasPrefix(lower, "test_") || strings.HasPrefix(lower, "spec_") {
+		return testSourceExts[strings.ToLower(ext)]
+	}
 	if strings.HasSuffix(name, ".test") || strings.HasSuffix(name, ".spec") {
 		return testSourceExts[strings.ToLower(ext)]
 	}

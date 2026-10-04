@@ -1,6 +1,7 @@
 package git
 
 import (
+	fx "minesweep/internal/fixtures"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,7 +82,7 @@ func TestGetDiffFilesCommittedDiff(t *testing.T) {
 	runGitCmd(dir, "commit", "-m", "initial")
 
 	// Add a new file (untracked)
-	writeTestFile(t, filepath.Join(dir, "new.txt"), "new secret AKIAIOSFODNN7EXAMPLE")
+	writeTestFile(t, filepath.Join(dir, "new.txt"), "new secret "+fx.AWSAccessKeyID())
 
 	// Compare against HEAD (should show untracked and modified files)
 	files, err := GetDiffFiles(dir, "HEAD")
@@ -112,7 +113,7 @@ func TestGetDiffFilesSubdir(t *testing.T) {
 	runGitCmd(dir, "add", ".")
 	runGitCmd(dir, "commit", "-m", "init")
 	runGitCmd(dir, "checkout", "-q", "-b", "feature")
-	writeTestFile(t, filepath.Join(dir, "pkg", "a.txt"), "changed with AKIAIOSFODNN7EXAMPLE")
+	writeTestFile(t, filepath.Join(dir, "pkg", "a.txt"), "changed with "+fx.AWSAccessKeyID())
 	runGitCmd(dir, "add", ".")
 	runGitCmd(dir, "commit", "-m", "change")
 

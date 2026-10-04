@@ -1,6 +1,7 @@
 package engine
 
 import (
+	fx "minesweep/internal/fixtures"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,7 +9,7 @@ import (
 
 // binaryish is content that filesystem.IsBinary classifies as binary: a NUL
 // byte in the first block.
-var binaryish = []byte("\x00\x01\x02 not text \x00 AKIAIOSFODNN7EXAMPLE \xff")
+var binaryish = []byte("\x00\x01\x02 not text \x00 " + fx.AWSAccessKeyID() + " \xff")
 
 func writeTarget(t *testing.T, name string, data []byte) string {
 	t.Helper()

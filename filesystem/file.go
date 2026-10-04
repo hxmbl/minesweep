@@ -66,6 +66,10 @@ type File struct {
 	lowered       []byte
 	lineIdx       *LineIndex
 	symlinkState  symlinkState
+	// example memoises which lines of a documentation file are example
+	// context. See example.go; built at most once, and never for a
+	// non-documentation file.
+	example exampleState
 	// Root is the scan root this file was admitted under. It is retained so the
 	// containment check on a symlink target can be repeated immediately before
 	// the read (see readSymlinkBounded), and so detectors that need to match

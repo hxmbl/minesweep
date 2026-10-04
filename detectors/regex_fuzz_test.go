@@ -4,6 +4,7 @@
 package detectors
 
 import (
+	fx "minesweep/internal/fixtures"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -68,7 +69,7 @@ func FuzzRegexMatching(f *testing.F) {
 
 	// Seed corpus
 	f.Add([]byte("safe content"))
-	f.Add([]byte("AKIAIOSFODNN7EXAMPLE"))
+	f.Add([]byte(fx.AWSAccessKeyID()))
 	f.Add([]byte(""))
 	f.Add([]byte("a"))
 	f.Add([]byte(strings.Repeat("a", 1000)))

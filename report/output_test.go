@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	fx "minesweep/internal/fixtures"
 	"strings"
 	"testing"
 
@@ -16,7 +17,7 @@ func sampleReport() findings.RiskReport {
 			Confidence: 0.95,
 			File:       ".env",
 			Line:       5,
-			Value:      "AKIAIOSFODNN7EXAMPLE",
+			Value:      fx.AWSAccessKeyID(),
 			RuleID:     "aws-access-key-id",
 			Action:     findings.ActionBlock,
 			Tags:       []string{"aws", "cloud", "credentials"},

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math"
 	"regexp"
+	"strings"
 
 	"minesweep/filesystem"
 	"minesweep/findings"
@@ -48,6 +49,79 @@ func (d *EntropyDetector) Name() string {
 
 var extractStringsRe = regexp.MustCompile(`[A-Za-z0-9\-_+=/]{20,}`)
 
+// definitionKeywords introduce a name rather than a value. A candidate that
+// follows one is being defined, whatever its entropy.
+var definitionKeywords = []string{
+	"def ", "func ", "fn ", "function ", "class ", "struct ", "interface ",
+	"enum ", "trait ", "impl ", "type ", "let ", "var ", "const ", "val ",
+	"static ", "public ", "private ", "protected ", "internal ", "export ",
+	"module ", "package ", "namespace ", "record ", "data ", "sub ",
+}
+
+// isIdentifierPosition reports whether the candidate spanning line[start:end]
+// is being used as a name.
+//
+// Three shapes qualify, and all three are certain from context alone:
+//
+//   - Immediately followed by `(` — in every language this scanner meets, a bare
+//     run of identifier characters before an open paren is a definition or a
+//     call. This is the reviewer's own example:
+//     `def test_backend_asks_about_the_library_without_importing_it(monkeypatch):`
+//     was reported at 70% because the line contains the substring `key` inside
+//     `monkeypatch` and the function name happens to be 52 characters of
+//     English. It cannot be a credential: it is the name of a function.
+//   - Immediately preceded by `.` — an attribute or field reference. `super().__secret_key`.
+//   - Immediately preceded by a definition keyword — the candidate is being
+//     introduced, not assigned.
+//
+// The preceding-character checks skip whitespace first so that `def  name(` and
+// `x . name` read the same as their tightened forms.
+func isIdentifierPosition(line []byte, start, end int) bool {
+	if next := nextNonSpace(line, end); next >= 0 && line[next] == '(' {
+		return true
+	}
+	i := prevNonSpace(line, start)
+	if i < 0 {
+		return false
+	}
+	if line[i] == '.' {
+		return true
+	}
+	prefix := string(line[:i+1])
+	for _, kw := range definitionKeywords {
+		if strings.HasSuffix(prefix, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// nextNonSpace returns the index of the first non-space byte at or after i,
+// or -1 if the line ends first.
+func nextNonSpace(line []byte, i int) int {
+	for ; i < len(line); i++ {
+		switch line[i] {
+		case ' ', '\t', '\r':
+		default:
+			return i
+		}
+	}
+	return -1
+}
+
+// prevNonSpace returns the index of the last non-space byte strictly before i,
+// or -1 if the line starts first.
+func prevNonSpace(line []byte, i int) int {
+	for j := i - 1; j >= 0; j-- {
+		switch line[j] {
+		case ' ', '\t', '\r':
+		default:
+			return j
+		}
+	}
+	return -1
+}
+
 func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 	if file.IsBinary {
 		return nil
@@ -88,6 +162,29 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 		for _, loc := range candidates {
 			word := trimmed[loc[0]:loc[1]]
 
+			// A candidate in identifier position is a name, not a literal.
+			// The certainty here comes from the surrounding grammar, not from
+			// the token: no threshold can distinguish a 52-character function
+			// name from a 52-character secret by its own entropy.
+			if isIdentifierPosition(trimmed, loc[0], loc[1]) {
+				continue
+			}
+
+			// The extraction class includes `=`, so an assignment arrives as one
+			// candidate covering both halves: `AUTH_TOKEN=your-token-here`.
+			// Judge and report the value, for the same reason the regex rules
+			// do — see detectors.credentialValue. Without this the placeholder
+			// check never ran on this path at all, and a checked-in
+			// `.env.example` reported `changeme` as a 60%-confidence secret.
+			col := loc[0]
+			if i := bytes.IndexByte(word, '='); i >= 0 && i < len(word)-1 {
+				word = word[i+1:]
+				col = loc[0] + i + 1
+			}
+			if LooksLikeExample(string(word)) {
+				continue
+			}
+
 			entropy := shannonEntropyBytes(word)
 			if entropy < entropyMedium {
 				continue
@@ -104,6 +201,13 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 			if confidence < scoreMinConfidence {
 				continue
 			}
+			// Inside a documentation example, or on a comment-only line,
+			// require more certainty before reporting: entropy alone is the
+			// weakest signal this tool has, and a fenced configuration sample
+			// or an explanatory comment is its most common source.
+			if heldBackByLineContext(file, lineNum, string(raw), confidence) {
+				continue
+			}
 			// Entropy is line-based, so a large file can emit one finding
 			// per line indefinitely. The budget stops that; the engine
 			// reports the file as incompletely scanned.
@@ -115,7 +219,7 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 			// leading whitespace separates raw from trimmed, so the
 			// regex offset shifts by exactly that amount.
 			leading := len(raw) - len(bytes.TrimLeft(raw, " \t\r\n\v\f"))
-			col := leading + loc[0]
+			fCol := leading + col
 
 			fResults = append(fResults, findings.Finding{
 				Type:       "High Entropy String",
@@ -123,7 +227,7 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 				Confidence: confidence,
 				File:       file.Path,
 				Line:       lineNum,
-				Column:     col + 1,
+				Column:     fCol + 1,
 				Value:      string(word),
 				Reason:     "High-entropy string detected (potential secret)",
 				RuleID:     "entropy-high",

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"minesweep/filesystem"
+	"minesweep/internal/fixtures"
 )
 
 func TestLooksLikeCredentialValueRejectsCode(t *testing.T) {
@@ -29,9 +30,15 @@ func TestLooksLikeCredentialValueRejectsCode(t *testing.T) {
 }
 
 func TestLooksLikeCredentialValueAcceptsSecrets(t *testing.T) {
+	// The AWS pair that used to stand in here was \x41KIAIOSFODNN7EXAMPLE /
+	// the AWS secret-access-key documentation value — AWS's published keys, not
+	// real credentials. They are now recognised as examples; see
+	// TestLooksLikeExample. These are the same shapes with real-looking
+	// material, built from fragments so push protection cannot reconstruct
+	// them from source.
 	accept := []string{
-		"AKIAIOSFODNN7EXAMPLE",
-		"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		fixtures.AWSAccessKeyID(),
+		fixtures.AWSSecretKey(),
 		"postgres://svc:8fJq2vQzLmNp4Rt@db.internal:5432/app",
 		"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
 		"Qz7Xm2Pq9Rt4Lv8Nc3Kd6Wj1",
@@ -102,13 +109,12 @@ token = "${SECRET_FROM_VAULT}"
 
 // The counterpart: the same rules must still fire on real secrets.
 func TestRealSecretsStillDetected(t *testing.T) {
-	src := `AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-DB_PASSWORD=Sup3rS3cretValue123
-API_SECRET=Qz7Xm2Pq9Rt4Lv8Nc3Kd6Wj1
-aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY01
-GH_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345
-password = "hunter2hunter2"
-`
+	src := "AWS_ACCESS_KEY_ID=" + fixtures.AWSAccessKeyID() + "\n" +
+		"DB_PASSWORD=Sup3rS3cretValue123\n" +
+		"API_SECRET=Qz7Xm2Pq9Rt4Lv8Nc3Kd6Wj1\n" +
+		"aws_secret_access_key=" + fixtures.AWSSecretKey() + "\n" +
+		"GH_TOKEN=" + fixtures.GitHubPAT() + "\n" +
+		"password = \"hunter2hunter2\"\n"
 	rd, err := NewRegexDetector("/nonexistent-rules-dir-for-test")
 	if err != nil {
 		t.Fatalf("load rules: %v", err)

@@ -1,6 +1,7 @@
 package git
 
 import (
+	fx "minesweep/internal/fixtures"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,7 +82,7 @@ func TestHistoryFindsDeletedSecret(t *testing.T) {
 	dir := initRepo(t)
 
 	// Commit 1: secret exists. Commit 2: file deleted. Working tree is clean.
-	commitFile(t, dir, "creds.txt", "aws_access_key_id = AKIAIOSFODNN7EXAMPLE\n")
+	commitFile(t, dir, "creds.txt", "aws_access_key_id = "+fx.AWSAccessKeyID()+"\n")
 
 	if err := os.Remove(filepath.Join(dir, "creds.txt")); err != nil {
 		t.Fatal(err)
@@ -124,7 +125,7 @@ func TestHistoryFindsDeletedSecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(content), "AKIAIOSFODNN7EXAMPLE") {
+	if !strings.Contains(string(content), fx.AWSAccessKeyID()) {
 		t.Errorf("blob content wrong: %q", content)
 	}
 	second, _ := fetcher.Fetch(secretBlob.SHA)

@@ -2,6 +2,7 @@ package detectors
 
 import (
 	"bytes"
+	fx "minesweep/internal/fixtures"
 	"testing"
 
 	"minesweep/filesystem"
@@ -32,7 +33,7 @@ func TestGateSoundnessNeverBlocksRealMatches(t *testing.T) {
 		pattern string
 		input   string
 	}{
-		{`\b(AKIA[0-9A-Z]{16})\b`, "key = AKIAIOSFODNN7EXAMPLE here"},
+		{`\b(AKIA[0-9A-Z]{16})\b`, "key = " + fx.AWSAccessKeyID() + " here"},
 		{`(?i)postgres(?:ql)?://([^:\s]+):([^@\s]+)@[^\s]+`, "POSTGRES://u:p@h/db"},
 		{`(?i)(?:db|database)[_-]?(?:user|pwd|password)\s*[:=]\s*\S+`, "DB_PASSWORD=hunter2"},
 		{`(foo|bar)+baz`, "barbarbaz"},
@@ -166,9 +167,9 @@ func TestEmbeddedRulesGatesNeverRejectMatchingInput(t *testing.T) {
 	}
 	cases := []struct{ label, input string }{
 		{"long s in password", "pa" + longS + longS + "word = \"Sup3rS3cretValue123\"\n"},
-		{"long s in secret", "aw" + longS + "_" + longS + "ecret_acce" + longS + longS + "_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY01\n"},
-		{"kelvin in key", "API_" + kelvin + "EY=AKIAIOSFODNN7EXAMPLE\n"},
-		{"kelvin in secret keyword", "AWS_" + kelvin + "ecret_acce" + longS + longS + "_" + kelvin + "EY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY01\n"},
+		{"long s in secret", "aw" + longS + "_" + longS + "ecret_acce" + longS + longS + "_key=" + fx.AWSSecretKey() + "01\n"},
+		{"kelvin in key", "API_" + kelvin + "EY=" + fx.AWSAccessKeyID() + "\n"},
+		{"kelvin in secret keyword", "AWS_" + kelvin + "ecret_acce" + longS + longS + "_" + kelvin + "EY=" + fx.AWSSecretKey() + "01\n"},
 		{"plain password", "password = \"Sup3rS3cretValue123\"\n"},
 		{"uppercase postgres", "POSTGRES://svc:pw@db.internal:5432/app\n"},
 	}

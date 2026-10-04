@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -52,7 +53,9 @@ var (
 	toolVersion string
 	configPath  string
 	// hookForce allows install-hooks to replace a third-party hook.
-	hookForce     bool
+	hookForce bool
+	// trustList makes `trust` print the current list instead of adding to it.
+	trustList     bool
 	watchMode     bool
 	watchInterval time.Duration
 )
@@ -70,9 +73,11 @@ Quickstart:
 
 Typical workflows:
   CI gate ............ minesweep --fail-on high .
+  Gate on confidence  minesweep --fail-on high@60% .
   Pull request ....... minesweep --diff --diff-base main .
   SARIF for GitHub ... minesweep --sarif . > results.sarif
   Known findings ..... minesweep --update-baseline --baseline .ms-baseline.json .
+  Own repository ..... minesweep trust .
 
 Exit codes: 0 = clean (or below --fail-on), 1 = findings at or above threshold,
 2 = the scan was incomplete, so its answer is not trustworthy.`
@@ -89,11 +94,12 @@ func main() {
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Name() == "install-hooks" || cmd.Name() == "uninstall-hooks" ||
 				cmd.Name() == "init" || cmd.Name() == "version" || cmd.Name() == "explain" ||
+				cmd.Name() == "trust" || cmd.Name() == "untrust" ||
 				cmd.Name() == "import-gitleaks-ignores" {
 				return nil
 			}
-			if cfg.FailOn != "" && !findings.IsValidSeverity(cfg.FailOn) {
-				return fmt.Errorf("invalid --fail-on value %q (valid: info, low, medium, high, critical)", cfg.FailOn)
+			if cfg.FailOn != "" && !findings.IsValidSeverity(cfg.FailOn) && !findings.IsValidGate(cfg.FailOn) {
+				return fmt.Errorf("invalid --fail-on value %q (valid: info, low, medium, high, critical, or SEVERITY@CONFIDENCE such as high@60%%)", cfg.FailOn)
 			}
 			if cfg.MinSeverity != "" && !findings.IsValidSeverity(cfg.MinSeverity) {
 				return fmt.Errorf("invalid --min-severity value %q (valid: info, low, medium, high, critical)", cfg.MinSeverity)
@@ -139,7 +145,8 @@ func main() {
 	root.Flags().IntVarP(&benchRuns, "runs", "", 1, "Number of timed runs for --benchmark (min/median/mean/max reported)")
 	root.Flags().StringVarP(&cfg.PolicyDir, "policy-dir", "", "policy", "Directory containing policy YAML files")
 	root.Flags().BoolVarP(&cfg.Verbose, "verbose", "v", false, "Verbose output")
-	root.Flags().StringVarP(&cfg.FailOn, "fail-on", "", "low", "Minimum severity that exits non-zero (info, low, medium, high, critical)")
+	root.Flags().StringVarP(&cfg.FailOn, "fail-on", "", "low",
+		"Gate: minimum severity (info, low, medium, high, critical). Append @CONFIDENCE — high@60% — to also require that much confidence")
 	root.Flags().Float64VarP(&cfg.MinConfidence, "min-confidence", "", 0, "Minimum confidence threshold to include findings (0.0-1.0)")
 	root.Flags().StringVarP(&cfg.MinSeverity, "min-severity", "", "", "Minimum severity to report (info, low, medium, high, critical)")
 	root.Flags().StringArrayVarP(&cfg.Tags, "tag", "t", nil, "Filter by tag (can be specified multiple times)")
@@ -183,6 +190,36 @@ func main() {
 		Use:   "uninstall-hooks",
 		Short: "Remove git pre-commit hook",
 		RunE:  runUninstallHooks,
+	})
+
+	trustCmd := &cobra.Command{
+		Use:   "trust [path]",
+		Short: "Let a directory's .minesweep.yml set security-relevant keys",
+		Long: "Record a directory as yours, so a .minesweep.yml found there is honoured.\n\n" +
+			"A config discovered by walking up from the scan target belongs to whatever\n" +
+			"is being scanned, so by default its security-relevant keys — fail_on,\n" +
+			"profile, suppress_file, the resource limits — are ignored. That is right\n" +
+			"for a repository you just cloned and wrong for your own, and the tool\n" +
+			"cannot tell them apart from the contents of the file.\n\n" +
+			"So the decision is stored outside the repository, in\n" +
+			"  " + trustFileForHelp() + "\n" +
+			"which a checkout cannot edit. That is the same arrangement as git's\n" +
+			"safe.directory, for the same reason. There is deliberately no marker\n" +
+			"inside the config: a malicious repository would add one, which is exactly\n" +
+			"the weakening the rule exists to prevent.\n\n" +
+			"With no path, the current directory is used. This is the remedy to reach\n" +
+			"for when a scan reports \"ignoring security-relevant settings from\n" +
+			"untrusted config\", and unlike --config it works from inside the\n" +
+			"pre-commit hook, which cannot pass flags.",
+		RunE: runTrust,
+	}
+	trustCmd.Flags().BoolVar(&trustList, "list", false, "List trusted directories and exit")
+	root.AddCommand(trustCmd)
+
+	root.AddCommand(&cobra.Command{
+		Use:   "untrust [path]",
+		Short: "Stop honouring a directory's .minesweep.yml security keys",
+		RunE:  runUntrust,
 	})
 
 	root.AddCommand(newInitCommand())
@@ -433,6 +470,12 @@ func pathField(label, flag string, set func(*engine.Config, string), present fun
 		present: present}
 }
 
+// configNameForWarning names a plausible config file in the diagnostic that
+// offers --config as the single-run alternative. It is only ever shown when a
+// config was actually discovered, so one of these four names is the file that
+// was found.
+const configNameForWarning = ".minesweep.yml"
+
 // applyConfigValues merges a loaded config file into cfg. changed reports
 // explicitly-set CLI flags (they always win over any file). trusted=false
 // means the file was auto-discovered from the scanned tree: security fields
@@ -458,10 +501,19 @@ func applyConfigValues(cfg *engine.Config, fc *config.FileConfig, cfgDir string,
 		sort.Strings(ignored)
 		// Best-effort diagnostic. A failure to print the warning must not fail
 		// the scan, but it is deliberately visible in --verbose output.
+		//
+		// The remedy has to name the hook case, because that is where the old
+		// message was useless: a pre-commit hook runs a fixed command line and
+		// cannot pass --config. A user whose own repository was being ignored
+		// was told to pass a flag they had no way to pass, and the natural next
+		// move was to remove the hook. `minesweep trust` works from anywhere,
+		// including from inside a hook.
 		fmt.Fprintf(warn, "minesweep: warning: ignoring security-relevant settings from untrusted config:\n"+ //nolint:errcheck // diagnostic only
 			"  %s\n"+
-			"  Discovered configs cannot weaken scans. Pass --config <file> to honor them explicitly.\n",
-			strings.Join(ignored, ", "))
+			"  Discovered configs cannot weaken scans. If this is your own repository:\n"+
+			"    minesweep trust %s\n"+
+			"  Or pass --config %s explicitly for a single run.\n",
+			strings.Join(ignored, ", "), cfgDir, cfgDir+string(filepath.Separator)+configNameForWarning)
 	}
 	return ignored
 }
@@ -530,7 +582,7 @@ func loadConfig(cmd *cobra.Command, scanPath string) error {
 	var fileCfg *config.FileConfig
 	var cfgPath string
 	var err error
-	trusted := configPath != ""
+	explicit := configPath != ""
 
 	// A config the caller named is parsed strictly. A config found by walking
 	// up from the scan target belongs to whatever is being scanned — or to an
@@ -539,7 +591,7 @@ func loadConfig(cmd *cobra.Command, scanPath string) error {
 	unknown := map[string]bool{}
 	reportUnknown := func(key string) { unknown[key] = true }
 
-	if trusted {
+	if explicit {
 		fileCfg, err = config.LoadFile(configPath)
 		if err != nil {
 			return fmt.Errorf("load config file: %w", err)
@@ -564,9 +616,27 @@ func loadConfig(cmd *cobra.Command, scanPath string) error {
 		return nil
 	}
 
+	// A discovered config is honoured when the user has said they own it. The
+	// answer lives in a trust list outside the working tree, because the
+	// repository being scanned cannot be the thing that grants itself trust —
+	// see config/trust.go for why an in-file marker would not count.
+	trusted, trustReason := explicit, ""
+	if !explicit {
+		trusted, trustReason = config.IsTrustedWithReason(filepath.Dir(cfgPath))
+	}
+
 	if cfg.Verbose {
-		fmt.Fprintf(os.Stderr, "Using config file: %s (%s)\n", cfgPath,
-			map[bool]string{true: "trusted", false: "discovered"}[trusted])
+		state := "discovered"
+		if explicit {
+			state = "--config"
+		} else if trusted {
+			state = "trusted"
+		}
+		line := fmt.Sprintf("Using config file: %s (%s)\n", cfgPath, state)
+		if trustReason != "" {
+			line += fmt.Sprintf("  trusted: %s\n", trustReason)
+		}
+		fmt.Fprint(os.Stderr, line)
 	}
 
 	changed := map[string]bool{}
@@ -728,10 +798,11 @@ func scanAndReport(scanPath string) (int, error) {
 		}
 	} else {
 		opts := report.TextOptions{
-			Verbose:  cfg.Verbose,
-			Color:    report.ParseColorMode(colorMode),
-			Hints:    nextStepHints(scanPath, reportData),
-			Snippets: showSnippets,
+			Verbose:       cfg.Verbose,
+			Color:         report.ParseColorMode(colorMode),
+			Hints:         nextStepHints(scanPath, reportData),
+			Snippets:      showSnippets,
+			ShowRawValues: cfg.DangerouslyShowSecrets,
 		}
 		if err := renderTextInteractive(reportData, &opts); err != nil {
 			return 0, err
@@ -744,7 +815,13 @@ func scanAndReport(scanPath string) (int, error) {
 		return 2, nil
 	}
 	if reportData != nil {
-		minSev := findings.ParseSeverity(cfg.FailOn)
+		gate, err := findings.ParseGate(cfg.FailOn)
+		if err != nil {
+			// Validated in PersistentPreRunE; this is unreachable in practice.
+			// Treating it as "gate on nothing" would turn a typo into a silent
+			// pass, which is the one outcome a gate must never produce.
+			return 1, fmt.Errorf("invalid --fail-on: %w", err)
+		}
 		// --fail-on is documented as "minimum severity that exits non-zero",
 		// so it must fire on any finding at or above the threshold regardless
 		// of the policy action. The previous implementation also required a
@@ -752,13 +829,38 @@ func scanAndReport(scanPath string) (int, error) {
 		// allow, `--fail-on low` — the documented default — could never fail on
 		// a low-severity finding. A gate that silently does not gate is worse
 		// than one that gates too eagerly, because it is trusted.
+		//
+		// When the gate also carries a confidence floor, findings that clear
+		// severity but not confidence do not block. They are named on stderr,
+		// because a gate that lets something through in silence is the failure
+		// mode the compound form exists to avoid.
+		var heldBack []findings.Finding
 		for _, f := range reportData.Findings {
-			if f.Severity >= minSev {
+			if f.Severity >= gate.Severity && !gate.Passes(f) {
+				heldBack = append(heldBack, f)
+				continue
+			}
+			if gate.Passes(f) {
 				return 1, nil
 			}
 		}
+		if len(heldBack) > 0 {
+			fmt.Fprintf(os.Stderr, "\nminesweep: not gating %d finding(s): at or above %s severity but below %s confidence.\n",
+				len(heldBack), gate.Severity, formatConfidence(gate.MinConfidence))
+			for _, f := range heldBack {
+				fmt.Fprintf(os.Stderr, "  %s:%d · %s confident · %s\n",
+					f.File, f.Line, formatConfidence(f.Confidence), f.Type)
+			}
+			fmt.Fprintf(os.Stderr, "  To gate on these too, lower the floor: --fail-on %s\n",
+				findings.Gate{Severity: gate.Severity}.String())
+		}
 	}
 	return 0, nil
+}
+
+// formatConfidence renders a fraction the way the report prints it.
+func formatConfidence(c float64) string {
+	return strconv.FormatFloat(c*findings.ConfidenceScale, 'f', 0, 64) + "%"
 }
 
 // nextStepHints suggests beginner-friendly follow-up commands based on the
@@ -907,6 +1009,76 @@ func runInstallHooks(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "Installed pre-commit hook: %s\n", hookPath)
+	return nil
+}
+
+// trustFileForHelp names the trust file for the trust command's help text. A
+// failure to resolve it is not worth failing a --help over.
+func trustFileForHelp() string {
+	if p, err := config.TrustFilePath(); err == nil {
+		return p
+	}
+	return "the minesweep config directory"
+}
+
+func runTrust(cmd *cobra.Command, args []string) error {
+	store, err := config.LoadTrust()
+	if err != nil {
+		return err
+	}
+	if trustList {
+		if store.TrustAll {
+			fmt.Println("  * (blanket trust: every discovered config is honoured)")
+		}
+		if len(store.Entries) == 0 && !store.TrustAll {
+			fmt.Printf("No trusted directories. Trust list: %s\n", store.Path)
+			return nil
+		}
+		fmt.Printf("Trusted directories (%s):\n", store.Path)
+		wd, wdErr := os.Getwd()
+		for _, e := range store.Entries {
+			note := ""
+			if wdErr == nil {
+				if abs, err := filepath.Abs(e); err == nil && abs == wd {
+					note = "  (this directory)"
+				}
+			}
+			fmt.Printf("  %s%s\n", e, note)
+		}
+		return nil
+	}
+
+	dir := "."
+	if len(args) > 0 {
+		dir = args[0]
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", dir, err)
+	}
+	if err := config.AddTrust(abs); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Trusted %s\n", abs)
+	fmt.Fprintf(os.Stderr, "  A .minesweep.yml there will now be honoured, including fail_on, profile and suppress_file.\n")
+	fmt.Fprintf(os.Stderr, "  Recorded in %s, outside the repository, so a checkout cannot grant itself trust.\n", store.Path)
+	return nil
+}
+
+func runUntrust(cmd *cobra.Command, args []string) error {
+	dir := "."
+	if len(args) > 0 {
+		dir = args[0]
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", dir, err)
+	}
+	if err := config.RemoveTrust(abs); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "No longer trusting %s\n", abs)
+	fmt.Fprintf(os.Stderr, "  A .minesweep.yml there will have its security-relevant keys ignored again.\n")
 	return nil
 }
 

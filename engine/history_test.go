@@ -1,6 +1,7 @@
 package engine
 
 import (
+	fx "minesweep/internal/fixtures"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"minesweep/findings"
 	"minesweep/policy"
+	"minesweep/report"
 )
 
 func gitRun(t *testing.T, dir string, args ...string) {
@@ -27,7 +29,7 @@ func TestHistoryModeScansDeletedSecrets(t *testing.T) {
 	dir := t.TempDir()
 	gitRun(t, dir, "init", "-q", "--initial-branch=main", ".")
 
-	if err := os.WriteFile(filepath.Join(dir, "secret.env"), []byte("aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "secret.env"), []byte("aws_secret_access_key = "+fx.AWSSecretKey()+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	gitRun(t, dir, "add", "secret.env")
@@ -84,10 +86,23 @@ func TestHistoryModeScansDeletedSecrets(t *testing.T) {
 	}
 }
 
-func TestRedactMasksEvidenceFields(t *testing.T) {
-	const secret = "SG.abcdefghijklmnopqrstuv.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+// A redact-action finding must never leak its value — but the engine is no
+// longer the layer that guarantees it.
+//
+// It used to overwrite Value with the literal "<REDACTED>" and mask the
+// evidence with the same constant. That destroyed the per-secret correlation
+// the report depends on (every redacted finding hashed to the same token, so
+// "same secret" and "both redacted" became indistinguishable), and it made
+// --dangerously-show-secrets unrecoverable, because the value was destroyed
+// before the flag was ever consulted.
+//
+// Censoring now happens once, at the output boundary, where CensorReport
+// substitutes a stable per-secret token. This test asserts the property at the
+// layer that owns it.
+func TestRedactDoesNotLeakSecretThroughAnyOutputPath(t *testing.T) {
+	secret := fx.SendGridKey()
 	e := &Engine{config: Config{}, policies: testRedactPolicies()}
-	out := e.evaluate([]findings.Finding{{
+	evaluated := e.evaluate([]findings.Finding{{
 		Type:       "SendGrid API Key",
 		RuleID:     "sendgrid-api-key",
 		Severity:   findings.SeverityHigh,
@@ -99,19 +114,37 @@ func TestRedactMasksEvidenceFields(t *testing.T) {
 		SourceLine: "key = " + secret,
 	}})
 
-	if len(out) != 1 {
-		t.Fatalf("expected 1 finding, got %d", len(out))
+	if len(evaluated) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(evaluated))
 	}
-	f := out[0]
-	if f.Value != "<REDACTED>" {
-		t.Errorf("value = %q", f.Value)
+	f := evaluated[0]
+	if f.Action != findings.ActionRedact {
+		t.Fatalf("evaluate must still assign the policy action; got %q", f.Action)
 	}
-	if strings.Contains(f.SourceLine, secret) || strings.Contains(f.Context, secret) {
+	// The engine hands the value through. It is the output boundary's job to
+	// remove it, and it can only do that if the value survives this far.
+	if f.Value != secret {
+		t.Errorf("engine blanked the value to %q; the censoring layer can no longer correlate it", f.Value)
+	}
+
+	// Now the boundary. Every output format goes through this.
+	censored := report.CensorReport(&findings.RiskReport{Findings: evaluated})
+	got := censored.Findings[0]
+
+	if strings.Contains(got.SourceLine, secret) || strings.Contains(got.Context, secret) {
 		t.Errorf("redact leaked secret via evidence fields:\nsource_line=%q\ncontext=%q",
-			f.SourceLine, f.Context)
+			got.SourceLine, got.Context)
 	}
-	if !strings.Contains(f.SourceLine, "<REDACTED>") || !strings.Contains(f.Context, "<REDACTED>") {
-		t.Errorf("evidence should contain the mask marker:\n%q / %q", f.SourceLine, f.Context)
+	if got.Value == secret || !strings.HasPrefix(got.Value, "sha256:") {
+		t.Errorf("value = %q; want a stable sha256 token", got.Value)
+	}
+	// The whole point of a token rather than a mask: equal values must
+	// produce equal tokens, so two findings about one secret correlate.
+	other := report.CensorReport(&findings.RiskReport{Findings: []findings.Finding{{
+		File: "other.py", Value: secret, SourceLine: "key = " + secret,
+	}}})
+	if other.Findings[0].Value != got.Value {
+		t.Errorf("same secret produced two tokens: %q and %q", got.Value, other.Findings[0].Value)
 	}
 }
 
@@ -124,7 +157,7 @@ func testRedactPolicies() []policy.PolicyRule {
 func TestBaselineCrossModeMatching(t *testing.T) {
 	dir := t.TempDir()
 	gitRun(t, dir, "init", "-q", "--initial-branch=main", ".")
-	if err := os.WriteFile(filepath.Join(dir, "k.env"), []byte("aws_access_key_id = AKIAIOSFODNN7EXAMPLE\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "k.env"), []byte("aws_access_key_id = "+fx.AWSAccessKeyID()+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	gitRun(t, dir, "add", "k.env")

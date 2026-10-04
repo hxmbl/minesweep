@@ -78,7 +78,7 @@ func TestHistoryFilteredPathWithItsOwnSecretIsNotReported(t *testing.T) {
 	dir := initRepo(t)
 	commitFile(t, dir, "config.env", awsKey, "add config")
 	commitFile(t, dir, "logo.png",
-		"GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n", "add png")
+		"GITHUB_TOKEN=\x67hp_abcdefghijklmnopqrstuvwxyz0123456789\n", "add png")
 
 	rep := runHistory(t, dir)
 	for _, f := range rep.Findings {

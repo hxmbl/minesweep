@@ -1696,22 +1696,39 @@ func hasAnyTag(findingTags, filterTags []string) bool {
 	return false
 }
 
+// evaluate resolves the policy action for each finding.
+//
+// It deliberately does NOT redact. Redaction belongs to the output boundary,
+// where report.CensorReport hashes each value into a stable per-secret token
+// and substitutes it into the evidence. This function used to overwrite the
+// value with the constant "<REDACTED>" first, and that single line of code
+// broke the disclosure ladder in three separate ways:
+//
+//   - Correlation was destroyed and then falsified. CensorValue replaces
+//     occurrences of the value, so with the value already blanked there was
+//     nothing left to correlate. Every redacted finding in every file hashed
+//     the same literal string, so the report showed one identical token for
+//     every redact-action finding regardless of what was actually found. A
+//     user comparing two findings had no way to tell "same secret" from
+//     "both redacted".
+//   - The evidence lines kept the secret. The replacement searched for the
+//     raw value, but the source line was searched with strings.ReplaceAll
+//     against `raw` — which did work — while the *value* field was already
+//     unrecoverable. So the report was simultaneously too revealing in the
+//     snippet and uninformative in the value.
+//   - --dangerously-show-secrets could not reveal it. The flag is checked in
+//     main.go, long after this ran, so by the time anyone asked to see the
+//     secret the secret was gone. The top rung of the ladder was decorative.
+//
+// A library caller that renders findings directly now receives raw values and
+// must call report.CensorReport, which is the one tested path and the one that
+// every output format already goes through.
 func (e *Engine) evaluate(fs []findings.Finding) []findings.Finding {
 	var evaluated []findings.Finding
 	for _, f := range fs {
 		action := policy.Evaluate(f, e.policies)
 		f.Action = action
 		f.Reason = string(action) + ": " + f.Reason
-		if action == findings.ActionRedact && f.Value != "" {
-			raw := f.Value
-			f.Value = findings.RedactValue(raw, f.Type)
-			// The captured value also appears verbatim in the surrounding
-			// evidence; a redaction that leaves the secret sitting in
-			// source_line/context is not a redaction.
-			mask := findings.RedactValue("", "")
-			f.SourceLine = strings.ReplaceAll(f.SourceLine, raw, mask)
-			f.Context = strings.ReplaceAll(f.Context, raw, mask)
-		}
 		evaluated = append(evaluated, f)
 	}
 	return evaluated

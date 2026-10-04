@@ -60,6 +60,13 @@ func looksLikeCredentialValue(v string) bool {
 	if attrChain.MatchString(v) || strings.HasSuffix(v, ".") {
 		return false
 	}
+	// The value is an opaque token of the right shape. The last question is
+	// whether it claims to be a real one, and checked-in placeholders answer
+	// that in their own text: `changeme`, `REPLACE_ME`, `your-token-here`,
+	// `xxxxxxxx`, `sha256:9f86…`. See example.go for why the bar is narrow.
+	if LooksLikeExample(v) {
+		return false
+	}
 	return true
 }
 
@@ -77,12 +84,70 @@ func isQuotedLiteral(v string) bool {
 // of it is the whole point of the match and must not be mistaken for the
 // secret.
 func assignmentValueLooksLikeCredential(assignment string) bool {
+	_, ok := credentialValue(assignment)
+	return ok
+}
+
+// credentialValue narrows a capture that spans a whole assignment to the part
+// after the first sign, and reports whether that part looks like a credential.
+//
+// It exists because judging the value and reporting the match are different
+// decisions, and conflating them corrupts the report. A rule with no capture
+// group — which is every one of the four env-* rules, the highest-volume rules
+// in the set — matched
+//
+//	secret = "whsec_8fKd93Ml20Xq7Zb1Rt6"
+//
+// and reported Value as the entire string, identifier and quotes included.
+// Three consequences, all observed in one scan of one README:
+//
+//   - CensorValue replaced the whole assignment with one token, so the evidence
+//     line rendered as `sha256:426d3e6d6ff6` — the context that makes a finding
+//     reviewable was gone.
+//   - The same secret produced a different token per rule: env-password
+//     hashed `secret = "whsec_…"`, entropy-high hashed `whsec_…`, env-api-key
+//     hashed `APP_SECRET="whsec_…"`. That breaks the documented promise that
+//     equal values produce equal tokens, which is what lets findings be
+//     correlated across files, runs and baselines.
+//   - An allowlist entry written against the real secret did not match,
+//     because the value being matched was the assignment.
+//
+// So: judge the value, and report the value. The byte offsets stay on the whole
+// match, because a finding should point at the assignment the user recognises,
+// not at a substring of it.
+func credentialValue(assignment string) (string, bool) {
 	i := strings.IndexAny(assignment, ":=")
 	if i < 0 || i == len(assignment)-1 {
 		// No sign, or nothing after it: there is no value to judge.
-		return false
+		return "", false
 	}
-	return looksLikeCredentialValue(assignment[i+1:])
+	// Peel the quotes the pattern's own `["']?` left behind.
+	//
+	// They arrive asymmetrically. `(?i)(password|…)[ 	]*[:=][ 	]*["']?[^\s"']{8,}`
+	// consumes an opening quote but can never consume the closing one, because
+	// the value character class excludes it. The captured value was therefore
+	// `"whsec_8fKd93Ml20Xq7Zb1Rt6` — a leading quote and no trailing one.
+	//
+	// That asymmetry is not cosmetic. A value with a stray quote fails
+	// isQuotedLiteral, so it took the unquoted path through the shape checks;
+	// it failed looksLikePinnedDigest, so every `sha256:` digest was reported;
+	// and it was reported verbatim, so the censoring pass replaced
+	// `"whsec_8fKd93Ml20Xq7Zb1Rt6` in the evidence line and left the line
+	// reading `WEBHOOK_SIGNING_sha256:1d31bdafd1e9"`.
+	value := trimValueQuotes(assignment[i+1:])
+	return value, looksLikeCredentialValue(value)
+}
+
+// trimValueQuotes removes one matching pair of quotes, and otherwise removes
+// any unbalanced quote left at either end. An assignment may legitimately
+// quote a value in a way the pattern could not balance, and a dangling quote
+// would corrupt both the reported value and the redacted evidence line.
+func trimValueQuotes(v string) string {
+	v = strings.TrimSpace(v)
+	if isQuotedLiteral(v) {
+		return v[1 : len(v)-1]
+	}
+	return strings.Trim(v, "\"'`")
 }
 
 // judgeCapturedValue applies the value check to a regex capture. A rule that

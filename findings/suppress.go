@@ -3,20 +3,45 @@ package findings
 import (
 	"encoding/json"
 	"os"
+	"path"
+	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // Suppression identifies findings to exclude from reports. ID is a human
 // label for the entry (not matched against anything); at least one of
 // RuleID, File, or Pattern should be set to actually match findings.
 // Line, when > 0, additionally restricts a File match to that line.
+// Suppression identifies findings to exclude from reports. ID is a human
+// label for the entry (not matched against anything); at least one of
+// RuleID, File, Tags, or Pattern should be set to actually match findings.
+// Line, when > 0, additionally restricts a File match to that line.
+//
+// The user's only noise escape hatch used to be per-finding baseline
+// acceptance, which spends a finding from a budget that does not grow and
+// records no reason. For a class of finding that recurs by construction — every
+// keyword-context match in a documentation file, every pinned digest in a
+// lockfile — that is the wrong granularity: each occurrence costs a separate
+// decision and a separate baseline entry, and none of them stops the next one.
+//
+// So a suppression may name a class rather than an instance:
+//
+//	{rule_id: env-password}          every finding from one rule
+//	{tags: [database]}               every finding carrying a tag
+//	{file: "**/*.md"}                every finding under matching paths
+//	{rule_id: env-password, file: "docs/**"}   the intersection
+//
+// File accepts a glob. A value with no wildcard keeps its historical exact-match
+// meaning, so an existing suppression file behaves identically.
 type Suppression struct {
-	ID      string `yaml:"id" json:"id"`
-	RuleID  string `yaml:"rule_id" json:"rule_id"`
-	File    string `yaml:"file" json:"file"`
-	Line    int    `yaml:"line,omitempty" json:"line,omitempty"`
-	Pattern string `yaml:"pattern" json:"pattern"`
-	Reason  string `yaml:"reason" json:"reason"`
+	ID      string   `yaml:"id" json:"id"`
+	RuleID  string   `yaml:"rule_id" json:"rule_id"`
+	File    string   `yaml:"file" json:"file"`
+	Tags    []string `yaml:"tags,omitempty" json:"tags,omitempty"`
+	Line    int      `yaml:"line,omitempty" json:"line,omitempty"`
+	Pattern string   `yaml:"pattern" json:"pattern"`
+	Reason  string   `yaml:"reason" json:"reason"`
 }
 
 type SuppressionList struct {
@@ -95,7 +120,13 @@ func isSuppressed(f Finding, s Suppression, re *regexp.Regexp) bool {
 		// Normalize both sides so a suppression recorded against the
 		// working-tree path also matches a history-mode finding whose path
 		// carries an "@sha12" suffix.
-		if normalizeBaselineFile(f.File) != normalizeBaselineFile(s.File) {
+		if !suppressionPathMatches(s.File, normalizeBaselineFile(f.File)) {
+			return false
+		}
+	}
+	if len(s.Tags) > 0 {
+		constrained = true
+		if !hasAnySuppressionTag(f.Tags, s.Tags) {
 			return false
 		}
 	}
@@ -114,6 +145,90 @@ func isSuppressed(f Finding, s Suppression, re *regexp.Regexp) bool {
 	}
 
 	return constrained
+}
+
+func hasAnySuppressionTag(findingTags, want []string) bool {
+	for _, w := range want {
+		for _, ft := range findingTags {
+			if ft == w {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasGlobMeta reports whether p contains a wildcard, and therefore needs glob
+// matching rather than the historical exact comparison.
+func hasGlobMeta(p string) bool {
+	return strings.ContainsAny(p, "*?[")
+}
+
+// suppressionPathMatches reports whether a File field matches a finding path.
+//
+// A pattern without a wildcard is compared exactly. That is the historical
+// behaviour and it is preserved unchanged, so an existing suppression file means
+// exactly what it meant before globs existed — including that `README.md` does
+// not match `docs/README.md`.
+//
+// A pattern with a wildcard is matched as a glob, and `**` crosses directory
+// separators. Go's path.Match does not support `**`, and a suppression language
+// that cannot say "every markdown file" is missing the most common case by a
+// wide margin.
+//
+// A wildcard pattern with no separator is also matched against the base name,
+// because path.Match will not let `*` cross a separator and `*.md` is what
+// everyone actually writes. Without that, `*.md` would silently match nothing —
+// the worst possible failure for a suppression, which reports success by saying
+// nothing.
+func suppressionPathMatches(pattern, target string) bool {
+	pattern = filepath.ToSlash(pattern)
+	target = filepath.ToSlash(target)
+
+	if !hasGlobMeta(pattern) {
+		return pattern == target
+	}
+	if matchGlobPath(pattern, target) {
+		return true
+	}
+	if !strings.Contains(pattern, "/") {
+		if ok, err := path.Match(pattern, path.Base(target)); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// matchGlobPath matches a slash-separated path against a glob, treating a `**`
+// segment as zero or more path segments.
+func matchGlobPath(pattern, target string) bool {
+	return matchSegments(strings.Split(pattern, "/"), strings.Split(target, "/"))
+}
+
+func matchSegments(pat, name []string) bool {
+	for len(pat) > 0 {
+		if pat[0] == "**" {
+			// `**` absorbs zero or more segments.
+			if len(pat) == 1 {
+				return true
+			}
+			for i := 0; i <= len(name); i++ {
+				if matchSegments(pat[1:], name[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(name) == 0 {
+			return false
+		}
+		ok, err := path.Match(pat[0], name[0])
+		if err != nil || !ok {
+			return false
+		}
+		pat, name = pat[1:], name[1:]
+	}
+	return len(name) == 0
 }
 
 func filterByEntries(findings []Finding, entries []Suppression, patterns []*regexp.Regexp) []Finding {

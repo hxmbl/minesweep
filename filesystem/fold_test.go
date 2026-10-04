@@ -2,6 +2,7 @@ package filesystem
 
 import (
 	"bytes"
+	fx "minesweep/internal/fixtures"
 	"testing"
 	"unicode"
 	"unicode/utf8"
@@ -112,7 +113,7 @@ func TestFoldLowerPreservesASCIIContentExactly(t *testing.T) {
 	for _, in := range []string{
 		"", "a", "ABC", "the quick brown FOX jumps over 0123456789 lazy dog",
 		"postgres://user:pass@host:5432/db",
-		"AKIAIOSFODNN7EXAMPLE",
+		fx.AWSAccessKeyID(),
 	} {
 		if got := FoldLower([]byte(in)); !bytes.Equal(got, []byte(lowerBytes(in))) {
 			t.Errorf("FoldLower(%q) = %q, want pure ASCII lowercase %q", in, got, lowerBytes(in))

@@ -2,6 +2,7 @@ package findings
 
 import (
 	"fmt"
+	fx "minesweep/internal/fixtures"
 	"testing"
 )
 
@@ -50,7 +51,7 @@ func TestGenerateRiskReport(t *testing.T) {
 			Severity:   SeverityCritical,
 			Confidence: 0.95,
 			File:       ".env",
-			Value:      "AKIAIOSFODNN7EXAMPLE",
+			Value:      fx.AWSAccessKeyID(),
 			Reason:     "test",
 			Tags:       []string{"aws", "cloud", "credentials"},
 		},

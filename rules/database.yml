@@ -60,5 +60,15 @@ rules:
     severity: high
     tags: [database, url]
     patterns:
-      - regex: '(?i)(?:database_url|db_url|database_uri|db_uri)[ \t]*[:=][ \t]*["\x27]?(postgres(ql)?|mysql|mongodb(\+srv)?|redis)://[^\s"\x27]+["\x27]?'
+      # Credentials are required, as they are by every pattern above in this file
+      # and by detectors/database.go. Without that requirement this rule reported
+      # `DATABASE_URL=postgres://localhost:5432/mydb` — a connection string with no
+      # user and no password — as a HIGH finding, which is how a checked-in
+      # `.env.example` ends up blocking commits.
+      #
+      # capture_group isolates the URL so the reported value is the connection
+      # string rather than the whole assignment; see detectors.credentialValue.
+      - regex: '(?i)(?:database_url|db_url|database_uri|db_uri)[ \t]*[:=][ \t]*["\x27]?((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^:\s"\x27]+:[^@\s"\x27]+@[^\s"\x27]+)'
         confidence: 0.85
+        capture_group: 1
+        require_value: true

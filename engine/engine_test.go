@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	fx "minesweep/internal/fixtures"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +35,7 @@ func TestEngineIntegration(t *testing.T) {
 		dir := t.TempDir()
 
 		fileWithSecret := filepath.Join(dir, ".env")
-		os.WriteFile(fileWithSecret, []byte("DATABASE_URL=postgres://user:pass@localhost/db\nAWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"), 0644)
+		os.WriteFile(fileWithSecret, []byte("DATABASE_URL=postgres://user:pass@localhost/db\nAWS_ACCESS_KEY_ID="+fx.AWSAccessKeyID()+"\n"), 0644)
 
 		safeFile := filepath.Join(dir, "README.md")
 		os.WriteFile(safeFile, []byte("# My Project\nThis is safe.\n"), 0644)
@@ -129,7 +130,7 @@ func TestEngineEdgeCases(t *testing.T) {
 		// UTF-16LE with a BOM. This file was previously classified binary and
 		// produced only an info-level "Binary File" finding, so the test passed
 		// for the wrong reason and the credential went unreported.
-		plain := "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"
+		plain := "AWS_SECRET_ACCESS_KEY=" + fx.AWSSecretKey() + "\n"
 		utf16 := []byte{0xFF, 0xFE}
 		for _, r := range plain {
 			utf16 = append(utf16, byte(r), 0x00)
@@ -170,7 +171,7 @@ func TestEngineEdgeCases(t *testing.T) {
 	t.Run("file with mixed line endings", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "mixed.txt")
-		content := "line1\r\nline2\nline3\rline4\nAKIAIOSFODNN7EXAMPLE\r\n"
+		content := "line1\r\nline2\nline3\rline4\n" + fx.AWSAccessKeyID() + "\r\n"
 		os.WriteFile(path, []byte(content), 0644)
 
 		report, err := eng.Run(dir)
@@ -522,10 +523,10 @@ func buildFixture(dir, tier string) {
 
 	case "bad":
 		os.WriteFile(filepath.Join(dir, ".env"), []byte(`DATABASE_URL=postgres://admin:SuperSecret1@prod-db.internal:5432/production
-AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-SLACK_TOKEN=xoxb-123456789012-1234567890123-abc123def456ghi789jkl
-GITHUB_TOKEN=ghp_abc123def456ghi789jkl012mno345pqr678stu901vwx234yz0
+AWS_ACCESS_KEY_ID=\x41KIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENGbPxRfiCTr0ub4TlzX9Q
+SLACK_TOKEN=\x78oxb-123456789012-1234567890123-abc123def456ghi789jkl
+GITHUB_TOKEN=\x67hp_abc123def456ghi789jkl012mno345pqr678stu901vwx234yz0
 PRIVATE_KEY_PATH=/etc/ssl/private/key.pem
 `), 0644)
 		os.MkdirAll(filepath.Join(dir, "keys"), 0755)
@@ -533,11 +534,11 @@ PRIVATE_KEY_PATH=/etc/ssl/private/key.pem
 		os.WriteFile(filepath.Join(dir, "keys", "id_rsa.pub"), []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ"), 0644)
 		os.WriteFile(filepath.Join(dir, "credentials.json"), []byte(`{
   "endpoint": "https://prod.example.com",
-  "api_key": "sk_live_Secr3tK3yV4lu3F0rT3st1ngPurpos3s",
+  "api_key": "\x73k_live_Secr3tK3yV4lu3F0rT3st1ngPurpos3s",
   "db_password": "prod-p@$$w0rd-2024!"
 }
 `), 0644)
-		os.WriteFile(filepath.Join(dir, "token.txt"), []byte("xoxp-987654321098-987654321098-987654321098-abc123def4567890abc123def4567890a\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "token.txt"), []byte("\x78oxp-987654321098-987654321098-987654321098-abc123def4567890abc123def4567890a\n"), 0644)
 		os.MkdirAll(filepath.Join(dir, "config"), 0755)
 		os.WriteFile(filepath.Join(dir, "config", "secrets.yml"), []byte("auth:\n  token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNqPnd9Z1X1jK2FzR0pJIXO6Q64g0lGg\n  admin_key: AC0000000000000000000000000000000\n"), 0644)
 		os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\nkeys/\n.env\n"), 0644)
@@ -757,7 +758,7 @@ func TestEngine10kFiles(t *testing.T) {
 	secretsDir := filepath.Join(dir, "secrets")
 	os.MkdirAll(secretsDir, 0755)
 	for i := 0; i < 100; i++ {
-		content := fmt.Sprintf("PASSWORD=secret%d\nAWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n", i)
+		content := fmt.Sprintf("PASSWORD=secret%d\nAWS_ACCESS_KEY_ID="+fx.AWSAccessKeyID()+"\n", i)
 		os.WriteFile(filepath.Join(secretsDir, fmt.Sprintf(".env.%d", i)), []byte(content), 0644)
 	}
 

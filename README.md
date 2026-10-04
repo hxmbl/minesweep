@@ -40,6 +40,7 @@ Rules, the default policy, and profiles are embedded — it works out of the box
 # CI / GitHub Actions
 minesweep --sarif . > results.sarif
 minesweep --fail-on high .
+minesweep --fail-on high@60% .     # ...and confidence >= 60%
 minesweep --diff --diff-base main .
 
 # Git-scoped scans
@@ -76,8 +77,32 @@ section linked from its entry.
 - **A discovered config can no longer reduce coverage.** `max_file_size_mb`,
   `max_files`, `max_findings`, `memory_limit_mb`, `max_concurrent_reads`,
   `no_ignore` and the suppression/baseline/fail-on/policy keys are ignored from an
-  auto-discovered `.minesweep.yml` and reported. Pass `--config` to honour them.
+  auto-discovered `.minesweep.yml` and reported. Pass `--config` to honour them,
+  or `minesweep trust <path>` — which also works from inside the pre-commit hook,
+  where `--config` cannot be passed.
   → [Config trust](#config-trust)
+- **Placeholders, pinned digests and names are no longer reported.** `changeme`,
+  `REPLACE_ME`, `your-api-key-here`, `xxxxxxxx`, and `sha256:`-prefixed values
+  are not credentials; neither is an identifier in identifier position. A
+  checked-in `.env.example` went from fourteen findings to none.
+  → [What is not a secret](#what-is-not-a-secret)
+- **Documentation examples and comments are held to a stricter bar, not
+  excluded.** Real credentials pasted into a README are still reported and still
+  block. → [What is not a secret](#what-is-not-a-secret)
+- **One secret now hashes to one token.** A rule that captured a whole
+  assignment reported the assignment rather than the credential, so the same
+  secret produced a different token per rule and the evidence line was redacted
+  past the point of usefulness. `--dangerously-show-secrets` also now works for
+  snippets; it previously redacted them anyway. → [What is never in a
+  report](#what-is-never-in-a-report)
+- **`--fail-on` accepts an optional confidence floor** (`high@60%`). A bare
+  severity is unchanged. → [Gating on confidence as well as
+  severity](#gating-on-confidence-as-well-as-severity)
+- **A suppression entry may name a class**: `tags`, and `file` globs with `**`.
+  → [Suppressing a whole class of findings](#suppressing-a-whole-class-of-findings)
+- **`test_*.py` and `test_*.go` are recognised as test files**, matching the
+  `--include-tests` documentation and the `test_*` convention Django and much of
+  the Go ecosystem use.
 - **`--history` is scoped to the requested target**, matching `--diff` and a
   single-file `--staged`. → [Git history](#git-history)
 - **`--fail-on` now gates.** It previously also required a non-allow policy
@@ -253,7 +278,9 @@ minesweep --no-inline-suppressions .
   "version": "1",
   "suppressions": [
     { "id": "docs-example", "rule_id": "aws-account-id", "reason": "sample data in docs" },
-    { "id": "fixture", "pattern": "^test/fixtures/" }
+    { "id": "fixture", "pattern": "^test/fixtures/" },
+    { "id": "all-markdown", "file": "**/*.md", "reason": "documentation only" },
+    { "id": "all-db", "tags": ["database"] }
   ]
 }
 ```
@@ -338,6 +365,154 @@ minesweep --config .minesweep.yml .
 ```
 
 CLI flags always override the config file.
+
+#### Saying a repository is yours
+
+`--config` is the only way above, and it has a gap: the pre-commit hook runs a
+fixed command line and cannot pass a flag. So the rule that exists to make
+committing a secret inconvenient was itself the reason a hook was unusable — the
+remedy was to drop the hook or bypass it.
+
+`minesweep trust` closes that, and it works from anywhere including inside the
+hook:
+
+```bash
+minesweep trust            # trust the current directory
+minesweep trust --list     # show what is trusted, and why
+minesweep untrust .
+```
+
+The decision is stored **outside** the repository, in your own config directory,
+so a checkout cannot add itself to the list. That placement is the whole point,
+and it is why there is deliberately no `# minesweep: trust` marker inside the
+config: a malicious repository would add that marker to the config it ships,
+which is exactly the weakening the rule exists to prevent.
+
+This is the same arrangement as `git config --global --add safe.directory`. Git
+faces the identical problem — it cannot tell a repository you own from one you
+just cloned — and answers it the same way, by asking you to say so explicitly and
+remembering the answer somewhere the repository cannot reach.
+
+`--verbose` reports which config was used and on what basis:
+
+```
+Using config file: /work/myrepo/.minesweep.yml (trusted)
+  trusted: listed in /Users/you/Library/Application Support/minesweep/trust
+```
+
+### Gating on confidence as well as severity
+
+`--fail-on` reads severity. Confidence is computed for every finding and shown
+next to it, so a finding could block a commit while reporting itself as "60%
+confident" with nothing the reader could do about it.
+
+The second axis is available, and not imposed:
+
+```bash
+minesweep --fail-on high .          # severity >= high — the default behaviour
+minesweep --fail-on high@60% .      # severity >= high AND confidence >= 60%
+minesweep --fail-on high@0.6 .      # the same, as a fraction
+```
+
+A bare severity is unchanged, so no existing pipeline changes behaviour.
+
+It is not the default because no threshold separates a documentation sample from
+a real leak: the 0.60 that makes `webhook_secret = "…"` in a README fence look
+like an example is the same 0.60 that makes `password = "…"` in a config file
+look like one. That difference is in the surrounding grammar, so it belongs in
+the detector, not in the gate.
+
+Findings that clear the severity bar but not the confidence bar do not block,
+and are **named on stderr** rather than dropped in silence — a gate that lets
+something through quietly is the failure this mechanism exists to avoid:
+
+```
+minesweep: not gating 1 finding(s): at or above high severity but below 90% confidence.
+  docs/example.env:4 · 85% confident · High Entropy String
+  To gate on these too, lower the floor: --fail-on high
+```
+
+### What is not a secret
+
+Some values are not credentials, and the grammar around them often says so
+plainly. MineSweep uses that, because a gate that reports fourteen findings on
+seven lines of obviously-fake configuration is a gate that gets deleted — and
+`git commit --no-verify` is the bypass everything else here exists to make
+unnecessary.
+
+**Values that declare themselves.** `changeme`, `REPLACE_ME`, `placeholder`,
+`your-api-key-here`, `xxxxxxxx`, `dummy-value-not-real`. A checked-in
+`.env.example` full of these produces no findings. Dictionary words are *not*
+treated this way: `password=administrator` is a weak real password, and a
+scanner that stays quiet about it is not doing its job.
+
+**Pinned digests.** `sha256:9f86d081…` is a content address, not a bearer token —
+the prefix is the author asserting what the value is, and no provider issues
+credentials in that shape.
+
+**Vendor documentation stand-ins.** AWS's published key pair, matched in full.
+Matching them exactly is what makes this safe; a substring rule would be defeated
+by padding an attacker's key with the word "example".
+
+**Names, not values.** A long identifier in identifier position is a name:
+followed by `(`, preceded by a definition keyword, or preceded by `.`. This is
+what stops
+
+```python
+def test_backend_asks_about_the_library_without_importing_it(monkeypatch):
+```
+
+from being reported as a 70%-confident secret — the line contains the substring
+`key` inside `monkeypatch` and the name is 52 characters long. No entropy
+threshold can tell that from a secret; the grammar settles it.
+
+**Documentation examples and comments, held to a stricter bar.** These are
+*not* excluded — real credentials do get pasted into READMEs, and excluding
+`*.md` would trade a false positive for a silent gap. Instead, text that is
+describing a credential rather than being one must clear a higher bar:
+
+| Context | Bar |
+| --- | --- |
+| Code, config, anywhere else | the normal confidence floor |
+| Inside a fenced block, indented code block, inline code span, or HTML comment in a doc file | 0.80 |
+| On a comment-only line | 0.90 |
+
+So a `ghp_…` or `AKIA…` pasted into a README is still reported and still blocks,
+while `webhook_secret = "…"` at 0.60 in a fence is not. An unmarked `AKIA…` in a
+comment is still reported at 0.95.
+
+### Suppressing a whole class of findings
+
+Per-finding suppression spends a baseline budget that does not grow and records
+no reason. For a finding that recurs by construction, that is the wrong
+granularity — each occurrence costs a separate decision and stops none of the
+next. A suppression entry may therefore name a class:
+
+```yaml
+version: "1"
+suppressions:
+  # Every finding from one rule.
+  - id: keyword context in docs
+    rule_id: env-password
+    file: "docs/**/*"
+
+  # Every finding carrying a tag.
+  - id: connection strings
+    tags: [database]
+
+  # Just these two.
+  - id: docs tokens only
+    rule_id: env-token
+    file: "docs/**/*.env"
+```
+
+Populated fields intersect; `file` accepts `**` and, with no separator, matches
+at any depth (`*.md`). A `file` value with no wildcard keeps its old exact-match
+meaning, so existing suppression files behave identically.
+
+A suppression file cannot be set from a discovered `.minesweep.yml` — that would
+be handing a repository the power to silence itself. Use `--suppress` on the
+command line, which is also what the pre-commit hook would need.
 
 ### JSON output
 
@@ -432,6 +607,24 @@ at the point where it is printed:
   stable `sha256:` token everywhere it appears — the value, the source line and
   the context — so equal values produce equal tokens, which is what baselines
   depend on.
+
+That last guarantee is the one a reader leans on hardest, so it is worth being
+precise about how it is obtained. Two things had to be true, and both now are:
+
+- **The value reported is the credential, not the regex match.** A rule that
+  captures an assignment reports the value half of it, while still pointing at
+  the line. Reporting the match meant one secret produced a *different* token
+  per rule — three findings for one `APP_SECRET` yielded three hashes — so "equal
+  values produce equal tokens" was false, and a reader could not tell "the same
+  secret in two places" from "two different secrets".
+- **Censoring happens once, at the output boundary.** The engine decides the
+  policy action and hands the value through; `report.CensorReport` does the
+  censoring for every output format at once. Censoring inside the renderer as
+  well meant the heuristic ran twice over the same text, and because it is not
+  idempotent the same source line rendered differently for each finding that
+  referenced it. It also made `--dangerously-show-secrets` a no-op for snippets:
+  the renderer redacted what the flag had asked to reveal, and the legend still
+  said "value hidden" while doing it.
 
 Terminal control sequences are stripped from every attacker-controlled string:
 file paths, git author names, commit messages, rule names and descriptions, and

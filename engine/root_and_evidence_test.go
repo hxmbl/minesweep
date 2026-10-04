@@ -1,6 +1,7 @@
 package engine
 
 import (
+	fx "minesweep/internal/fixtures"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,7 +9,7 @@ import (
 	"minesweep/findings"
 )
 
-const awsKey = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"
+var awsKey = "AWS_ACCESS_KEY_ID=" + fx.AWSAccessKeyID() + "\n"
 
 // C4: os.Stat follows symlinks but filepath.WalkDir Lstats the root, so a
 // symlinked scan root was delivered to the walk function as a single
@@ -176,7 +177,7 @@ func TestBinaryEvidenceIsNeverRawBytes(t *testing.T) {
 // Evidence must stay bounded even for a file with no newline at all.
 func TestEvidenceLinesAreBounded(t *testing.T) {
 	dir := t.TempDir()
-	line := append([]byte("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE "), make([]byte, 200_000)...)
+	line := append([]byte("AWS_ACCESS_KEY_ID="+fx.AWSAccessKeyID()+" "), make([]byte, 200_000)...)
 	if err := os.WriteFile(filepath.Join(dir, "one.txt"), line, 0o600); err != nil {
 		t.Fatal(err)
 	}

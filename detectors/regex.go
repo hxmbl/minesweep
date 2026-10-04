@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -250,6 +251,12 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 					suppressedByAllowlist(rule.Allowlist, file.RelPath(), m.Value, sourceLineOf(li, line)) {
 					continue
 				}
+				// Inside a documentation example, or on a comment-only line,
+				// require more certainty before reporting. See
+				// heldBackByLineContext.
+				if heldBackByLineContext(file, line, sourceLineOf(li, line), pat.Confidence) {
+					continue
+				}
 				// Evidence (Context, SourceLine) is deliberately NOT built
 				// here. Most findings are discarded by confidence and severity
 				// filtering downstream, and the surrounding lines are the
@@ -344,6 +351,31 @@ func (p *Pattern) safeMatch(content, lowered []byte) []matchResult {
 			continue
 		}
 		if p.RequireValue && !judgeCapturedValue(string(value), g > 0) {
+			continue
+		}
+		// Report the credential, not the match. judgeCapturedValue judges the
+		// value part of an assignment-shaped capture, so reporting the whole
+		// match would report a different string than the one that was judged
+		// — which is what made one secret hash to three different tokens in a
+		// single report. See detectors.credentialValue.
+		if p.RequireValue && g == 0 {
+			if narrowed, ok := credentialValue(string(value)); ok {
+				value = []byte(narrowed)
+			}
+		}
+		// The example check runs here too, not only inside
+		// looksLikeCredentialValue, so it reaches the vendor rules that have no
+		// require_value: `aws-access-key-id` matching AWS's own documentation
+		// key was reported at 0.95 and blocked the commit that documented the
+		// suppression.
+		//
+		// An assignment-shaped value is excluded from this pass.
+		// `LooksLikeExample` is a whole-value judgement and
+		// startsWithMarkerSegment would read a real credential in
+		// `DUMMY_TOKEN=<secret>` as a placeholder, so those values are left to
+		// looksLikeCredentialValue, which is reached only where a rule asked
+		// for it.
+		if !bytes.ContainsRune(value, '=') && LooksLikeExample(string(value)) {
 			continue
 		}
 		results = append(results, matchResult{

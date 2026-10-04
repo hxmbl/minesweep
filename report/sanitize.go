@@ -471,7 +471,7 @@ func looksLikeSecret(s string) bool {
 // both "/" and "." so that the host part of a module path (`github.com`) does
 // not read as one long opaque segment. This is the shape that distinguishes
 // `github.com/spf13/cobra` from a joined secret such as
-// `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, whose segments are long enough to
+// AWS's published documentation secret key, whose segments are long enough to
 // carry entropy on their own.
 func looksLikeShortPath(s string) bool {
 	if !strings.Contains(s, "/") {
