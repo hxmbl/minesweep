@@ -18,8 +18,18 @@ import (
 // a scan report.
 //
 // ESC is rendered visibly as \e; other C0 controls except \n and \t are
-// rendered in caret notation. Newlines/tabs are preserved because report
-// layout depends on them.
+// rendered in caret notation. C1 controls (U+0080–U+009F) are neutralised too:
+// they are the 8-bit aliases of CSI, OSC, DCS and friends, and several
+// terminals honour them directly. Previously only ESC was caught, because a
+// literal ESC in the string is what triggers needsEscape, and U+009B alone
+// passed through untouched.
+//
+// Newlines and tabs are preserved, because this function is also applied to
+// genuinely multi-line text (a finding's context block) whose layout depends on
+// them. For single-line attacker-controlled fields use SanitizeTerminalInline,
+// which neutralises those too — a newline in a filename or commit summary is a
+// report-forging primitive, since it can start a line that looks like a
+// legitimate part of the report.
 func SanitizeTerminal(s string) string {
 	if !strings.ContainsFunc(s, needsEscape) {
 		return s
@@ -34,6 +44,14 @@ func SanitizeTerminal(s string) string {
 			b.WriteString(`\e`)
 		case r == 0x7f:
 			b.WriteString("^?")
+		case r == 0x9b:
+			b.WriteString("[CSI]")
+		case r == 0x9d:
+			b.WriteString("[OSC]")
+		case r >= 0x90 && r <= 0x9f:
+			b.WriteString("[C1]")
+		case r == 0x85:
+			b.WriteString("[NEL]")
 		case r < 0x20 && r != '\n' && r != '\t':
 			b.WriteByte('^')
 			b.WriteByte(byte(r) + '@')
@@ -45,8 +63,38 @@ func SanitizeTerminal(s string) string {
 	return b.String()
 }
 
+// SanitizeTerminalInline is SanitizeTerminal for text that occupies exactly one
+// line of a report: file paths, git author names, commit summaries, rule names
+// and descriptions, skipped-path labels, dashboard fields.
+//
+// A newline in any of those is not layout, it is an injection: it lets the
+// value start a line that reads as part of the report, so a skipped file named
+// "x.png\nINCOMPLETE SCAN - 0 files scanned" would otherwise print a forged
+// verdict inside a clean scan.
+func SanitizeTerminalInline(s string) string {
+	if !strings.ContainsFunc(s, needsEscape) && !strings.ContainsAny(s, "\n\t") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return SanitizeTerminal(b.String())
+}
+
 func needsEscape(r rune) bool {
-	return (r >= 0 && r < 0x20 && r != '\n' && r != '\t') || r == 0x7f
+	return (r < 0x20 && r != '\n' && r != '\t') || r == 0x7f ||
+		(r >= 0x80 && r <= 0x9f)
 }
 
 // CensorValue replaces every occurrence of a sensitive value in a source

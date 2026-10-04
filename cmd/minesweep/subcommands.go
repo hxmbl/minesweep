@@ -282,6 +282,13 @@ func newExplainCommand() *cobra.Command {
 	return cmd
 }
 
+// loadAllRules returns every rule a scan can produce: the YAML rule set plus
+// the compiled-in detectors.
+//
+// The built-in rules were previously absent, so `explain
+// postgresql_connection_string` answered "no rule matches" for a rule ID the
+// tool itself was emitting, and `explain` with no arguments listed fewer rules
+// than the scanner actually applies.
 func loadAllRules() ([]detectors.Rule, error) {
 	dir := cfg.RulesDir
 	if dir == "" {
@@ -291,7 +298,19 @@ func loadAllRules() ([]detectors.Rule, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load rules: %w", err)
 	}
-	return det.Rules(), nil
+	all := det.Rules()
+	seen := make(map[string]bool, len(all))
+	for _, r := range all {
+		seen[r.ID] = true
+	}
+	for _, r := range detectors.BuiltInRules() {
+		if seen[r.ID] {
+			continue
+		}
+		seen[r.ID] = true
+		all = append(all, r)
+	}
+	return all, nil
 }
 
 func listRuleIDs(all []detectors.Rule) {
@@ -372,6 +391,8 @@ func printRuleDetail(r detectors.Rule) {
 			}
 			fmt.Println()
 		}
+	} else if r.BuiltIn {
+		fmt.Println("\nThis rule is built into the scanner rather than loaded from a\nrule file, so it has no configurable pattern.")
 	}
 	if r.FileFilter != nil {
 		if len(r.FileFilter.Include) > 0 {

@@ -98,14 +98,19 @@ func writeCoverageNotes(tw *textWriter, p palette, report *findings.RiskReport, 
 		tw.writeln(p.dim(fmt.Sprintf("%snote: %d %s skipped by filters and not scanned",
 			indent, report.FilesSkipped, pluralWord(report.FilesSkipped, "file"))))
 		for _, line := range report.SkippedBy {
-			tw.writeln(p.dim(fmt.Sprintf("%s  - %s", indent, line)))
+			// SkippedBy echoes filenames, and it is printed on a *clean*
+			// scan — before any finding exists to draw attention to it. A
+			// filename carrying ESC sequences could clear the screen and
+			// print a forged "0 files scanned" line into a report that
+			// otherwise claims to be clean.
+			tw.writeln(p.dim(fmt.Sprintf("%s  - %s", indent, SanitizeTerminalInline(line))))
 		}
 	}
 	if report.FilesFailed > 0 {
 		tw.writeln(p.yellow(fmt.Sprintf("%snote: %d %s could not be read and may be unscanned",
 			indent, report.FilesFailed, pluralWord(report.FilesFailed, "file"))))
 		for _, path := range report.UnreadablePaths {
-			tw.writeln(p.yellow(fmt.Sprintf("%s  - %s", indent, SanitizeTerminal(path))))
+			tw.writeln(p.yellow(fmt.Sprintf("%s  - %s", indent, SanitizeTerminalInline(path))))
 		}
 	}
 	if report.FindingsSuppressed > 0 {
@@ -196,20 +201,26 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 	action := actionLabel(p, f.Action)
 	conf := fmt.Sprintf("%.0f%%", f.Confidence*findings.ConfidenceScale)
 	tw.writefmt("  %s %s\n", action, p.bold(SanitizeTerminal(f.Type)))
-	loc := fmt.Sprintf("%s:%d · %s confident", SanitizeTerminal(f.File), f.Line, conf)
+	loc := fmt.Sprintf("%s:%d · %s confident", SanitizeTerminalInline(f.File), f.Line, conf)
 	if len(f.Commit) >= 7 {
 		loc += fmt.Sprintf(" · commit %s", shortHash(f.Commit))
 	}
 	tw.writeln(p.dim(loc))
 	if f.Author != "" || f.Date != "" {
-		who := strings.TrimSpace(f.Author)
+		// Author names and commit messages come from the repository, so in
+		// --history they are whatever a committer chose to write. SanitizeTerminal
+		// was documented as covering exactly these two fields and was not
+		// applied to them: a commit whose author name carries ESC sequences
+		// could repaint the terminal, rewrite the window title, or clear the
+		// screen in the middle of a security report.
+		who := strings.TrimSpace(SanitizeTerminalInline(f.Author))
 		if who != "" {
 			who = "by " + who
 		}
-		tw.writeln(p.dim(fmt.Sprintf("          introduced %s %s", f.Date, who)))
+		tw.writeln(p.dim(fmt.Sprintf("          introduced %s %s", SanitizeTerminalInline(f.Date), who)))
 	}
 	if f.CommitSummary != "" {
-		tw.writefmt("          %s\n", p.dim(wrapText("\""+f.CommitSummary+"\"", 12)))
+		tw.writefmt("          %s\n", p.dim(wrapText("\""+SanitizeTerminalInline(f.CommitSummary)+"\"", 12)))
 	}
 
 	if opts.Snippets && f.SourceLine != "" {
@@ -285,12 +296,14 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 	if txt := remediationFor(f); txt != "" {
 		tw.writefmt("          %s %s\n", p.cyan("↳"), wrapText(txt, 12))
 	} else if f.Reason != "" {
-		tw.writefmt("          %s %s\n", p.cyan("↳"), wrapText(f.Reason, 12))
+		// Rule descriptions come from rule files, which may live in the
+		// scanned repository. Sanitized for the same reason as the fields above.
+		tw.writefmt("          %s %s\n", p.cyan("↳"), wrapText(SanitizeTerminalInline(f.Reason), 12))
 	}
 	if opts.Verbose && f.Context != "" {
 		tw.writeln(p.dim("          Context:"))
 		for _, line := range splitLines(f.Context) {
-			tw.writefmt("            %s\n", p.dim(SanitizeTerminal(line)))
+			tw.writefmt("            %s\n", p.dim(SanitizeTerminalInline(line)))
 		}
 	}
 }
@@ -321,7 +334,7 @@ func writeRiskFactors(tw *textWriter, p palette, report *findings.RiskReport, op
 	}
 	tw.writeln(sectionTitle(p, "Risk factors"))
 	for _, r := range report.Reasons {
-		tw.writefmt("  %s %s\n", p.yellow("•"), r)
+		tw.writefmt("  %s %s\n", p.yellow("•"), SanitizeTerminalInline(r))
 	}
 	tw.writeln("")
 }

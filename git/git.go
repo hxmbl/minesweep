@@ -72,8 +72,7 @@ func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 
 	var out []byte
 	if baseExists {
-		cmd := exec.Command("git", "diff", "--name-only", sanitizedBranch+"...HEAD") //nolint:gosec // branch name sanitized by SanitizeBranchName
-		cmd.Dir = top
+		cmd := nameListCommand(top, "diff", "--name-only", "-z", sanitizedBranch+"...HEAD") //nolint:gosec // branch name sanitized by SanitizeBranchName
 		out, err = cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("git diff --name-only %q: %w", sanitizedBranch, err)
@@ -83,15 +82,32 @@ func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 		// diff from the empty tree so the whole HEAD is scanned as
 		// "changed". The empty-tree object hash is a git constant.
 		const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-		cmd := exec.Command("git", "diff", "--name-only", emptyTree, "HEAD")
-		cmd.Dir = top
+		cmd := nameListCommand(top, "diff", "--name-only", "-z", emptyTree, "HEAD")
 		out, err = cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("git diff --name-only %q: %w", sanitizedBranch, err)
 		}
 	}
 
-	return parseFileList(string(out)), nil
+	return parseNULFileList(out), nil
+}
+
+// nameListCommand builds a git invocation that lists paths NUL-separated and
+// unquoted.
+//
+// Both details are load-bearing. `git diff --name-only` C-quotes any path
+// containing a non-ASCII byte, so a file named café-secrets.env came back as
+// the literal text "caf\303\251-secrets.env" — quotes and backslashes included.
+// That path matches nothing on disk and nothing in the object store, so the
+// file was silently never scanned: in --staged mode, which is what the
+// pre-commit hook runs, a staged credential in a file with a non-ASCII name
+// passed the hook. A newline in a filename was worse, since it split one path
+// into two.
+func nameListCommand(dir string, args ...string) *exec.Cmd {
+	full := append([]string{"-c", "core.quotePath=false"}, args...)
+	cmd := exec.Command("git", full...)
+	cmd.Dir = dir
+	return cmd
 }
 
 // GetStagedFiles returns the list of staged files, relative to the repository
@@ -102,14 +118,34 @@ func GetStagedFiles(root string) ([]string, error) {
 		return nil, fmt.Errorf("not a git repository: %s", root)
 	}
 
-	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--diff-filter=ACM")
-	cmd.Dir = top
+	// --diff-filter=ACM excluded renames. Rename detection is on by default, so
+	// `git mv secret.env renamed.env` produced a single R entry and the file —
+	// holding every byte of the secret, unchanged — was skipped entirely by
+	// --staged. R is now included; deletions still are not, because there is
+	// nothing left to scan.
+	cmd := nameListCommand(top, "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git diff --cached --name-only: %w", err)
 	}
 
-	return parseFileList(string(out)), nil
+	return parseNULFileList(out), nil
+}
+
+// parseNULFileList splits a NUL-separated, unquoted path list.
+func parseNULFileList(out []byte) []string {
+	var files []string
+	for _, raw := range strings.Split(string(out), "\x00") {
+		if raw == "" {
+			continue
+		}
+		cleaned := filepath.ToSlash(filepath.Clean(raw))
+		if cleaned == "." || cleaned == "" {
+			continue
+		}
+		files = append(files, cleaned)
+	}
+	return files
 }
 
 // GetIndexContent returns the staged content of the named path from the git
@@ -143,10 +179,14 @@ func GetFileContent(root, path, rev string) ([]byte, error) {
 	return out, nil
 }
 
+// parseFileList splits a newline-separated, unquoted path list.
+//
+// It is retained for callers that already have line-oriented output; the git
+// queries themselves use parseNULFileList, because a newline in a filename
+// cannot be told from a record separator there.
 func parseFileList(out string) []string {
-	lines := strings.Split(strings.TrimSpace(out), "\n")
 	var files []string
-	for _, line := range lines {
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			files = append(files, filepath.ToSlash(filepath.Clean(line)))

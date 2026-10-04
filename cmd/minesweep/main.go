@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -48,8 +49,10 @@ var (
 	// -ldflags "-X main.toolVersion=x.y.z".
 	// It must NOT have a package-level constant initializer, otherwise the
 	// compiler folds the value into call sites and -X silently no-ops.
-	toolVersion   string
-	configPath    string
+	toolVersion string
+	configPath  string
+	// hookForce allows install-hooks to replace a third-party hook.
+	hookForce     bool
 	watchMode     bool
 	watchInterval time.Duration
 )
@@ -95,6 +98,15 @@ func main() {
 			}
 			if cfg.HistoryMode && (cfg.DiffMode || cfg.StagedOnly) {
 				return fmt.Errorf("--history scans all refs and cannot be combined with --diff or --staged")
+			}
+			// An explicitly requested rules path must exist. Without this a typo
+			// in --rules, or a file passed where a directory was meant, silently
+			// produced a scan using only the embedded rules: the user got fewer
+			// detections and no indication why.
+			if cmd.Flags().Changed("rules") && cfg.RulesDir != "" {
+				if _, statErr := os.Stat(cfg.RulesDir); statErr != nil {
+					return fmt.Errorf("--rules %q: %w", cfg.RulesDir, statErr)
+				}
 			}
 			return loadConfig(cmd, args[0])
 		},
@@ -150,12 +162,17 @@ func main() {
 		"Ignore 'minesweep: ignore' comments in scanned files (use in CI to stop content suppressing itself)")
 	root.Flags().BoolVar(&cfg.DangerouslyShowSecrets, "dangerously-show-secrets", false, "Print raw secret values instead of hashes")
 
-	root.AddCommand(&cobra.Command{
+	installHooks := &cobra.Command{
 		Use:   "install-hooks",
 		Short: "Install git pre-commit hook",
-		Long:  "Install a pre-commit hook that runs minesweep on staged files",
-		RunE:  runInstallHooks,
-	})
+		Long: "Install a pre-commit hook that runs minesweep on staged files.\n\n" +
+			"An existing hook that minesweep did not install is never overwritten\n" +
+			"unless --force is given; with --force the original is backed up first.",
+		RunE: runInstallHooks,
+	}
+	installHooks.Flags().BoolVar(&hookForce, "force", false,
+		"Replace an existing pre-commit hook that minesweep did not install")
+	root.AddCommand(installHooks)
 
 	root.AddCommand(&cobra.Command{
 		Use:   "uninstall-hooks",
@@ -713,6 +730,8 @@ func hasPreCommitHook(repoTop string) bool {
 
 const preCommitHook = `#!/bin/sh
 # MineSweep pre-commit hook
+# minesweep-pre-commit-hook v1
+#
 # Scans staged files for secrets before every commit.
 
 # Resolve the scanner binary. We deliberately never execute a minesweep
@@ -755,23 +774,49 @@ fi
 exit 0
 `
 
+// hookMarker identifies a hook this tool installed. Ownership is checked
+// against this exact line rather than a substring test for "minesweep", which
+// matched any hook that merely mentioned the tool — including a comment in
+// somebody else's script — and uninstall-hooks then deleted it.
+const hookMarker = "# minesweep-pre-commit-hook v1"
+
 func runInstallHooks(cmd *cobra.Command, args []string) error {
 	wd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
 	}
 
-	gitDir := filepath.Join(wd, ".git")
-	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		return fmt.Errorf("not a git repository (no .git directory found)")
+	hookPath, err := hooksDir(wd)
+	if err != nil {
+		return err
 	}
-
-	hooksDir := filepath.Join(gitDir, "hooks")
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0755); err != nil {
 		return fmt.Errorf("create hooks directory: %w", err)
 	}
 
-	hookPath := filepath.Join(hooksDir, "pre-commit")
+	// Refuse to destroy an existing hook. os.WriteFile replaced whatever was
+	// there — husky, lint-staged, the pre-commit framework — with no warning,
+	// no backup and no --force, while `init` guarded its own output the same
+	// way. Losing a team's commit pipeline silently is not recoverable from
+	// inside this tool.
+	if existing, readErr := os.ReadFile(hookPath); readErr == nil {
+		if !isOurHook(string(existing)) && !hookForce {
+			return fmt.Errorf("a pre-commit hook already exists at %s and was not installed by minesweep\n"+
+				"  refusing to overwrite it; re-run with --force to replace it, or merge the hook yourself:\n"+
+				"    %s",
+				hookPath, strings.TrimSpace(firstLines(string(existing), 3)))
+		}
+		if !isOurHook(string(existing)) {
+			backup := hookPath + ".pre-minesweep"
+			if err := os.WriteFile(backup, existing, 0o755); err != nil { //nolint:gosec // preserving an executable hook
+				return fmt.Errorf("back up existing hook: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "Existing hook backed up to %s\n", backup)
+		}
+	} else if !os.IsNotExist(readErr) {
+		return fmt.Errorf("read existing hook: %w", readErr)
+	}
+
 	if err := os.WriteFile(hookPath, []byte(preCommitHook), 0755); err != nil { //nolint:gosec // pre-commit hook must be executable
 		return fmt.Errorf("write pre-commit hook: %w", err)
 	}
@@ -786,19 +831,21 @@ func runUninstallHooks(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get working directory: %w", err)
 	}
 
-	hookPath := filepath.Join(wd, ".git", "hooks", "pre-commit")
+	hookPath, err := hooksDir(wd)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(hookPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "No pre-commit hook found at %s\n", hookPath)
 		return nil
 	}
 
-	// Check if it's our hook
 	content, err := os.ReadFile(hookPath)
 	if err != nil {
 		return fmt.Errorf("read hook: %w", err)
 	}
-	if !strings.Contains(strings.ToLower(string(content)), "minesweep") {
-		return fmt.Errorf("pre-commit hook does not appear to be a minesweep hook")
+	if !isOurHook(string(content)) {
+		return fmt.Errorf("%s was not installed by minesweep; refusing to remove it", hookPath)
 	}
 
 	if err := os.Remove(hookPath); err != nil {
@@ -807,4 +854,42 @@ func runUninstallHooks(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "Removed pre-commit hook: %s\n", hookPath)
 	return nil
+}
+
+func isOurHook(content string) bool {
+	return strings.Contains(content, hookMarker)
+}
+
+// hooksDir locates the pre-commit hook for the repository containing dir.
+//
+// `git rev-parse --git-path hooks` is the only correct answer. In a linked
+// worktree, submodule, or any checkout reached through GIT_DIR, `.git` is a
+// *file* pointing elsewhere, so joining wd/.git/hooks failed with "not a
+// directory" and install-hooks simply could not be used.
+func hooksDir(dir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--git-path", "hooks")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		if _, statErr := os.Stat(filepath.Join(dir, ".git")); os.IsNotExist(statErr) {
+			return "", fmt.Errorf("not a git repository (no .git directory found)")
+		}
+		return "", fmt.Errorf("not a git repository: %s", dir)
+	}
+	p := strings.TrimSpace(string(out))
+	if p == "" {
+		return "", fmt.Errorf("could not determine the hooks directory for %s", dir)
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
+	return filepath.Join(p, "pre-commit"), nil
+}
+
+func firstLines(s string, n int) string {
+	lines := strings.SplitN(s, "\n", n+1)
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
 }

@@ -32,6 +32,10 @@ type Rule struct {
 	// Allowlist holds gitleaks-style post-match suppression semantics for
 	// imported rules. Native rules use file_filter and inline ignores.
 	Allowlist []*importedAllowlist `yaml:"-"`
+	// BuiltIn marks a rule compiled in Go rather than loaded from a rule file.
+	// Such rules have no regex to show and cannot be overridden from a rules
+	// directory; `explain` reports them so their IDs are not mysterious.
+	BuiltIn bool `yaml:"-"`
 }
 
 type Pattern struct {
@@ -77,18 +81,35 @@ func NewRegexDetector(rulesDir string) (*RegexDetector, error) {
 	if embeddedErr != nil {
 		return nil, embeddedErr
 	}
-	if rulesDir != "" {
-		if info, statErr := os.Stat(rulesDir); statErr == nil && info.IsDir() {
-			diskRules, diskErr := loadRules(rulesDir, "regex")
-			if diskErr != nil {
-				return nil, diskErr
-			}
-			rules = mergeRules(embeddedRules, diskRules)
-		} else {
-			rules = embeddedRules
+	rules = embeddedRules
+
+	switch {
+	case rulesDir == "":
+		// nothing more to load
+	case isDir(rulesDir):
+		diskRules, diskErr := loadRules(rulesDir, "regex")
+		if diskErr != nil {
+			return nil, diskErr
 		}
-	} else {
-		rules = embeddedRules
+		rules = mergeRules(rules, diskRules)
+	case isRegularFile(rulesDir):
+		// A single rule file. `minesweep -r ~/.config/gitleaks.toml` and
+		// `minesweep -r ./my-rules.yml` previously fell through to the embedded
+		// rules with no diagnostic at all, so a migrating user got neither
+		// their rules nor their allowlists and had no reason to suspect it.
+		fileRules, loadErr := loadRulesFile(rulesDir)
+		if loadErr != nil {
+			return nil, fmt.Errorf("rules file %q: %w", rulesDir, loadErr)
+		}
+		if len(fileRules) == 0 {
+			fmt.Fprintf(os.Stderr, "minesweep: warning: %q contained no regex rules\n", rulesDir)
+		}
+		rules = mergeRules(rules, fileRules)
+	default:
+		// No such directory or file. The caller is expected to have validated
+		// an explicitly requested path; here the embedded rules stand in, which
+		// is what an installed binary with no local rules directory needs.
+		return &RegexDetector{rules: rules}, nil
 	}
 
 	userRulesDir := getUserRulesDir()
@@ -102,6 +123,33 @@ func NewRegexDetector(rulesDir string) (*RegexDetector, error) {
 	}
 
 	return &RegexDetector{rules: rules}, nil
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func isRegularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// loadRulesFile loads one rule file, dispatching on its extension.
+func loadRulesFile(path string) ([]Rule, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	name := filepath.Base(path)
+	if strings.EqualFold(filepath.Ext(name), ".toml") {
+		return LoadGitleaksRules(data, name)
+	}
+	var rf RuleFile
+	if err := yaml.Unmarshal(data, &rf); err != nil {
+		return nil, err
+	}
+	return finalizeRuleFile(rf.Rules, name)
 }
 
 func loadEmbeddedRules() ([]Rule, error) {
@@ -123,6 +171,44 @@ func (d *RegexDetector) Name() string {
 // Rules returns the loaded rule definitions, including any merged user rules.
 func (d *RegexDetector) Rules() []Rule {
 	return d.rules
+}
+
+// BuiltInRules returns the rules provided by the compiled-in detectors, so a
+// caller can present the full set of rule IDs a scan can produce.
+func BuiltInRules() []Rule {
+	var out []Rule
+	out = append(out, NewDatabaseDetector().BuiltInRules()...)
+	out = append(out, NewOAuthDetector().BuiltInRules()...)
+	out = append(out,
+		Rule{
+			ID: "entropy-high", Type: "entropy", Name: "High Entropy String",
+			Description: "A run of characters with high Shannon entropy on a line " +
+				"that also reads as credential-bearing",
+			Severity: findings.SeverityLow.String(),
+			Tags:     []string{"entropy", "potential-secret"}, BuiltIn: true,
+		},
+		Rule{
+			ID: "symlink-detected", Type: "symlink", Name: "Symbolic link",
+			Description: "A symbolic link; one that resolves outside the scan root " +
+				"is reported as such and its contents are not read",
+			Severity: findings.SeverityInfo.String(),
+			Tags:     []string{"symlink", "filesystem"}, BuiltIn: true,
+		},
+		Rule{
+			ID: "binary-file-detected", Type: "filetype", Name: "Binary File",
+			Description: "Content detectors do not run on binary content, so a " +
+				"credential embedded in a binary file would not be reported",
+			Severity: findings.SeverityInfo.String(),
+			Tags:     []string{"filetype", "binary"}, BuiltIn: true,
+		},
+		Rule{
+			ID: "executable-file-detected", Type: "filetype", Name: "Executable File",
+			Description: "An executable file; worth auditing separately",
+			Severity:    findings.SeverityInfo.String(),
+			Tags:        []string{"filetype", "executable"}, BuiltIn: true,
+		},
+	)
+	return out
 }
 
 func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
@@ -160,7 +246,7 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 				}
 				line, col := li.LineCol(m.Start)
 				if len(rule.Allowlist) > 0 &&
-					suppressedByAllowlist(rule.Allowlist, file.Path, m.Value, sourceLineOf(li, line)) {
+					suppressedByAllowlist(rule.Allowlist, file.RelPath(), m.Value, sourceLineOf(li, line)) {
 					continue
 				}
 				// Evidence (Context, SourceLine) is deliberately NOT built
@@ -307,40 +393,100 @@ func loadRulesFS(rulesFS fs.FS, ruleType string) ([]Rule, error) {
 				loadErrs = append(loadErrs, fmt.Sprintf("parse %q: %v", entry.Name(), err))
 				continue
 			}
-			fileRules = rf.Rules
+			fileRules, err = finalizeRuleFile(rf.Rules, entry.Name())
+			if err != nil {
+				loadErrs = append(loadErrs, fmt.Sprintf("parse %q: %v", entry.Name(), err))
+				continue
+			}
 		}
 
-		for i := range fileRules {
-			if fileRules[i].Type != "regex" {
-				continue
-			}
-			// A typo'd severity is a silent downgrade in policy terms; make
-			// it visible while still defaulting to info at scan time.
-			if !findings.IsValidSeverity(fileRules[i].Severity) {
-				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s) has invalid severity %q, treating as info\n",
-					fileRules[i].ID, entry.Name(), fileRules[i].Severity)
-			}
-			failed := 0
-			for j := range fileRules[i].Patterns {
-				if err := fileRules[i].Patterns[j].compile(); err != nil {
-					// Warn loudly: a silently skipped pattern is silently
-					// missing coverage.
-					failed++
-					fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s): skipping pattern %d: %v\n",
-						fileRules[i].ID, entry.Name(), j+1, err)
-				}
-			}
-			if failed > 0 && failed == len(fileRules[i].Patterns) {
-				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q is disabled (all patterns failed to compile)\n", fileRules[i].ID)
-				continue
-			}
-			allRules = append(allRules, fileRules[i])
-		}
+		allRules = append(allRules, fileRules...)
 	}
 	if len(loadErrs) > 0 {
 		fmt.Fprintf(os.Stderr, "minesweep: warning: %d rule file(s) had errors and were skipped\n", len(loadErrs))
 	}
-	return allRules, nil
+	// Rules within one source are keyed by ID: a later file replaces an
+	// earlier one, so filename ordering expresses precedence (fs.ReadDir
+	// returns sorted names). Appending instead left two rules sharing an ID
+	// both active with the first one always winning, so the documented
+	// "override by redefining the ID" workflow was silently dead and
+	// `explain` reported "2 rules match".
+	return dedupeByID(allRules), nil
+}
+
+// dedupeByID keeps the last rule declared for each ID.
+func dedupeByID(rules []Rule) []Rule {
+	if len(rules) < 2 {
+		return rules
+	}
+	last := make(map[string]int, len(rules))
+	for i, r := range rules {
+		last[r.ID] = i
+	}
+	out := make([]Rule, 0, len(rules))
+	for i, r := range rules {
+		if last[r.ID] == i {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// finalizeRuleFile validates and compiles the rules declared in one YAML file.
+func finalizeRuleFile(rules []Rule, source string) ([]Rule, error) {
+	var out []Rule
+	for i := range rules {
+		if rules[i].Type != "regex" {
+			continue
+		}
+		// A typo'd severity is a silent downgrade in policy terms; make
+		// it visible while still defaulting to info at scan time.
+		if !findings.IsValidSeverity(rules[i].Severity) {
+			fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s) has invalid severity %q, treating as info\n",
+				rules[i].ID, source, rules[i].Severity)
+		}
+		if rules[i].ID == "" {
+			return nil, fmt.Errorf("rule #%d has no id", i+1)
+		}
+		failed := 0
+		for j := range rules[i].Patterns {
+			if err := rules[i].Patterns[j].compile(); err != nil {
+				// Warn loudly: a silently skipped pattern is silently
+				// missing coverage.
+				failed++
+				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s): skipping pattern %d: %v\n",
+					rules[i].ID, source, j+1, err)
+			}
+		}
+		if len(rules[i].Patterns) > 0 && failed == len(rules[i].Patterns) {
+			fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q is disabled (all patterns failed to compile)\n", rules[i].ID)
+			continue
+		}
+		// Validate file_filter patterns once, here. matchesFileFilter runs per
+		// file per rule, so an invalid pattern used to print the same warning
+		// once for every file scanned.
+		validateFileFilter(rules[i].ID, source, rules[i].FileFilter)
+		out = append(out, rules[i])
+	}
+	return out, nil
+}
+
+// validateFileFilter reports malformed file_filter patterns once per rule.
+func validateFileFilter(ruleID, source string, ff *FileFilter) {
+	if ff == nil {
+		return
+	}
+	for _, group := range []struct {
+		name     string
+		patterns []string
+	}{{"include", ff.Include}, {"exclude", ff.Exclude}} {
+		for _, p := range group.patterns {
+			if _, err := filepath.Match(p, "probe"); err != nil {
+				fmt.Fprintf(os.Stderr, "minesweep: warning: rule %q (%s): invalid file_filter.%s pattern %q: %v\n",
+					ruleID, source, group.name, p, err)
+			}
+		}
+	}
 }
 
 func getUserRulesDir() string {
@@ -377,30 +523,24 @@ func mergeRules(defaultRules, userRules []Rule) []Rule {
 	return merged
 }
 
+// matchesFileFilter reports whether a rule applies to a file with this base
+// name.
+//
+// Patterns are validated at load time (see validateFileFilter), so a malformed
+// pattern is warned about once per rule rather than once per file per rule; at
+// scan time a malformed pattern simply does not match.
 func matchesFileFilter(f *FileFilter, base string) bool {
 	if f == nil {
 		return true
 	}
-	if len(f.Exclude) > 0 {
-		for _, pattern := range f.Exclude {
-			match, err := filepath.Match(pattern, base)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "minesweep: warning: invalid file filter pattern %q: %v\n", pattern, err)
-				continue
-			}
-			if match {
-				return false
-			}
+	for _, pattern := range f.Exclude {
+		if match, err := filepath.Match(pattern, base); err == nil && match {
+			return false
 		}
 	}
 	if len(f.Include) > 0 {
 		for _, pattern := range f.Include {
-			match, err := filepath.Match(pattern, base)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "minesweep: warning: invalid file filter pattern %q: %v\n", pattern, err)
-				continue
-			}
-			if match {
+			if match, err := filepath.Match(pattern, base); err == nil && match {
 				return true
 			}
 		}

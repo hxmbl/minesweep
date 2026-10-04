@@ -66,9 +66,12 @@ type File struct {
 	lowered       []byte
 	lineIdx       *LineIndex
 	symlinkState  symlinkState
-	// root is the scan root this file was admitted under, retained so the
-	// containment check on a symlink target can be repeated immediately
-	// before the read (see readSymlinkBounded). Empty means "no root".
+	// Root is the scan root this file was admitted under. It is retained so the
+	// containment check on a symlink target can be repeated immediately before
+	// the read (see readSymlinkBounded), and so detectors that need to match
+	// repository-relative paths — imported gitleaks allowlists — can derive
+	// them. Empty means "no root".
+	Root string
 	root string
 	// loader, when set, produces content from somewhere other than disk
 	// (e.g. git blobs). It runs at most once, under contentMu.
@@ -173,6 +176,7 @@ func newFileFromInfo(path string, mode os.FileMode, size int64, root string) (*F
 		Path: path,
 		Size: size,
 		Mode: mode,
+		Root: root,
 		root: root,
 	}
 
@@ -299,7 +303,11 @@ func (f *File) contentLocked() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		f.IsBinary = IsBinary(data)
+		// Git blobs arrive already-decoded bytes, but a blob committed from a
+		// UTF-16 file is still UTF-16.
+		if f.Content = decodeUTF16(data); true {
+			f.IsBinary = IsBinary(f.Content)
+		}
 		return f.Content, nil
 	}
 
@@ -332,25 +340,68 @@ func (f *File) contentLocked() ([]byte, error) {
 // detects overflow without buffering the whole oversized file.
 func (f *File) readBounded() ([]byte, error) {
 	if f.IsSymlink {
-		return f.readSymlinkBounded()
+		data, err := f.readSymlinkBounded()
+		if err != nil {
+			return nil, err
+		}
+		return decodeUTF16(data), nil
 	}
-	if f.MaxContentBytes <= 0 {
-		return os.ReadFile(f.Path)
-	}
-	fh, err := os.Open(f.Path)
+	data, err := readFileBounded(f.Path, f.MaxContentBytes)
 	if err != nil {
 		return nil, err
 	}
-	defer fh.Close() //nolint:errcheck // read-only handle
+	return decodeUTF16(data), nil
+}
 
-	data, err := io.ReadAll(io.LimitReader(fh, f.MaxContentBytes+1))
-	if err != nil {
-		return nil, err
+// decodeUTF16 transcodes UTF-16 content to UTF-8 so the detectors see the text
+// it actually holds.
+//
+// Classifying UTF-16 as non-binary is not sufficient on its own: every rule is
+// a byte pattern, and "AWS_SECRET_ACCESS_KEY=wJal…" encoded as UTF-16LE shares
+// no substring with its UTF-8 form. Detection and classification have to be
+// fixed together or the file is still missed.
+func decodeUTF16(data []byte) []byte {
+	enc, hasBOM := HasBOM(data)
+	if !hasBOM && !decodesAsUTF16(data) {
+		return data
 	}
-	if int64(len(data)) > f.MaxContentBytes {
-		return nil, fmt.Errorf("%w: limit %d bytes", ErrTooLarge, f.MaxContentBytes)
+	body := data
+	bigEndian := enc == "utf-16-be"
+	if hasBOM {
+		if enc == "utf-16-le" {
+			body = data[2:]
+		} else {
+			body = data[2:]
+		}
 	}
-	return data, nil
+	if len(body) < 2 {
+		return data
+	}
+	// Drop a trailing odd byte rather than refusing the file.
+	usable := len(body) - len(body)%2
+	out := make([]byte, 0, usable)
+	for i := 0; i < usable; i += 2 {
+		var u uint16
+		if bigEndian {
+			u = uint16(body[i])<<8 | uint16(body[i+1])
+		} else {
+			u = uint16(body[i+1])<<8 | uint16(body[i])
+		}
+		switch {
+		case u == 0xFEFF:
+			// Byte-order mark in the middle of the content; skip.
+		case u < 0x80:
+			out = append(out, byte(u))
+		case u < 0x800:
+			out = append(out, byte(0xC0|u>>6), byte(0x80|u&0x3F))
+		default:
+			out = append(out, byte(0xE0|u>>12), byte(0x80|(u>>6)&0x3F), byte(0x80|u&0x3F))
+		}
+	}
+	if len(out) == 0 {
+		return data
+	}
+	return out
 }
 
 // readSymlinkBounded re-validates the resolved target immediately before
@@ -418,6 +469,30 @@ func (f *File) SetFindingBudget(n int) {
 	f.FindingBudget = n
 	f.FindingBudgetHit = false
 	f.budgetArmed = true
+}
+
+// RelPath returns the file's path relative to the scan root, using forward
+// slashes, or the base name when the file is not under the root.
+//
+// Gitleaks allowlist `paths` entries are regexes matched against repository-
+// relative paths. Matching them against the absolute path meant every anchored
+// entry (`^docs/`, `^vendor/`) could never match, so an imported allowlist was
+// silently inert and produced false positives the user believed were
+// suppressed.
+func (f *File) RelPath() string {
+	if f.Root == "" {
+		// No root: a relative path is already the label a rule author would
+		// write an anchored regex against, so it is kept as-is.
+		if !filepath.IsAbs(f.Path) {
+			return filepath.ToSlash(filepath.Clean(f.Path))
+		}
+		return filepath.ToSlash(filepath.Base(f.Path))
+	}
+	if rel, err := filepath.Rel(f.Root, f.Path); err == nil && rel != "" &&
+		rel != "." && !strings.HasPrefix(rel, "..") {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.ToSlash(filepath.Base(f.Path))
 }
 
 // InheritFindingBudget copies whatever budget src currently has onto f, so a

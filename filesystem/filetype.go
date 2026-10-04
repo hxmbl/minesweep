@@ -87,6 +87,11 @@ func IsBinary(data []byte) bool {
 		}
 	}
 
+	// Text in a UTF-16 encoding is text, not binary.
+	if _, isUTF16 := HasBOM(data); isUTF16 {
+		return false
+	}
+
 	sample := data
 	if len(sample) > binarySampleSize {
 		sample = sample[:binarySampleSize]
@@ -94,6 +99,11 @@ func IsBinary(data []byte) bool {
 
 	for _, b := range sample {
 		if b == 0 {
+			// A NUL byte is expected in UTF-16 without a BOM, so check the
+			// byte distribution before calling the content binary.
+			if decodesAsUTF16(sample) {
+				return false
+			}
 			return true
 		}
 	}
@@ -105,6 +115,48 @@ func IsBinary(data []byte) bool {
 		}
 	}
 	return float64(controlCount)/float64(len(sample)) > 0.10
+}
+
+// decodesAsUTF16 reports whether data looks like UTF-16 text in either byte
+// order.
+//
+// In UTF-16LE ASCII text every odd byte is zero; in UTF-16BE every even byte
+// is. That test alone is far too weak on its own — a buffer of NUL bytes
+// satisfies both orders — so the non-zero bytes must also be mostly printable
+// text and must be numerous enough to be content rather than padding.
+func decodesAsUTF16(sample []byte) bool {
+	if len(sample) < 8 {
+		return false
+	}
+	pairs := len(sample) / 2
+	if pairs == 0 {
+		return false
+	}
+	evenZero, oddZero := 0, 0
+	nonZero, printable := 0, 0
+	for i := 0; i+1 < len(sample); i += 2 {
+		lo, hi := sample[i], sample[i+1]
+		if lo == 0 {
+			evenZero++
+		}
+		if hi == 0 {
+			oddZero++
+		}
+		for _, b := range [2]byte{lo, hi} {
+			if b != 0 {
+				nonZero++
+				if b >= 0x20 && b != 0x7f {
+					printable++
+				}
+			}
+		}
+	}
+	// There must be real content: at least a quarter of the code units must
+	// carry a non-zero byte, and almost all of those must be printable.
+	if nonZero*4 < pairs || printable*10 < nonZero*9 {
+		return false
+	}
+	return oddZero*10 >= pairs*7 || evenZero*10 >= pairs*7
 }
 
 func IsUTF8(data []byte) bool {

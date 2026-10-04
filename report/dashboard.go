@@ -5,6 +5,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"minesweep/findings"
 )
@@ -116,10 +117,7 @@ func WriteDashboard(w io.Writer, d *Dashboard, verbose bool) error {
 
 	for i := 0; i < displayCount; i++ {
 		stats := d.Rules[i]
-		ruleID := stats.RuleID
-		if len(ruleID) > 18 {
-			ruleID = ruleID[:15] + "..."
-		}
+		ruleID := truncateRunes(SanitizeTerminalInline(stats.RuleID), 18, "...")
 		fmt.Fprintf(w, "  %-20s %-8d %-6.2f %-10d\n",
 			ruleID, stats.HitCount, stats.AvgConf, len(stats.Files))
 	}
@@ -132,13 +130,18 @@ func WriteDashboard(w io.Writer, d *Dashboard, verbose bool) error {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "  Detailed Rule Stats:")
 		for _, stats := range d.Rules {
-			fmt.Fprintf(w, "    %s (%s)\n", stats.RuleName, stats.RuleID)
+			// Rule names come from rule files and file paths come from the
+			// scanned tree; both are attacker-controlled and both reach a
+			// terminal here. This renderer sanitized nothing, while the text
+			// report sanitized every one of these fields.
+			fmt.Fprintf(w, "    %s (%s)\n", SanitizeTerminalInline(stats.RuleName), SanitizeTerminalInline(stats.RuleID))
 			fmt.Fprintf(w, "      Hits: %d, Avg Confidence: %.2f\n", stats.HitCount, stats.AvgConf)
 			fmt.Fprintf(w, "      Files: %d\n", len(stats.Files))
 			fileList := make([]string, 0, len(stats.Files))
 			for f := range stats.Files {
-				fileList = append(fileList, f)
+				fileList = append(fileList, SanitizeTerminalInline(f))
 			}
+			sort.Strings(fileList)
 			if len(fileList) > 5 {
 				fileList = fileList[:5]
 				fileList = append(fileList, fmt.Sprintf("... and %d more", len(stats.Files)-5))
@@ -148,4 +151,22 @@ func WriteDashboard(w io.Writer, d *Dashboard, verbose bool) error {
 	}
 
 	return nil
+}
+
+// truncateRunes shortens s to at most maxRunes characters, appending suffix.
+// Byte slicing produced replacement characters when a rule ID contained a
+// multi-byte rune at the cut point.
+func truncateRunes(s string, maxRunes int, suffix string) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	cut := maxRunes - utf8.RuneCountInString(suffix)
+	if cut < 0 {
+		cut = 0
+	}
+	return string(runes[:cut]) + suffix
 }

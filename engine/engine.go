@@ -540,21 +540,71 @@ func trimToConfidenceCap(fs []findings.Finding, cap int) ([]findings.Finding, in
 	return out, len(fs) - cap
 }
 
-// dedupFindings removes duplicate findings sharing the same location, rule,
-// and value, keeping the first (detectors run in a stable order).
+// dedupFindings removes duplicate findings, keeping the most informative copy.
+//
+// Two passes, because two different problems were being conflated:
+//
+//   - Identical location, rule and value: the same detector (or a decoded
+//     base64 wrapper) raising the same finding twice. Collapsed exactly.
+//   - Identical location and value under *different* rule IDs: two rule sets
+//     describing the same credential. A PostgreSQL URL matched both
+//     rules/database.yml's `postgres-connection-string` and the database
+//     detector's `postgresql_connection_string`, and because the rule ID was
+//     part of the key they were both reported — the same secret, the same
+//     line, twice, inflating the count, burning twice the finding budget and
+//     producing two CI annotations for one problem. The higher-confidence copy
+//     wins; ties break on rule ID so the choice is deterministic.
 func dedupFindings(fs []findings.Finding) []findings.Finding {
-	seen := make(map[string]struct{}, len(fs))
+	exact := make(map[string]int, len(fs))
 	out := make([]findings.Finding, 0, len(fs))
 	for _, f := range fs {
 		key := f.File + "\x00" + strconv.Itoa(f.Line) + "\x00" + strconv.Itoa(f.Column) +
 			"\x00" + f.RuleID + "\x00" + f.Value
-		if _, ok := seen[key]; ok {
+		if _, ok := exact[key]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
+		exact[key] = len(out)
 		out = append(out, f)
 	}
-	return out
+
+	type secretKey struct {
+		loc string
+		val string
+	}
+	best := make(map[secretKey]int, len(out))
+	kept := make([]findings.Finding, 0, len(out))
+	for _, f := range out {
+		k := secretKey{
+			loc: f.File + "\x00" + strconv.Itoa(f.Line) + "\x00" + strconv.Itoa(f.Column),
+			val: f.Value,
+		}
+		if idx, ok := best[k]; ok {
+			// Same secret, same place, possibly a different rule: keep the
+			// stronger single report.
+			if preferFinding(f, kept[idx]) {
+				kept[idx] = f
+			}
+			continue
+		}
+		best[k] = len(kept)
+		kept = append(kept, f)
+	}
+	return kept
+}
+
+// preferFinding reports whether candidate should replace incumbent as the
+// representative of one secret at one location.
+func preferFinding(candidate, incumbent findings.Finding) bool {
+	if candidate.Confidence != incumbent.Confidence {
+		return candidate.Confidence > incumbent.Confidence
+	}
+	// A rule-scoped policy or remediation keyed on the incumbent's ID would
+	// stop applying if the ID changed, so prefer the ID already chosen, and
+	// break any remaining tie on the ID itself for determinism.
+	if candidate.RuleID == incumbent.RuleID {
+		return false
+	}
+	return candidate.RuleID < incumbent.RuleID
 }
 
 // sortFindings orders findings deterministically so identical scans produce
@@ -1160,6 +1210,21 @@ func (e *Engine) detect(file *filesystem.File, budget int) []findings.Finding {
 	// total size of the tree.
 	defer file.Release()
 
+	file.SetFindingBudget(budget)
+	defer e.noteBudgetDiscard(file, budget)
+
+	// The read semaphore is acquired BEFORE the content is loaded, not after.
+	// It used to be taken once the file was already resident, so
+	// --max-concurrent-reads bounded nothing that allocated memory: 16 workers
+	// each held a 12 MB file while the semaphore was held to a width of one,
+	// and the heap reached 337 MB against 26 MB for a single worker. The
+	// permit is now held for the whole scan of this file, which is exactly the
+	// window in which the content and its derived views are live.
+	if e.readSemaphore != nil {
+		e.readSemaphore <- struct{}{}
+		defer func() { <-e.readSemaphore }()
+	}
+
 	// Accounting lives here, where the content is already in hand. A separate
 	// pre-pass would force every file resident before detection began,
 	// defeating lazy loading outright.
@@ -1179,14 +1244,6 @@ func (e *Engine) detect(file *filesystem.File, budget int) []findings.Finding {
 	}
 	e.filesScanned.Add(1)
 	e.bytesScanned.Add(int64(len(content)))
-
-	file.SetFindingBudget(budget)
-	defer e.noteBudgetDiscard(file, budget)
-
-	if e.readSemaphore != nil {
-		e.readSemaphore <- struct{}{}
-		defer func() { <-e.readSemaphore }()
-	}
 
 	var all []findings.Finding
 	for _, d := range e.detectors {
@@ -1312,6 +1369,10 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 
 	type result struct {
 		findings []findings.Finding
+		// skipped records that this file was never scanned because the scan was
+		// cancelled (memory limit). It distinguishes "the scan stopped early"
+		// from "the scan had already finished when the limit tripped".
+		skipped bool
 	}
 
 	fileCh := make(chan *filesystem.File, len(files))
@@ -1335,11 +1396,17 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 	defer cancel()
 
 	var memCancelWarned atomic.Bool
+	var memCancelFired atomic.Bool
 	if e.config.MemoryLimitMB > 0 {
-		// One coordinator measures heap growth on a slow ticker. Measuring
-		// from inside each worker forced runtime.ReadMemStats (a full
+		// One coordinator measures heap growth on a fast ticker. Measuring from
+		// inside each worker forced runtime.ReadMemStats (a full
 		// stop-the-world) on every worker on every interval. Reading it once
 		// here is both cheaper and equally accurate for a soft early-exit.
+		//
+		// The tick is 25 ms rather than 250 ms. A scan of a handful of large
+		// files can blow past its budget in well under a quarter of a second,
+		// and at that cadence the limit never fired at all — the flag was
+		// unenforceable for any fast scan, which is where it matters most.
 		initialAlloc := e.allocBytes()
 		monitorStop := make(chan struct{})
 		var monitorWG sync.WaitGroup
@@ -1347,7 +1414,7 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 		go func() {
 			defer monitorWG.Done()
 			limit := uint64(e.config.MemoryLimitMB) * 1024 * 1024 //nolint:gosec // guarded by > 0 check above
-			ticker := time.NewTicker(250 * time.Millisecond)
+			ticker := time.NewTicker(25 * time.Millisecond)
 			defer ticker.Stop()
 			for {
 				select {
@@ -1356,7 +1423,7 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 						if memCancelWarned.CompareAndSwap(false, true) {
 							fmt.Fprintf(os.Stderr, "warning: memory limit (%d MB) reached; stopping scan early\n", e.config.MemoryLimitMB)
 						}
-						e.noteIncomplete(ReasonMemoryLimit)
+						memCancelFired.Store(true)
 						cancel()
 						return
 					}
@@ -1389,7 +1456,10 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 			}()
 			for file := range fileCh {
 				if ctx.Err() != nil {
-					continue // drain the channel without processing
+					// Drain the channel without processing, but say so: this is
+					// the evidence that the cancellation actually cost coverage.
+					resultCh <- result{skipped: true}
+					continue
 				}
 
 				func() {
@@ -1423,8 +1493,21 @@ func (e *Engine) detectParallel(files []*filesystem.File) []findings.Finding {
 	}()
 
 	var allFindings []findings.Finding
+	skippedByCancel := int64(0)
 	for r := range resultCh {
+		if r.skipped {
+			skippedByCancel++
+			continue
+		}
 		allFindings = append(allFindings, r.findings...)
+	}
+
+	// The memory limit is only a *reason the scan is incomplete* if it actually
+	// left work undone. Cancelling after the last file had already been read
+	// produced a complete result that announced itself as truncated, which
+	// trains a reader to distrust a notice that should be trusted.
+	if memCancelFired.Load() && skippedByCancel > 0 {
+		e.noteIncomplete(ReasonMemoryLimit)
 	}
 
 	if e.config.Verbose && totalFiles > 100 {
