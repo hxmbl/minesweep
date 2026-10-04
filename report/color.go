@@ -83,3 +83,18 @@ func (p palette) cyan(s string) string       { return p.wrap(ansiCyan, s) }
 func (p palette) gray(s string) string       { return p.wrap(ansiGray, s) }
 func (p palette) boldRed(s string) string    { return p.wrap("\033[1;31m", s) }
 func (p palette) boldYellow(s string) string { return p.wrap("\033[1;33m", s) }
+
+// highlight applies syntax highlighting when colour is actually in effect.
+//
+// The gate has to be the *resolved* palette, not the requested mode: with
+// ColorAuto and output going to a file or a pipe, every other colour in the
+// report is correctly suppressed while this would still have injected escape
+// sequences, so a redirected report contained stray control characters. The CLI
+// resolves auto before calling WriteText, which hid the bug from the command
+// line while leaving it live for any caller that writes to its own writer.
+func (p palette) highlight(line, fileType string) string {
+	if !p.enabled {
+		return line
+	}
+	return HighlightSyntax(line, fileType)
+}

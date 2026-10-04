@@ -253,14 +253,8 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 				}
 				// Sanitize first to remove any malicious escape sequences
 				sanitizedLine := SanitizeTerminal(censoredLine)
-				// Then apply syntax highlighting if color is enabled
-				var highlightedLine string
-				if opts.Color != ColorNever {
-					highlightedLine = HighlightSyntax(sanitizedLine, f.File)
-				} else {
-					highlightedLine = sanitizedLine
-				}
-				tw.writefmt("            %s%4d: %s\n", p.dim(prefix), lineNum, highlightedLine)
+				tw.writefmt("            %s%4d: %s\n", p.dim(prefix), lineNum,
+					p.highlight(sanitizedLine, f.File))
 			}
 		} else {
 			// No context available, just show the source line
@@ -268,14 +262,7 @@ func writeFinding(tw *textWriter, p palette, opts TextOptions, f findings.Findin
 			snippet = censorAllValues(snippet, f.Value)
 			// Sanitize first to remove any malicious escape sequences
 			sanitizedLine := SanitizeTerminal(snippet)
-			// Then apply syntax highlighting if color is enabled
-			var highlightedLine string
-			if opts.Color != ColorNever {
-				highlightedLine = HighlightSyntax(sanitizedLine, f.File)
-			} else {
-				highlightedLine = sanitizedLine
-			}
-			tw.writefmt("            >%4d: %s\n", f.Line, highlightedLine)
+			tw.writefmt("            >%4d: %s\n", f.Line, p.highlight(sanitizedLine, f.File))
 		}
 	}
 
