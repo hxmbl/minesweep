@@ -118,10 +118,11 @@ type Engine struct {
 	suppressionsApplied atomic.Int64
 	// baseline/baselineNew hold the loaded baseline and the findings that were
 	// new against it, so the save can happen after the report is final.
+	// suppressErr defers a suppression-file read failure to finalize's caller
+	// rather than reporting findings the user believes they silenced. Both are
+	// guarded by mu: Run resets them, and an Engine may be reused concurrently.
 	baseline    *findings.Baseline
 	baselineNew []findings.Finding
-	// suppressErr defers a suppression-file read failure to finalize's caller
-	// rather than reporting findings the user believes they silenced.
 	suppressErr error
 	// findingsDiscarded counts findings detectors dropped because a file's
 	// per-file budget was exhausted, plus findings dropped because the global
@@ -136,12 +137,6 @@ type Engine struct {
 	// unreadable directory.
 	unreadablePaths []string
 	unreadableSeen  map[string]bool
-	// walkRoot is the scan root in effect, so walk errors can be reported with
-	// the same root-relative labels as every other skip reason.
-	walkRoot atomic.Value
-	// scopeFile narrows a git-scoped scan to one named file (empty = whole
-	// tree). Set by runScopedDiff when the target is not a directory.
-	scopeFile string
 	// skipStats mirrors the walker's coverage accounting into the report.
 	skipStatsMu sync.Mutex
 	skipStats   *filesystem.WalkStats
@@ -321,8 +316,15 @@ func New(cfg Config) (*Engine, error) {
 // The walker reports the same path twice for an unreadable directory — once for
 // the entry error and once for the failed directory read — so paths are
 // de-duplicated and counted once each.
-func (e *Engine) onWalkError(path string, err error) {
-	label := e.relativizeWalkPath(path)
+// walkErrorReporter returns an OnError callback bound to one scan's root, so
+// that walk failures are labelled relative to it. The root is captured rather
+// than stored because an Engine may have more than one scan in flight.
+func (e *Engine) walkErrorReporter(root string) func(string, error) {
+	return func(path string, err error) { e.onWalkError(root, path, err) }
+}
+
+func (e *Engine) onWalkError(root, path string, err error) {
+	label := relativeToRoot(root, path)
 	if e.recordUnreadable(label) {
 		e.filesFailed.Add(1)
 		e.noteIncomplete(ReasonUnreadable)
@@ -352,11 +354,10 @@ func (e *Engine) recordUnreadable(label string) bool {
 	return true
 }
 
-// relativizeWalkPath renders a walked path the way every other skip reason is
+// relativeToRoot renders a walked path the way every other skip reason is
 // rendered: relative to the scan root, so the report is stable across machines
 // and does not disclose the local directory layout.
-func (e *Engine) relativizeWalkPath(path string) string {
-	root, _ := e.walkRoot.Load().(string)
+func relativeToRoot(root, path string) string {
 	if root == "" {
 		return filepath.Base(path)
 	}
@@ -365,6 +366,16 @@ func (e *Engine) relativizeWalkPath(path string) string {
 		return filepath.ToSlash(rel)
 	}
 	return filepath.Base(path)
+}
+
+// mustRel returns the slash-separated path of target relative to base, falling
+// back to the base name if the two are unrelated.
+func mustRel(base, target string) string {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return filepath.Base(target)
+	}
+	return rel
 }
 
 // maxRecordedUnreadable bounds how many unreadable paths are remembered for
@@ -463,8 +474,11 @@ func (e *Engine) finalize(root string, allFindings []findings.Finding) (*finding
 	}
 
 	filtered = e.filterSuppressionsInPlace(filtered)
-	if e.suppressErr != nil {
-		return nil, e.suppressErr
+	e.mu.Lock()
+	suppressErr := e.suppressErr
+	e.mu.Unlock()
+	if suppressErr != nil {
+		return nil, suppressErr
 	}
 
 	// Establish a total order BEFORE trimming. trimToConfidenceCap breaks ties
@@ -607,9 +621,12 @@ func (e *Engine) filterBaselineLoad(fs []findings.Finding) ([]findings.Finding, 
 	if err != nil {
 		return nil, fmt.Errorf("load baseline: %w", err)
 	}
+	e.mu.Lock()
 	e.baseline = baseline
 	e.baselineNew = findings.FilterNewFindings(fs, baseline)
-	return e.baselineNew, nil
+	out := e.baselineNew
+	e.mu.Unlock()
+	return out, nil
 }
 
 // filterBaselineSave records the findings that are actually being reported.
@@ -619,7 +636,13 @@ func (e *Engine) filterBaselineLoad(fs []findings.Finding) ([]findings.Finding, 
 // reviewed: the next full scan then reports the tree clean, which is the exact
 // outcome the baseline feature exists to prevent.
 func (e *Engine) filterBaselineSave(reported []findings.Finding) error {
-	if e.config.BaselineFile == "" || !e.config.UpdateBaseline || e.baseline == nil {
+	if e.config.BaselineFile == "" || !e.config.UpdateBaseline {
+		return nil
+	}
+	e.mu.Lock()
+	baseline := e.baseline
+	e.mu.Unlock()
+	if baseline == nil {
 		return nil
 	}
 	if reasons := e.incomplete(); len(reasons) > 0 {
@@ -627,8 +650,8 @@ func (e *Engine) filterBaselineSave(reported []findings.Finding) error {
 			"re-run without the limits that truncated it, or without --update-baseline",
 			strings.Join(reasons, "; "))
 	}
-	findings.UpdateBaseline(e.baseline, reported)
-	if err := findings.SaveBaseline(e.config.BaselineFile, e.baseline); err != nil {
+	findings.UpdateBaseline(baseline, reported)
+	if err := findings.SaveBaseline(e.config.BaselineFile, baseline); err != nil {
 		return fmt.Errorf("save baseline: %w", err)
 	}
 	return nil
@@ -644,7 +667,9 @@ func (e *Engine) filterSuppressionsInPlace(fs []findings.Finding) []findings.Fin
 		// A suppression file that cannot be read is a hard error. Silently
 		// ignoring it would report findings the user believes they silenced,
 		// and — worse, historically — baseline them.
+		e.mu.Lock()
 		e.suppressErr = fmt.Errorf("load suppressions: %w", err)
+		e.mu.Unlock()
 		return fs
 	}
 	out := findings.FilterSuppressed(fs, suppressions)
@@ -664,10 +689,10 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	e.findingsDiscarded.Store(0)
 	e.inlineSuppressed.Store(0)
 	e.suppressionsApplied.Store(0)
+	e.mu.Lock()
 	e.baseline = nil
 	e.baselineNew = nil
 	e.suppressErr = nil
-	e.mu.Lock()
 	e.incompleteReasons = nil
 	e.unreadablePaths = nil
 	e.unreadableSeen = make(map[string]bool)
@@ -734,18 +759,22 @@ func (e *Engine) run(path string) (*findings.RiskReport, error) {
 	// reported unstaged edits as if they were staged, and — with the index
 	// holding a secret that the working tree no longer has — it reported
 	// nothing at all and exited 0.
-	e.walkRoot.Store(path)
+	// Per-run state is passed down rather than stored on the Engine: an Engine
+	// may legitimately have Run called on it more than once, including
+	// concurrently, so nothing about one scan may live in a field.
+	scope := ""
+	if !info.IsDir() {
+		scope = path
+	}
 
 	if e.config.DiffMode || e.config.StagedOnly {
-		return e.runScopedDiff(path, info.IsDir())
+		return e.runScopedDiff(path, scope)
 	}
 	if e.config.HistoryMode {
-		e.scopeFile = ""
-		if !info.IsDir() {
-			e.scopeFile = path
-			return e.runHistory(filepath.Dir(path))
+		if scope != "" {
+			return e.runHistory(filepath.Dir(scope), scope)
 		}
-		return e.runHistory(path)
+		return e.runHistory(path, "")
 	}
 
 	if !info.IsDir() {
@@ -766,16 +795,14 @@ func (e *Engine) run(path string) (*findings.RiskReport, error) {
 // operations run from the containing directory and the result is narrowed to
 // the file. Narrowing happens after the git queries rather than before, so
 // `--staged ./f` still sees the same index the full scan would.
-func (e *Engine) runScopedDiff(target string, isDir bool) (*findings.RiskReport, error) {
-	if isDir {
-		e.scopeFile = ""
-		return e.runDiff(target)
+func (e *Engine) runScopedDiff(target, scope string) (*findings.RiskReport, error) {
+	if scope == "" {
+		return e.runDiff(target, "")
 	}
-	e.scopeFile = target
-	return e.runDiff(filepath.Dir(target))
+	return e.runDiff(filepath.Dir(scope), scope)
 }
 
-func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
+func (e *Engine) runDiff(root, scopeFile string) (*findings.RiskReport, error) {
 	isStaged := e.config.StagedOnly
 	var diffFiles []string
 	var err error
@@ -817,7 +844,7 @@ func (e *Engine) runDiff(root string) (*findings.RiskReport, error) {
 		if !withinDir(absPath, root) {
 			continue // changed file outside the requested scan root
 		}
-		if e.scopeFile != "" && absPath != e.scopeFile {
+		if scopeFile != "" && absPath != scopeFile {
 			continue // a single file was named; only it is in scope
 		}
 		if e.config.MaxFiles > 0 && len(files) >= e.config.MaxFiles {
@@ -912,7 +939,7 @@ func (e *Engine) runSingleFile(path string) (*findings.RiskReport, error) {
 // with content diversity, not commit count: each object is fetched and
 // scanned exactly once, then findings are attributed to the commit that
 // introduced them.
-func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
+func (e *Engine) runHistory(root, scopeFile string) (*findings.RiskReport, error) {
 	maxFileSize := e.maxFileSize()
 
 	// History mode applies the same coverage filters as a working-tree scan.
@@ -979,6 +1006,15 @@ func (e *Engine) runHistory(root string) (*findings.RiskReport, error) {
 		obj := obj
 		if obj.Path == "" {
 			continue
+		}
+		if scopeFile != "" {
+			// A single file was named. History object paths are
+			// repository-relative and have no filesystem entry, so compare
+			// against the named file's path relative to the repository.
+			want := filepath.ToSlash(mustRel(top, scopeFile))
+			if obj.Path != want {
+				continue
+			}
 		}
 		// History paths are repository-relative with no filesystem entry, so
 		// the same filter set is applied to them directly.
@@ -1062,7 +1098,6 @@ func shortSHA(sha string) string {
 }
 
 func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
-	e.walkRoot.Store(root)
 	stats := e.prepareSkipStats()
 	files, err := filesystem.WalkWithOptions(root, filesystem.WalkOption{
 		MaxFileSize:      e.maxFileSize(),
@@ -1070,7 +1105,7 @@ func (e *Engine) runDirectory(root string) (*findings.RiskReport, error) {
 		IncludeTestFiles: e.config.IncludeTestFiles,
 		NoIgnore:         e.config.NoIgnore,
 		Stats:            stats,
-		OnError:          e.onWalkError,
+		OnError:          e.walkErrorReporter(root),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("walk directory: %w", err)
@@ -1136,7 +1171,7 @@ func (e *Engine) detect(file *filesystem.File, budget int) []findings.Finding {
 		// git quoted, for instance — which fails the same way.
 		e.filesFailed.Add(1)
 		e.noteIncomplete(ReasonUnreadable)
-		e.recordUnreadable(e.relativizeWalkPath(file.Path))
+		e.recordUnreadable(file.Path)
 		if e.config.Verbose {
 			fmt.Fprintf(os.Stderr, "minesweep: %s: %v\n", file.Path, err)
 		}
