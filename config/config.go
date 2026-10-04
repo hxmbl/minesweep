@@ -41,6 +41,12 @@ type FileConfig struct {
 	NoIgnore bool `yaml:"no_ignore" json:"no_ignore"`
 	// IncludeLowConfidence disables the default confidence floor.
 	IncludeLowConfidence bool `yaml:"include_low_confidence" json:"include_low_confidence"`
+	// NoInlineSuppressions makes the scanner ignore `minesweep: ignore`
+	// comments in scanned content. It only ever surfaces more findings, so it
+	// is safe to honour from an auto-discovered config; the converse (granting
+	// a repository the ability to suppress its own findings) is not
+	// configurable from a file at all.
+	NoInlineSuppressions bool `yaml:"no_inline_suppressions" json:"no_inline_suppressions"`
 	// DangerouslyShowSecrets prints raw secret values. It is deliberately not
 	// configurable from a file: opting in must be a deliberate act on the
 	// command line, never something a checked-in config can do for you.

@@ -105,6 +105,10 @@ func writeCoverageNotes(tw *textWriter, p palette, report *findings.RiskReport, 
 		tw.writeln(p.yellow(fmt.Sprintf("%snote: %d %s could not be read and may be unscanned",
 			indent, report.FilesFailed, pluralWord(report.FilesFailed, "file"))))
 	}
+	if report.FindingsSuppressed > 0 {
+		tw.writeln(p.yellow(fmt.Sprintf("%snote: %d finding(s) were suppressed by an inline comment or suppression file",
+			indent, report.FindingsSuppressed)))
+	}
 }
 
 func writeIncomplete(tw *textWriter, p palette, report *findings.RiskReport) {

@@ -108,6 +108,9 @@ type Engine struct {
 	// derived from what is actually left, rather than a guess up front.
 	findingsKept    atomic.Int64
 	findingsDropped atomic.Int64
+	// inlineSuppressed counts findings removed by an inline suppression
+	// comment in the scanned content.
+	inlineSuppressed atomic.Int64
 	// incompleteReasons records why a scan did not finish. Guarded by mu
 	// because workers and the memory monitor both append.
 	mu                sync.Mutex
@@ -444,6 +447,7 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 	e.filesFailed.Store(0)
 	e.findingsKept.Store(0)
 	e.findingsDropped.Store(0)
+	e.inlineSuppressed.Store(0)
 	e.mu.Lock()
 	e.incompleteReasons = nil
 	e.mu.Unlock()
@@ -460,6 +464,7 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 		rep.FilesFailed = int(e.filesFailed.Load())
 		rep.DurationMs = time.Since(start).Milliseconds()
 		rep.FindingsDropped = int(e.findingsDropped.Load())
+		rep.FindingsSuppressed = int(e.inlineSuppressed.Load())
 		rep.IncompleteReasons = e.incomplete()
 		rep.Incomplete = len(rep.IncompleteReasons) > 0
 		if st := e.getSkipStats(); st != nil {
@@ -470,6 +475,28 @@ func (e *Engine) Run(path string) (*findings.RiskReport, error) {
 }
 
 func (e *Engine) run(path string) (*findings.RiskReport, error) {
+	// Resolve the scan root once, up front, and use the resolved form for
+	// everything downstream: the walk, the containment checks, and the
+	// relativization of reported paths.
+	//
+	// os.Stat follows symlinks but filepath.WalkDir does not: it Lstats the
+	// root and hands a symlinked root to the walk function as a single
+	// non-directory entry. The tree was therefore never descended — scanning a
+	// symlinked directory reported one info-level "Symlink" finding, exit 0,
+	// and no secrets. `--diff`, `--staged` and `--history` resolve symlinks
+	// (via git rev-parse), so the four modes disagreed about the same tree.
+	//
+	// Canonicalising here is also what keeps reported paths stable: git
+	// reports the toplevel with symlinks resolved, so a root left unresolved
+	// produced absolute paths in every --staged report (and machine-specific
+	// baseline entries) whenever any ancestor was a symlink. That is H2, fixed
+	// at the same layer, because it is the same asymmetry.
+	resolved, err := filesystem.ResolveRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	path = resolved
+
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat path: %w", err)
@@ -899,7 +926,15 @@ func (e *Engine) detect(file *filesystem.File) []findings.Finding {
 		// into a []string: that split copied the whole file and allocated a
 		// string header per line, for every file that had any finding.
 		if li := file.Lines(); li != nil {
-			filtered = findings.FilterInlineSuppressionsLines(filtered, li)
+			kept := findings.FilterInlineSuppressionsLines(filtered, li)
+			// A finding removed by an inline suppression is a coverage gap
+			// like any other: it was detected and then deliberately not
+			// reported. It is counted so the report can say so, rather than
+			// vanishing without trace.
+			if n := len(filtered) - len(kept); n > 0 {
+				e.inlineSuppressed.Add(int64(n))
+			}
+			filtered = kept
 		}
 	}
 

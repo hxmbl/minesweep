@@ -5,8 +5,21 @@ import (
 	"strings"
 )
 
-var inlineIgnoreRe = regexp.MustCompile(`(?i)(?:#|//)\s*(?:minesweep|secret(?:s)?)\s*:\s*ignore(?:\s*\(([^)]+)\))?`)
-var inlineIgnoreAltRe = regexp.MustCompile(`(?i)(?:#|//)\s*(?:nosec|noscan|noqa)\s*(?:\([^)]*\))?\s*$`)
+// inlineIgnoreRe is the only recognised inline suppression form.
+//
+// It used to have a sibling that accepted a bare `# noqa`, `# nosec` or
+// `# noscan` anywhere in the line. Those markers belong to other tools, they
+// are written for entirely different purposes — a linter suppression, not a
+// decision to leak a credential — and they are honoured from the content being
+// scanned, which means the thing under examination gets to decide whether it is
+// examined. A single `# noqa` above a line silenced a critical AWS key in every
+// scan mode, including `--diff` on an untrusted pull request and `--staged` in
+// the pre-commit hook.
+//
+// An inline suppression is now explicit about wanting minesweep specifically,
+// and optional rule IDs can be attached: `minesweep: ignore` or
+// `minesweep: ignore(aws-access-key-id, env-password)`.
+var inlineIgnoreRe = regexp.MustCompile(`(?i)(?:#|//)\s*minesweep\s*:\s*ignore(?:\s*\(([^)]*)\))?\s*$`)
 
 type InlineSuppression struct {
 	RuleIDs []string
@@ -17,14 +30,10 @@ func ParseInlineSuppression(line string) *InlineSuppression {
 	matches := inlineIgnoreRe.FindStringSubmatch(line)
 	if matches != nil {
 		s := &InlineSuppression{Reason: "inline ignore"}
-		if len(matches) > 1 && matches[1] != "" {
+		if len(matches) > 1 && strings.TrimSpace(matches[1]) != "" {
 			s.RuleIDs = parseRuleIDs(matches[1])
 		}
 		return s
-	}
-
-	if inlineIgnoreAltRe.MatchString(line) {
-		return &InlineSuppression{Reason: "inline ignore (nosec)"}
 	}
 
 	return nil
@@ -84,7 +93,16 @@ func FilterInlineSuppressionsLines(findings []Finding, lines LineLookup) []Findi
 
 // isSuppressedAt walks back up to three lines looking for a suppression that
 // covers f, matching the original window.
+// isSuppressedAt walks back up to three lines looking for a suppression that
+// covers f, matching the original window.
+//
+// A suppression naming rule IDs is matched case-insensitively: rule IDs come
+// from user-authored YAML, where `AWS-Access-Key-Id` and `aws-access-key-id`
+// are the same rule, and a case-sensitive comparison silently failed to
+// suppress — a suppression that appears not to work invites a second, cruder
+// one.
 func isSuppressedAt(f Finding, n int, suppressAt func(int) *InlineSuppression) bool {
+	target := strings.ToLower(strings.TrimSpace(f.RuleID))
 	for check := f.Line; check >= 1 && check >= f.Line-3; check-- {
 		if check > n {
 			continue
@@ -97,7 +115,7 @@ func isSuppressedAt(f Finding, n int, suppressAt func(int) *InlineSuppression) b
 			return true
 		}
 		for _, ruleID := range sp.RuleIDs {
-			if ruleID == f.RuleID {
+			if strings.EqualFold(ruleID, target) {
 				return true
 			}
 		}

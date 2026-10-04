@@ -443,7 +443,12 @@ func TestWalkMaxFileSize(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("expected 1 file (small.txt only), got %d", len(files))
 	}
-	if files[0].Path != filepath.Join(dir, "small.txt") {
+	// WalkWithOptions resolves the root, so reported paths are canonical.
+	wantDir, err := ResolveRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files[0].Path != filepath.Join(wantDir, "small.txt") {
 		t.Fatalf("expected small.txt, got %s", files[0].Path)
 	}
 }
@@ -1054,7 +1059,12 @@ func TestWalkAncestorNamedLikeSkipDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0].Path != filepath.Join(root, "real.txt") {
+	// WalkWithOptions resolves the root, so reported paths are canonical.
+	wantRoot, err := ResolveRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Path != filepath.Join(wantRoot, "real.txt") {
 		for _, f := range files {
 			t.Logf("kept: %s", f.Path)
 		}

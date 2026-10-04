@@ -146,6 +146,8 @@ func main() {
 	root.Flags().BoolVar(&cfg.NoIgnore, "no-ignore", false, "Scan everything, ignoring .minesweepignore and .msignore")
 	root.Flags().BoolVar(&cfg.ShowIgnored, "show-ignored", false, "List every skipped file path (default: sample per cause)")
 	root.Flags().BoolVar(&cfg.IncludeLowConfidence, "include-low-confidence", false, "Report findings below the default confidence floor")
+	root.Flags().BoolVar(&cfg.DisableInlineSuppression, "no-inline-suppressions", false,
+		"Ignore 'minesweep: ignore' comments in scanned files (use in CI to stop content suppressing itself)")
 	root.Flags().BoolVar(&cfg.DangerouslyShowSecrets, "dangerously-show-secrets", false, "Print raw secret values instead of hashes")
 
 	root.AddCommand(&cobra.Command{
@@ -298,6 +300,19 @@ var configFields = []configField{
 		},
 		func(c *engine.Config, v string) { c.IncludeLowConfidence = v == "true" },
 		func(f *config.FileConfig) bool { return f.IncludeLowConfidence }),
+	// Disabling inline suppression only ever surfaces MORE findings, so an
+	// untrusted config may set it. Suppression itself is never enabled from a
+	// config file: there is no way to grant a repository the power to silence
+	// its own findings.
+	strField("no_inline_suppressions", "no-inline-suppressions", false,
+		func(f *config.FileConfig) string {
+			if f.NoInlineSuppressions {
+				return "true"
+			}
+			return ""
+		},
+		func(c *engine.Config, v string) { c.DisableInlineSuppression = v == "true" },
+		func(f *config.FileConfig) bool { return f.NoInlineSuppressions }),
 	// Intentionally has no config-file entry: raw secret values must be
 	// opted into on the command line, never by a file in the repository.
 	pathField("rules_dir", "rules", func(c *engine.Config, v string) { c.RulesDir = v }, func(f *config.FileConfig) bool { return f.RulesDir != "" }),

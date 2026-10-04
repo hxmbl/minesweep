@@ -26,6 +26,11 @@ type RiskReport struct {
 	IncompleteReasons []string `yaml:"incomplete_reasons,omitempty" json:"incomplete_reasons,omitempty"`
 	// FindingsDropped counts findings removed by the finding cap.
 	FindingsDropped int `yaml:"findings_dropped,omitempty" json:"findings_dropped,omitempty"`
+	// FindingsSuppressed counts findings removed by an inline suppression
+	// comment in the scanned content, or by the suppression file. A finding
+	// that was detected and then deliberately not reported is a coverage
+	// decision the user is entitled to see.
+	FindingsSuppressed int `yaml:"findings_suppressed,omitempty" json:"findings_suppressed,omitempty"`
 	// SkippedBy is a per-cause breakdown of files that were NOT inspected.
 	// A file that was skipped is a coverage gap, and the user is entitled to
 	// know which ones and why.

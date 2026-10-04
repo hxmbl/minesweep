@@ -607,6 +607,35 @@ type WalkOption struct {
 	ignoreRoot string
 }
 
+// ResolveRoot returns the canonical absolute form of a scan target.
+//
+// Symlinks are resolved as far as they exist and the missing tail of a
+// not-yet-created path is re-attached, so the result is stable for both
+// existing and not-yet-existing targets. A path that cannot be resolved at all
+// falls back to the lexical absolute form, which is the best answer available.
+func ResolveRoot(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve path %q: %w", path, err)
+	}
+	if resolved, rErr := filepath.EvalSymlinks(abs); rErr == nil {
+		return resolved, nil
+	}
+	dir, tail := abs, ""
+	for range 256 { // bounded: a path this deep is pathological
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return abs, nil
+		}
+		tail = filepath.Join(filepath.Base(dir), tail)
+		dir = parent
+		if resolved, rErr := filepath.EvalSymlinks(dir); rErr == nil {
+			return filepath.Join(resolved, tail), nil
+		}
+	}
+	return abs, nil
+}
+
 func Walk(root string, ignore *IgnorePattern, ignoreFilePath string) ([]*File, error) {
 	return WalkWithOptions(root, WalkOption{
 		Ignore:         ignore,
@@ -646,6 +675,14 @@ func resolveIgnoreSet(root string, opts WalkOption) (*IgnoreSet, error) {
 }
 
 func walkWithOptions(root string, opts WalkOption) ([]*File, error) {
+	// Resolve the root before walking. filepath.WalkDir Lstats the root, so a
+	// symlinked root is handed to the walk function as a single non-directory
+	// entry and the tree is never descended — the walk "succeeds", reports
+	// nothing, and the caller concludes the target was clean. Resolving here
+	// makes the function safe to call directly, not only through the engine.
+	if resolved, err := ResolveRoot(root); err == nil {
+		root = resolved
+	}
 	opts.ignoreRoot = root
 	fs, err := newFilterSet(opts)
 	if err != nil {
