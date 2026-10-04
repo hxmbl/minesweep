@@ -158,6 +158,12 @@ func TestHasPreCommitHook(t *testing.T) {
 	}
 }
 
+func TestPreCommitHookIncludesRenames(t *testing.T) {
+	if !strings.Contains(preCommitHook, "--diff-filter=ACMR") {
+		t.Fatal("pre-commit hook must include renamed staged files")
+	}
+}
+
 func TestRenderGroupedHelpCoversAllFlags(t *testing.T) {
 	root := &cobra.Command{
 		Use:  "minesweep [path]",

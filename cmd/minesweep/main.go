@@ -835,7 +835,7 @@ else
     exit 1
 fi
 
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR)
 [ -z "$STAGED_FILES" ] && exit 0
 
 echo "minesweep: scanning staged files..."
