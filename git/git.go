@@ -72,7 +72,15 @@ func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 
 	var out []byte
 	if baseExists {
-		cmd := nameListCommand(top, "diff", "--name-only", "-z", sanitizedBranch+"...HEAD") //nolint:gosec // branch name sanitized by SanitizeBranchName
+		// --diff-filter=ACMR, matching the staged path. A deletion (D) is a
+		// legitimate change with nothing left to scan, and including it made
+		// every PR that deleted a file fail: the path was in the list, the
+		// content fetch at HEAD failed, and the failure was reported as a path
+		// that "could not be read" — an incomplete scan, exit 2. A rename (R)
+		// is included because rename detection is on by default, and the entry
+		// git emits is the new path, which exists.
+		cmd := nameListCommand(top, "diff", "--name-only", "-z",
+			"--diff-filter=ACMR", sanitizedBranch+"...HEAD") //nolint:gosec // branch name sanitized by SanitizeBranchName
 		out, err = cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("git diff --name-only %q: %w", sanitizedBranch, err)
