@@ -1051,7 +1051,15 @@ func (e *Engine) runHistory(root, scopeFile string) (*findings.RiskReport, error
 
 	files := make([]*filesystem.File, 0, len(objects))
 	displaySHA := make(map[string]string, len(objects))
-	var skippedOversize, skippedFiltered int
+	// primaryFiltered records that the path git named for a blob is excluded by
+	// the filters. The blob is still scanned: git names each object exactly
+	// once, so that one arbitrary name is not evidence about the others, and
+	// skipping on it meant a secret shared between vendor/foo.png and
+	// config.env was missed entirely whenever the name git happened to pick was
+	// the filtered one. The filter is a statement about paths, so it is applied
+	// to paths — in expandHistoryPaths, once all of them are known.
+	primaryFiltered := make(map[string]filesystem.SkipReason, len(objects))
+	var skippedOversize int
 	for _, obj := range objects {
 		obj := obj
 		if obj.Path == "" {
@@ -1068,13 +1076,6 @@ func (e *Engine) runHistory(root, scopeFile string) (*findings.RiskReport, error
 		} else if !withinDir(filepath.Join(top, filepath.FromSlash(obj.Path)), root) {
 			continue // history object outside the requested scan root
 		}
-		// History paths are repository-relative with no filesystem entry, so
-		// the same filter set is applied to them directly.
-		if reason, skip := checker.ClassifyRel(obj.Path); skip {
-			stats.Note(reason, obj.Path)
-			skippedFiltered++
-			continue
-		}
 		if obj.Size > maxFileSize {
 			stats.Note(filesystem.SkipReasonLarge, obj.Path)
 			skippedOversize++
@@ -1083,27 +1084,142 @@ func (e *Engine) runHistory(root, scopeFile string) (*findings.RiskReport, error
 
 		display := fmt.Sprintf("%s@%s", obj.Path, shortSHA(obj.SHA))
 		displaySHA[display] = obj.SHA
+		// History paths are repository-relative with no filesystem entry, so
+		// the same filter set is applied to them directly.
+		if reason, skip := checker.ClassifyRel(obj.Path); skip {
+			primaryFiltered[display] = reason
+		}
 		bf := filesystem.NewBlobFile(display, obj.Size, func() ([]byte, error) {
 			return fetcher.Fetch(obj.SHA)
 		})
 		bf.MaxContentBytes = maxFileSize
 		files = append(files, bf)
 	}
-	total := skippedOversize + skippedFiltered
-	if total > 0 {
-		fmt.Fprintf(os.Stderr, "minesweep: note: %d of %d history objects were not scanned (%d by ignore/skip rules, %d larger than %d MB)\n",
-			total, len(objects), skippedFiltered, skippedOversize, maxFileSize/1024/1024)
-		e.filesSkipped.Add(int64(total))
+	if skippedOversize > 0 {
+		fmt.Fprintf(os.Stderr, "minesweep: note: %d of %d history objects were not scanned (%d larger than %d MB)\n",
+			skippedOversize, len(objects), skippedOversize, maxFileSize/1024/1024)
+		e.filesSkipped.Add(int64(skippedOversize))
 	}
 
 	allFindings := e.detectParallel(files)
-	attributed := e.attributeHistory(root, allFindings, displaySHA)
-	return e.finalize(root, attributed)
+	attributed, infos := e.attributeHistory(root, allFindings, displaySHA)
+	expanded := e.expandHistoryPaths(root, attributed, displaySHA, infos, checker, scopeFile,
+		primaryFiltered, stats)
+	// History skips are resolved after detection, once every path of a blob is
+	// known, so the totals are only final here.
+	if total := stats.Total(); total > 0 {
+		e.filesSkipped.Store(int64(total))
+		fmt.Fprintf(os.Stderr, "minesweep: note: %d history object(s) at filtered paths were not reported\n", total)
+	}
+	return e.finalize(root, expanded)
+}
+
+// expandHistoryPaths reports a history finding at every path its blob occupied.
+//
+// git's object listing names each object once, so a secret committed at two
+// paths — copied, moved, or written twice with identical content — was reported
+// under a single name and the other location was silently absent. A user who
+// cleaned up the named file would leave the credential in the tree believing it
+// was gone, and the next history scan would have nothing new to complain about,
+// because the one path it looks at had been fixed.
+//
+// The extra paths come from the --find-object query attributeHistory already
+// ran, so there is no additional git invocation.
+//
+// Each path goes through the same scope restriction and filter set as an
+// original history object: an expanded finding must not bypass a coverage
+// decision, and a path that would not have been scanned is not reported here.
+func (e *Engine) expandHistoryPaths(root string, fs []findings.Finding, displaySHA map[string]string,
+	infos map[string]*git.CommitInfo, checker *filesystem.SkipChecker, scopeFile string,
+	primaryFiltered map[string]filesystem.SkipReason, stats *filesystem.WalkStats) []findings.Finding {
+	if len(fs) == 0 {
+		return fs
+	}
+	top := git.TopLevel(root)
+	if top == "" {
+		return fs
+	}
+	// A single named file is its own scope. withinDir alone would not catch
+	// this: root is the file's directory, so every sibling is inside it.
+	var scopeRel string
+	if scopeFile != "" {
+		scopeRel = filepath.ToSlash(mustRel(top, scopeFile))
+	}
+	inScope := func(rel string) bool {
+		if rel == "" {
+			return false
+		}
+		if scopeRel != "" {
+			return rel == scopeRel
+		}
+		return withinDir(filepath.Join(top, filepath.FromSlash(rel)), root)
+	}
+
+	out := make([]findings.Finding, 0, len(fs))
+	for _, f := range fs {
+		sha, ok := displaySHA[f.File]
+		if !ok {
+			out = append(out, f)
+			continue
+		}
+		info := infos[sha]
+		primary := historyPrimaryPath(f.File)
+
+		// Report at the named path only if it survives the filters. The path
+		// git picked is not evidence about the others, so being blocked there
+		// does not make the blob unscannable — it means the finding belongs at
+		// one of its other locations, which are considered below.
+		reason, blocked := primaryFiltered[f.File]
+		if !blocked {
+			reason, blocked = checker.ClassifyRel(primary)
+		}
+		if blocked {
+			stats.Note(reason, primary)
+		} else if inScope(primary) {
+			out = append(out, f)
+		}
+
+		if info == nil {
+			continue
+		}
+		for _, occ := range info.Occurrences {
+			for _, alt := range occ.Paths {
+				if alt == primary {
+					continue
+				}
+				if altReason, blocked := checker.ClassifyRel(alt); blocked {
+					stats.Note(altReason, alt)
+					continue
+				}
+				if !inScope(alt) {
+					continue
+				}
+				clone := f
+				clone.File = alt + "@" + shortSHA(sha)
+				clone.Commit = occ.Commit
+				out = append(out, clone)
+			}
+		}
+	}
+	return out
+}
+
+// historyPrimaryPath strips the "@<blob>" suffix a history file path carries.
+func historyPrimaryPath(display string) string {
+	if i := strings.LastIndexByte(display, '@'); i > 0 {
+		return display[:i]
+	}
+	return display
 }
 
 // attributeHistory resolves the introducing commit for each flagged blob.
 // Queries run once per unique SHA — typically a handful — never per finding.
-func (e *Engine) attributeHistory(root string, fs []findings.Finding, displaySHA map[string]string) []findings.Finding {
+//
+// The CommitInfo values are returned alongside so expandHistoryPaths can reuse
+// them, including the paths the blob occupied in other commits, without issuing
+// a second query.
+func (e *Engine) attributeHistory(root string, fs []findings.Finding,
+	displaySHA map[string]string) ([]findings.Finding, map[string]*git.CommitInfo) {
 	shas := make(map[string]bool)
 	for _, f := range fs {
 		if sha, ok := displaySHA[f.File]; ok && !shas[sha] {
@@ -1139,7 +1255,7 @@ func (e *Engine) attributeHistory(root string, fs []findings.Finding, displaySHA
 		out[i].Date = info.Date
 		out[i].CommitSummary = info.Summary
 	}
-	return out
+	return out, infos
 }
 
 func shortSHA(sha string) string {
