@@ -42,7 +42,7 @@ brews:
     repository:
       owner: Hxmbl
       name: homebrew-tap
-      token: ${{ .Env.GORELEASER_GITHUB_TOKEN }}
+      token: "{{ .Env.GORELEASER_GITHUB_TOKEN }}"
     commit_author:
       name: hxmbl
       email: hxmbl@users.noreply.github.com
