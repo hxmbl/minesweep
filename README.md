@@ -733,4 +733,4 @@ exists so that distinction does not have to be made by eye.
 
 ## License
 
-no
+MIT — see [LICENSE](LICENSE).

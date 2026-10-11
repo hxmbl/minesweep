@@ -39,6 +39,7 @@ changelog:
 
 brews:
   - name: minesweep
+    license: MIT
     repository:
       owner: hxmbl
       name: homebrew-tap
