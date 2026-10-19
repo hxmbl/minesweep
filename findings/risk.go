@@ -6,17 +6,22 @@ import (
 )
 
 type RiskReport struct {
-	RiskScore    RiskScore       `yaml:"risk_score" json:"risk_score"`
-	Summary      string          `yaml:"summary" json:"summary"`
-	Findings     []Finding       `yaml:"findings" json:"findings"`
-	Reasons      []string        `yaml:"reasons" json:"reasons"`
-	SafeToShare  map[string]bool `yaml:"safe_to_share" json:"safe_to_share"`
-	Boundaries   []string        `yaml:"boundaries" json:"boundaries"`
-	FilesScanned int             `yaml:"files_scanned,omitempty" json:"files_scanned,omitempty"`
-	DurationMs   int64           `yaml:"duration_ms,omitempty" json:"duration_ms,omitempty"`
-	BytesScanned int64           `yaml:"bytes_scanned,omitempty" json:"bytes_scanned,omitempty"`
-	FilesSkipped int             `yaml:"files_skipped,omitempty" json:"files_skipped,omitempty"`
-	FilesFailed  int             `yaml:"files_failed,omitempty" json:"files_failed,omitempty"`
+	RiskScore   RiskScore       `yaml:"risk_score" json:"risk_score"`
+	Summary     string          `yaml:"summary" json:"summary"`
+	Findings    []Finding       `yaml:"findings" json:"findings"`
+	Reasons     []string        `yaml:"reasons" json:"reasons"`
+	SafeToShare map[string]bool `yaml:"safe_to_share" json:"safe_to_share"`
+	Boundaries  []string        `yaml:"boundaries" json:"boundaries"`
+	// ScoreFactors explains how RiskScore was reached: which finding set the
+	// floor, how much the remaining findings added, and what was discounted.
+	// A score a reader cannot audit is a number they will learn to ignore, so
+	// the arithmetic ships with the number.
+	ScoreFactors []string `yaml:"score_factors,omitempty" json:"score_factors,omitempty"`
+	FilesScanned int      `yaml:"files_scanned,omitempty" json:"files_scanned,omitempty"`
+	DurationMs   int64    `yaml:"duration_ms,omitempty" json:"duration_ms,omitempty"`
+	BytesScanned int64    `yaml:"bytes_scanned,omitempty" json:"bytes_scanned,omitempty"`
+	FilesSkipped int      `yaml:"files_skipped,omitempty" json:"files_skipped,omitempty"`
+	FilesFailed  int      `yaml:"files_failed,omitempty" json:"files_failed,omitempty"`
 
 	// Incomplete reports that this scan is not a complete answer to the
 	// question asked — it hit a limit, a budget, or a crash. A clean result
@@ -64,16 +69,11 @@ func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {
 		}
 	}
 
-	maxSeverity := SeverityInfo
-	hasPrivateKey := false
 	reasons := make(map[string]bool)
 	typeCounts := make(map[string]int)
 	criticalTypes := make(map[string]bool)
 
 	for _, f := range findings {
-		if f.Severity > maxSeverity {
-			maxSeverity = f.Severity
-		}
 		typeCounts[f.Type]++
 		if f.Severity >= SeverityCritical {
 			criticalTypes[f.Type] = true
@@ -81,14 +81,9 @@ func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {
 		if f.Reason != "" {
 			reasons[f.Reason] = true
 		}
-		for _, t := range f.Tags {
-			if t == "private-key" {
-				hasPrivateKey = true
-			}
-		}
 	}
 
-	riskScore := computeRiskScore(maxSeverity, hasPrivateKey)
+	riskScore, scoreFactors := computeRiskScore(findings)
 
 	safeToShare := computeSafeToShare(riskScore)
 
@@ -101,29 +96,13 @@ func GenerateRiskReport(findings []Finding, boundaries []string) RiskReport {
 	summary := buildSummary(riskScore, len(findings), typeCounts, criticalTypes)
 
 	return RiskReport{
-		RiskScore:   riskScore,
-		Summary:     summary,
-		Findings:    findings,
-		Reasons:     reasonList,
-		SafeToShare: safeToShare,
-		Boundaries:  boundaries,
-	}
-}
-
-func computeRiskScore(maxSev Severity, hasPrivateKey bool) RiskScore {
-	switch {
-	case maxSev >= SeverityCritical && hasPrivateKey:
-		return RiskScoreCritical
-	case maxSev >= SeverityCritical:
-		return RiskScoreHigh
-	case maxSev >= SeverityHigh:
-		return RiskScoreHigh
-	case maxSev >= SeverityMedium:
-		return RiskScoreMedium
-	case maxSev >= SeverityLow:
-		return RiskScoreLow
-	default:
-		return RiskScoreNone
+		RiskScore:    riskScore,
+		Summary:      summary,
+		Findings:     findings,
+		Reasons:      reasonList,
+		SafeToShare:  safeToShare,
+		Boundaries:   boundaries,
+		ScoreFactors: scoreFactors,
 	}
 }
 

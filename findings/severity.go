@@ -70,14 +70,19 @@ const (
 	ActionBlock  Action = "block"
 )
 
+// RiskScore is a 0-100 risk estimate for a scan. The constants name the lower
+// bound of each band; they are thresholds, not the only values a score takes.
+// computeRiskScore produces a continuous score, so a scan can read 83/100
+// ("high") as easily as 75/100, and the bands are reachable rather than being
+// fixed rungs the score snaps to.
 type RiskScore int
 
 const (
 	RiskScoreNone     RiskScore = 0
-	RiskScoreLow      RiskScore = 25
-	RiskScoreMedium   RiskScore = 50
-	RiskScoreHigh     RiskScore = 75
-	RiskScoreCritical RiskScore = 100
+	RiskScoreLow      RiskScore = 20
+	RiskScoreMedium   RiskScore = 45
+	RiskScoreHigh     RiskScore = 68
+	RiskScoreCritical RiskScore = 85
 )
 
 func (r RiskScore) String() string {

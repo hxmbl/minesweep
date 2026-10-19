@@ -142,6 +142,12 @@ section linked from its entry.
   scan with no accounting.
 - **`--rules` accepts a file as well as a directory**, and a path that does not
   exist is an error instead of a silent fallback to the built-in rules.
+- **The risk score is computed from the evidence, not from the single worst
+  finding.** It used to snap to one of five fixed values based on the highest
+  severity present, so volume, confidence and file exposure did not move it, and
+  a live AWS key could not reach "critical" without an unrelated private key
+  beside it. It is now a continuous 0–100 estimate, and every report can explain
+  it. → [How the risk score is computed](#how-the-risk-score-is-computed)
 
 ---
 
@@ -150,7 +156,7 @@ section linked from its entry.
 ### What a finding looks like
 
 ```
-Risk score: HIGH (75/100) — not safe to share publicly or with AI tools
+Risk score: CRITICAL (100/100) — credentials detected, rotation required
 Found 3 findings.
 
 1 critical  ·  1 high  ·  1 medium
@@ -174,7 +180,43 @@ MEDIUM ────────────────────────�
       minesweep -v .
 ```
 
-Use `-v` for matched values, context lines, and risk factors. Prefer `--json` or `--sarif` for machines.
+Use `-v` for matched values, context lines, risk factors and the score breakdown. Prefer `--json` or `--sarif` for machines.
+
+### How the risk score is computed
+
+The score is an integer in `[0,100]`. Bands are `low ≥ 20`, `medium ≥ 45`,
+`high ≥ 68` and `critical ≥ 85`; below 20 is `none`. It is a summary of how
+likely this tree is to hold a *live* credential and how much one would cost, not
+a count of matches.
+
+Each finding contributes an **impact**: a severity anchor (9/28/56/76/92 for
+info/low/medium/high/critical) scaled by
+
+- **confidence** — a 0.95 live key weighs far more than a 0.30 guess, but a
+  low-confidence match on a critical rule never collapses to nothing;
+- **exposure** — a hit in `.env`, `id_rsa`, `.pem`/`.key`/`.tfstate` or similar
+  weighs 1.15×; one in `tests/`, `testdata/` or a fixture weighs 0.70×; one in
+  `docs/` or a Markdown file weighs 0.85×. A discounted finding is still
+  reported and still gates CI; only its influence on the score changes;
+- **category** — a `private-key` weighs 1.15× (it cannot be rotated by reissuing
+  a token), and `cloud`/`payments` credentials weigh 1.05×.
+
+The **worst finding sets the floor**, and the remaining findings add a bounded,
+confidence-weighted volume term with diminishing returns. That is deliberate in
+both directions: a thousand weak matches rank above one weak match, but a long
+tail of guesses cannot by itself carry a tree to `critical`. Informational
+findings — a detected binary, a symlink, an executable — are coverage notes and
+do not move the score at all, so naming a binary still reports `0` alongside its
+`INCOMPLETE SCAN`.
+
+Every report carries a `score_factors` list explaining the arithmetic:
+
+```
+──────── Score factors ─────────────────────────────────────
+  • highest-impact finding: AWS Secret Access Key (critical, 95% confidence) — 100/100
+  • 6 additional finding(s) add 18/100 by confidence-weighted volume
+  • 2 finding(s) in test or documentation files were discounted
+```
 
 ### CI / GitHub Actions
 
@@ -536,8 +578,13 @@ is safe to share.
 
 ```json
 {
-  "risk_score": 75,
-  "summary": "Risk Score: high (75)\n\nFound 2 findings across 2 types.\n\n...",
+  "risk_score": 100,
+  "summary": "Risk Score: critical (100)\n\nFound 2 findings across 2 types.\n\n...",
+  "score_factors": [
+    "highest-impact finding: AWS Access Key ID (critical, 95% confidence) — 100/100",
+    "1 additional finding(s) add 8/100 by confidence-weighted volume",
+    "score is capped at 100/100"
+  ],
   "findings": [
     {
       "type": "AWS Access Key ID",

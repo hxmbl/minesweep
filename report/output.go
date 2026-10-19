@@ -49,6 +49,7 @@ func WriteText(w io.Writer, report *findings.RiskReport, opts TextOptions) error
 	grouped := groupBySeverity(report.Findings)
 
 	writeHeader(tw, p, report)
+	writeScoreFactors(tw, p, report, opts)
 	writeLegend(tw, p, grouped, opts)
 	writeGroups(tw, p, opts, grouped)
 	writeBoundaries(tw, p, report, opts)
@@ -166,6 +167,20 @@ func writeCounts(tw *textWriter, p palette, groups []severityGroup) {
 		parts = append(parts, styled)
 	}
 	tw.writeln(strings.Join(parts, p.dim("  ·  ")))
+}
+
+// writeScoreFactors explains the risk score under -v. The score is a summary
+// judgment; without the arithmetic behind it a reader can only accept it or
+// ignore it, and ignoring it is the easier habit to form.
+func writeScoreFactors(tw *textWriter, p palette, report *findings.RiskReport, opts TextOptions) {
+	if !opts.Verbose || len(report.ScoreFactors) == 0 {
+		return
+	}
+	tw.writeln(sectionTitle(p, "Score factors"))
+	for _, f := range report.ScoreFactors {
+		tw.writefmt("  %s %s\n", p.dim("•"), SanitizeTerminalInline(f))
+	}
+	tw.writeln("")
 }
 
 func writeLegend(tw *textWriter, p palette, groups []severityGroup, opts TextOptions) {

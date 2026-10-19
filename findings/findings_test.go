@@ -67,11 +67,14 @@ func TestGenerateRiskReport(t *testing.T) {
 	}
 
 	report := GenerateRiskReport(findings, []string{"public-github"})
-	if report.RiskScore != RiskScoreCritical {
-		t.Fatalf("expected RiskScoreCritical (%d), got %d", RiskScoreCritical, report.RiskScore)
+	if report.RiskScore < RiskScoreCritical {
+		t.Fatalf("expected critical band (>= %d), got %d", RiskScoreCritical, report.RiskScore)
 	}
 	if report.SafeToShare["public_github"] {
 		t.Fatal("expected not safe for public github")
+	}
+	if len(report.ScoreFactors) == 0 {
+		t.Fatal("expected the score to explain itself")
 	}
 }
 
@@ -114,11 +117,20 @@ func TestGenerateRiskReportManyDuplicates(t *testing.T) {
 		})
 	}
 	report := GenerateRiskReport(fs, []string{"public-github", "ai-context"})
-	if report.RiskScore != RiskScoreMedium {
-		t.Fatalf("expected RiskScoreMedium for medium severity findings, got %d", report.RiskScore)
-	}
 	if len(report.Findings) != 1000 {
 		t.Fatalf("expected 1000 findings, got %d", len(report.Findings))
+	}
+
+	// A thousand weak matches should raise the score above a single one —
+	// volume is evidence — but must not saturate it to critical, because each
+	// individually is a coin flip. The two properties pull in opposite
+	// directions on purpose; assert both.
+	single := GenerateRiskReport(fs[:1], nil)
+	if report.RiskScore <= single.RiskScore {
+		t.Fatalf("volume should raise the score: one=%d, many=%d", single.RiskScore, report.RiskScore)
+	}
+	if report.RiskScore >= RiskScoreCritical {
+		t.Fatalf("a tail of 30%%-confident guesses must not read as critical, got %d", report.RiskScore)
 	}
 	if report.SafeToShare["public_github"] {
 		t.Fatal("medium risk should not be safe for public github")
@@ -134,9 +146,15 @@ func TestGenerateRiskReportMixedSeverities(t *testing.T) {
 		{Type: "Critical Item", Severity: SeverityCritical, Tags: []string{"critical"}},
 	}
 	report := GenerateRiskReport(fs, nil)
-	// Highest severity is Critical → RiskScoreHigh (no production creds or private key)
-	if report.RiskScore != RiskScoreHigh {
-		t.Fatalf("expected RiskScoreHigh for critical finding without production tags, got %d", report.RiskScore)
+	// These findings carry no confidence at all, which is not a real scan: the
+	// rules always set one. It is the worst case for the model, and the right
+	// answer is that an unqualified critical-severity match is concerning but
+	// not treated as a confirmed live credential.
+	if report.RiskScore < RiskScoreMedium {
+		t.Fatalf("expected at least medium band (>= %d), got %d", RiskScoreMedium, report.RiskScore)
+	}
+	if report.RiskScore >= RiskScoreCritical {
+		t.Fatalf("zero-confidence findings should not reach critical, got %d", report.RiskScore)
 	}
 	if len(report.Findings) != 5 {
 		t.Fatalf("expected 5 findings, got %d", len(report.Findings))
@@ -189,13 +207,14 @@ func TestRiskScoreEdgeCases(t *testing.T) {
 		{RiskScore(-1), "none"},
 		{RiskScore(0), "none"},
 		{RiskScore(1), "none"},
-		{RiskScore(24), "none"},
-		{RiskScore(25), "low"},
-		{RiskScore(49), "low"},
-		{RiskScore(50), "medium"},
-		{RiskScore(74), "medium"},
-		{RiskScore(75), "high"},
-		{RiskScore(99), "high"},
+		{RiskScore(19), "none"},
+		{RiskScore(20), "low"},
+		{RiskScore(44), "low"},
+		{RiskScore(45), "medium"},
+		{RiskScore(67), "medium"},
+		{RiskScore(68), "high"},
+		{RiskScore(84), "high"},
+		{RiskScore(85), "critical"},
 		{RiskScore(100), "critical"},
 		{RiskScore(999), "critical"},
 	}
