@@ -7,7 +7,7 @@ A policy-driven secrets scanner for code repositories. Detects credentials, API 
 ```bash
 brew install hxmbl/tap/minesweep
 ```
-<sub>Latest ver: v2.4.0</sub>
+<sub>Latest ver: v2.4.1</sub>
 
 Or from source:
 
