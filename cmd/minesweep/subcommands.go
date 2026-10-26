@@ -19,11 +19,11 @@ const configTemplate = `# MineSweep configuration
 # Every option is optional - delete anything you do not need.
 # Command-line flags override values in this file.
 
-# Policy profile used to decide whether findings block, warn, or redact.
+# Policy profile used to decide whether suspected leaks block, warn, or redact.
 # Built-in profiles: default, developer, enterprise, public-github
 profile: default
 
-# Minimum severity that makes the scanner exit non-zero (useful as a CI gate).
+# Minimum severity that makes the scanner exit non-zero (useful as a CI tripwire).
 # One of: info, low, medium, high, critical
 #
 # Append @CONFIDENCE to require confidence as well as severity, so a finding has
@@ -44,7 +44,7 @@ fail_on: low
 # "minesweep trust" is the one that works from inside the pre-commit hook, which
 # cannot pass flags. See "minesweep trust --help".
 
-# Only report findings at or above this severity.
+# Only report suspected leaks at or above this severity.
 # min_severity: low
 
 # Hide findings whose confidence is below this threshold (0.0 - 1.0).
@@ -59,7 +59,7 @@ include_test_files: false
 # Base branch used by "minesweep --diff" (pull-request scanning).
 # diff_base: main
 
-# Record known findings here so only NEW ones are reported later.
+# Record known findings here so only NEW leads are reported later.
 # Create once with: minesweep --update-baseline --baseline .minesweep-baseline.json .
 # baseline_file: .minesweep-baseline.json
 

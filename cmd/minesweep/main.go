@@ -79,13 +79,13 @@ Typical workflows:
   Known findings ..... minesweep --update-baseline --baseline .ms-baseline.json .
   Own repository ..... minesweep trust .
 
-Exit codes: 0 = clean (or below --fail-on), 1 = findings at or above threshold,
-2 = the scan was incomplete, so its answer is not trustworthy.`
+Exit codes: 0 = clear (or below --fail-on), 1 = findings at or above threshold,
+2 = the sweep was incomplete, so its all-clear cannot be trusted.`
 
 func main() {
 	root := &cobra.Command{
 		Use:           "minesweep [path]",
-		Short:         "MineSweep - policy engine for secrets and sensitive data",
+		Short:         "MineSweep - sweep your code for exposed secrets before they blow up",
 		Long:          rootLongDesc,
 		Args:          cobra.ExactArgs(1),
 		Version:       displayVersion(),
@@ -765,7 +765,7 @@ func scanAndReport(scanPath string) (int, error) {
 	// found something": a truncated scan with no findings is the result most
 	// likely to be trusted wrongly.
 	if reportData != nil && reportData.Incomplete {
-		fmt.Fprintf(os.Stderr, "\nminesweep: INCOMPLETE SCAN — results do not cover the whole target.\n")
+		fmt.Fprintf(os.Stderr, "\nminesweep: INCOMPLETE SWEEP — parts of the target remain unchecked.\n")
 		for _, reason := range reportData.IncompleteReasons {
 			fmt.Fprintf(os.Stderr, "  - %s\n", reason)
 		}
@@ -877,13 +877,13 @@ func nextStepHints(scanPath string, data *findings.RiskReport) []string {
 
 	top := git.TopLevel(scanPath)
 	if top != "" && hasFindings && !hasPreCommitHook(top) {
-		hints = append(hints, "Block secrets before every commit:\n      minesweep install-hooks")
+		hints = append(hints, "Defuse leaks before every commit:\n      minesweep install-hooks")
 	}
 
 	if !cfg.Verbose && !cfg.DangerouslyShowSecrets {
-		hints = append(hints, "Show hashed values and context:\n      minesweep -v .\n    Reveal raw secrets only when needed:\n      minesweep -v --dangerously-show-secrets .")
+		hints = append(hints, "Inspect suspected mines and context:\n      minesweep -v .\n    Reveal raw secret values only when needed:\n      minesweep -v --dangerously-show-secrets .")
 	} else if cfg.Verbose && !cfg.DangerouslyShowSecrets {
-		hints = append(hints, "Reveal raw secret values:\n      minesweep -v --dangerously-show-secrets .")
+		hints = append(hints, "Reveal raw secret values only when needed:\n      minesweep -v --dangerously-show-secrets .")
 	}
 
 	if hasFindings && !showSnippets && len(hints) < 3 {
@@ -919,7 +919,7 @@ const preCommitHook = `#!/bin/sh
 # MineSweep pre-commit hook
 # minesweep-pre-commit-hook v1
 #
-# Scans staged files for secrets before every commit.
+# Sweeps staged files for exposed secrets before every commit.
 
 # Resolve the scanner binary. We deliberately never execute a minesweep
 # binary from inside the repository: a malicious checkout could ship one.
@@ -942,7 +942,7 @@ fi
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR)
 [ -z "$STAGED_FILES" ] && exit 0
 
-echo "minesweep: scanning staged files..."
+echo "minesweep: sweeping staged files for exposed secrets..."
 
 # Scan the staged index directly. Materializing staged blobs into a temp
 # directory read the working tree for present files, missing staged data on
@@ -953,7 +953,7 @@ EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then
     echo ""
-    echo "minesweep: secrets detected in staged files!"
+    echo "minesweep: suspected secrets in staged files — defuse them before committing."
     echo "To bypass: git commit --no-verify"
     exit 1
 fi

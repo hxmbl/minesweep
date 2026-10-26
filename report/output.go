@@ -60,7 +60,7 @@ func WriteText(w io.Writer, report *findings.RiskReport, opts TextOptions) error
 }
 
 func writeCleanReport(tw *textWriter, p palette, report *findings.RiskReport) error {
-	tw.writeln(p.green("✓") + " No secrets or sensitive data detected.")
+	tw.writeln(p.green("✓") + " No live mines found; the sweep is clear.")
 	writeCoverageNotes(tw, p, report, "  ")
 	if report.FilesScanned > 0 {
 		stats := fmt.Sprintf("%d file", report.FilesScanned)
@@ -81,13 +81,13 @@ func writeHeader(tw *textWriter, p palette, report *findings.RiskReport) {
 	header := fmt.Sprintf("Risk score: %s (%d/100)", score, int(report.RiskScore))
 	switch {
 	case report.RiskScore >= findings.RiskScoreCritical:
-		tw.writeln(p.boldRed(header) + p.gray(" — credentials detected, rotation required"))
+		tw.writeln(p.boldRed(header) + p.gray(" — live credentials found; rotate them now"))
 	case report.RiskScore >= findings.RiskScoreHigh:
-		tw.writeln(p.boldYellow(header) + p.gray(" — not safe to share publicly or with AI tools"))
+		tw.writeln(p.boldYellow(header) + p.gray(" — handle with care; not safe to share publicly or with AI tools"))
 	case report.RiskScore >= findings.RiskScoreMedium:
-		tw.writeln(p.yellow(header) + p.gray(" — review before sharing"))
+		tw.writeln(p.yellow(header) + p.gray(" — inspect these leads before sharing"))
 	default:
-		tw.writeln(p.cyan(header) + p.gray(" — verify findings before sharing"))
+		tw.writeln(p.cyan(header) + p.gray(" — check these signals before sharing"))
 	}
 	tw.writefmt("%s\n\n", pluralize(report.Findings, "finding"))
 	writeCounts(tw, p, groupBySeverity(report.Findings))
@@ -129,7 +129,7 @@ func writeIncomplete(tw *textWriter, p palette, report *findings.RiskReport) {
 	if !report.Incomplete {
 		return
 	}
-	tw.writeln(p.boldRed("INCOMPLETE SCAN — results do not cover the whole target."))
+	tw.writeln(p.boldRed("INCOMPLETE SWEEP — parts of the target remain unchecked."))
 	for _, reason := range report.IncompleteReasons {
 		tw.writeln(p.yellow("  - " + reason))
 	}
@@ -192,7 +192,7 @@ func writeLegend(tw *textWriter, p palette, groups []severityGroup, opts TextOpt
 	}
 	var legend []string
 	if seen[findings.ActionBlock] {
-		legend = append(legend, "block: must fix before sharing")
+		legend = append(legend, "block: defuse before sharing")
 	}
 	if seen[findings.ActionRedact] {
 		// The legend must not claim a value is hidden when the report is
@@ -206,7 +206,7 @@ func writeLegend(tw *textWriter, p palette, groups []severityGroup, opts TextOpt
 		}
 	}
 	if seen[findings.ActionWarn] {
-		legend = append(legend, "warn: review recommended")
+		legend = append(legend, "warn: inspect recommended")
 	}
 	if len(legend) == 0 {
 		return

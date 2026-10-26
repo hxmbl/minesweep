@@ -1,6 +1,6 @@
 # MineSweep
 
-A policy-driven secrets scanner for code repositories. Detects credentials, API keys, and other sensitive data, then evaluates them against configurable policies.
+A policy-driven secrets scanner for code repositories. Sweep for exposed credentials, API keys, and other sensitive data before they blow up; configurable policies decide what to flag, redact, or block.
 
 ## Install
 
@@ -30,7 +30,7 @@ minesweep explain aws-access-key-id
 Rules, the default policy, and profiles are embedded — it works out of the box. A clean scan prints:
 
 ```
-✓ No secrets or sensitive data detected.
+✓ No live mines found; the sweep is clear.
   Scanned 42 files in 0.8s.
 ```
 

@@ -79,14 +79,14 @@ func WriteGitHubAnnotations(w io.Writer, annotations []GitHubAnnotation) error {
 // than were reported is worse than no summary, because a reader stops looking.
 func WriteGitHubWorkflowSummary(w io.Writer, annotations []GitHubAnnotation) error {
 	if len(annotations) == 0 {
-		_, err := fmt.Fprintln(w, "No secrets detected!")
+		_, err := fmt.Fprintln(w, "No live mines detected — all clear!")
 		return err
 	}
 
 	if _, err := fmt.Fprint(w, "## MineSweep Results\n\n"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "Found **%d** potential secrets:\n\n", len(annotations)); err != nil {
+	if _, err := fmt.Fprintf(w, "Found **%d** potential leaks to defuse:\n\n", len(annotations)); err != nil {
 		return err
 	}
 
