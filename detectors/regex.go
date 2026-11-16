@@ -33,6 +33,9 @@ type Rule struct {
 	// Allowlist holds gitleaks-style post-match suppression semantics for
 	// imported rules. Native rules use file_filter and inline ignores.
 	Allowlist []*importedAllowlist `yaml:"-"`
+	// PathRegex, when set, restricts the rule to files whose path matches this
+	// regular expression (used for gitleaks rule-level path constraints).
+	PathRegex *regexp.Regexp `yaml:"-"`
 	// BuiltIn marks a rule compiled in Go rather than loaded from a rule file.
 	// Such rules have no regex to show and cannot be overridden from a rules
 	// directory; `explain` reports them so their IDs are not mysterious.
@@ -236,6 +239,9 @@ func (d *RegexDetector) Detect(file *filesystem.File) []findings.Finding {
 	var li *filesystem.LineIndex
 	for _, rule := range d.rules {
 		if !matchesFileFilter(rule.FileFilter, base) {
+			continue
+		}
+		if rule.PathRegex != nil && !rule.PathRegex.MatchString(file.Path) && !rule.PathRegex.MatchString(file.RelPath()) {
 			continue
 		}
 		for _, pat := range rule.Patterns {
