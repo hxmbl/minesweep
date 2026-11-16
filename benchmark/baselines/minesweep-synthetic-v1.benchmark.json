@@ -1,0 +1,17 @@
+{
+  "benchmark": true,
+  "path": "/Users/hxmbl/Projects/minesweep/benchmark/corpus/synthetic-v1",
+  "runs": 3,
+  "files": 12,
+  "bytes": 3039,
+  "findings": 13,
+  "times_ms": {
+    "min": 11.183844,
+    "median": 12.060228,
+    "mean": 12.358727,
+    "max": 13.832109
+  },
+  "files_per_sec": 970.9737904235607,
+  "bytes_per_sec": 245899.11242476673,
+  "mean_memory_bytes": 670594
+}
