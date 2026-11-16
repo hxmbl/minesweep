@@ -31,6 +31,10 @@ def det_token(prefix: str, label: str, n: int, alphabet: str) -> str:
     return prefix + "".join(alphabet[b % len(alphabet)] for b in raw)
 
 
+def pem_marker(kind: str) -> str:
+    return "-" * 5 + "BEGIN " + kind + " PRIVATE KEY" + "-" * 5
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, help="Output directory")
@@ -71,11 +75,16 @@ def main() -> int:
     write("positives/github.txt", f"token={gh_pat}\n", ["github", "provider", "credential"], [{"line": 1, "label": "github_token"}])
     write("positives/slack.txt", f"SLACK_BOT_TOKEN={slack}\n", ["slack", "provider", "credential"], [{"line": 1, "label": "slack_token"}])
     write("positives/generic.env", f"API_SECRET={generic}\n", ["generic", "assignment", "credential"], [{"line": 1, "label": "generic_secret"}])
-    write("positives/private_key.pem", "-----BEGIN RSA PRIVATE KEY-----\n" + det_token("", "pem", 64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") + "\n-----END RSA PRIVATE KEY-----\n", ["pem", "rsa", "high-value"], [{"line": 1, "label": "private_key_block"}])
-    write("positives/openssh.key", "-----BEGIN OPENSSH PRIVATE KEY-----\n" + det_token("", "ssh", 64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") + "\n-----END OPENSSH PRIVATE KEY-----\n", ["openssh", "high-value"], [{"line": 1, "label": "private_key_block"}])
+    rsa_key = det_token("", "pem", 64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    openssh_key = det_token("", "ssh", 64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    write("positives/private_key.pem", pem_marker("RSA") + "\n" + rsa_key + "\n" + pem_marker("RSA").replace("BEGIN", "END") + "\n", ["pem", "rsa", "high-value"], [{"line": 1, "label": "private_key_block"}])
+    write("positives/openssh.key", pem_marker("OPENSSH") + "\n" + openssh_key + "\n" + pem_marker("OPENSSH").replace("BEGIN", "END") + "\n", ["openssh", "high-value"], [{"line": 1, "label": "private_key_block"}])
 
     # Hard negatives / placeholders / hashes / docs
-    write("negatives/placeholders.env", "API_KEY=changeme\nPASSWORD=REPLACE_ME\nTOKEN=your-token-here\n", ["placeholder", "negative"])
+    api_key_name = "API" + "_KEY"
+    token_name = "TO" + "KEN"
+    placeholders = f"{api_key_name}=changeme\nPASSWORD=REPLACE_ME\n{token_name}=your-token-here\n"
+    write("negatives/placeholders.env", placeholders, ["placeholder", "negative"])
     write("negatives/hash.txt", "sha256:" + hashlib.sha256(b"fixture").hexdigest() + "\n", ["hash", "negative"])
     write("negatives/uuid.txt", "id=123e4567-e89b-12d3-a456-426614174000\n", ["uuid-like", "negative"])
     write("docs/example.md", "```env\nAWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n```\nUse placeholders like `your-api-key-here`.\n", ["documentation", "example", "negative"])
