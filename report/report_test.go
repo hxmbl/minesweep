@@ -47,7 +47,7 @@ func TestWriteTextEmptyReport(t *testing.T) {
 	var buf bytes.Buffer
 	WriteText(&buf, &report, TextOptions{})
 	output := buf.String()
-	if !strings.Contains(output, "No secrets or sensitive data detected.") {
+	if !strings.Contains(output, "No live mines found; the sweep is clear.") {
 		t.Fatal("expected clean summary in empty report")
 	}
 }

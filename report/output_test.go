@@ -189,7 +189,7 @@ func TestWriteTextShowsIncomplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "INCOMPLETE SCAN") {
+	if !strings.Contains(out, "INCOMPLETE SWEEP") {
 		t.Errorf("expected incomplete banner, got:\n%s", out)
 	}
 	if !strings.Contains(out, "memory limit exceeded") {
