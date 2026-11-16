@@ -25,6 +25,7 @@ fi
 
 python3 "$ROOT/benchmark/summarize_minesweep.py" \
   --manifest "$CORPUS_DIR/manifest.json" \
+  --ground-truth "$CORPUS_DIR/ground_truth.jsonl" \
   --findings "$OUT_DIR/minesweep-findings.json" \
   --benchmark "$OUT_DIR/minesweep-benchmark.json" \
   --out "$OUT_DIR/minesweep-summary.json"

@@ -7,10 +7,15 @@ This directory contains a **reproducible baseline harness** for MineSweep perfor
 - Deterministic MineSweep-owned synthetic corpus generator: `generate_synthetic_corpus.py`
   - Includes provider-like credentials, generic assignments, PEM/SSH material, placeholders, hashes, UUID-like values, and documentation examples/hard negatives.
   - Generated deterministically from a fixed seed; no real credentials.
+  - Emits `manifest.json` and line-level `ground_truth.jsonl` for reproducible synthetic evaluation.
 - One-command MineSweep baseline run: `run_minesweep_baseline.sh [results_dir]`
   - Generates/refreshes corpus at `benchmark/corpus/synthetic-v1`
   - Runs `minesweep --benchmark --runs 3 --json` and `minesweep --json`
   - Produces `minesweep-benchmark.json`, `minesweep-findings.json`, `minesweep-summary.json`
+  - Computes file-level proxies and line-level span-proxy precision/recall/F1 against synthetic ground truth
+- Committed baseline artifacts: `benchmark/baselines/minesweep-synthetic-v1.*.json`
+- Generic span evaluator for external labelled datasets: `evaluate_spans.py`
+- Comparative runner with raw output/version capture: `compare_scanners.py` (MineSweep + optional Gitleaks)
 - Memory reporting in `--benchmark` distinguishes total allocation/run, retained heap (mean/max), and process peak RSS when available.
 
 ## Reproduce

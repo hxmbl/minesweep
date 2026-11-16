@@ -51,24 +51,28 @@ def main() -> int:
     (out / "docs").mkdir(parents=True, exist_ok=True)
 
     manifest = {"seed": RNG_SEED, "files": []}
+    ground_truth = []
 
-    def write(rel: str, content: str, labels):
+    def write(rel: str, content: str, labels, spans=None):
         p = out / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         manifest["files"].append({"path": rel, "labels": labels, "bytes": len(content.encode("utf-8"))})
+        for sp in (spans or []):
+            rec = {"file": rel, **sp}
+            ground_truth.append(rec)
 
     aws_key = "AKIA" + det_token("", "aws-akia", 16, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
     gh_pat = "ghp_" + det_token("", "ghp", 36, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
     slack = "xoxb-" + det_token("", "slack1", 10, "0123456789") + "-" + det_token("", "slack2", 12, "0123456789") + "-" + det_token("", "slack3", 24, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
     generic = det_token("", "generic", 40, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
-    write("positives/aws.env", f"AWS_ACCESS_KEY_ID={aws_key}\n", ["aws", "provider", "credential"])
-    write("positives/github.txt", f"token={gh_pat}\n", ["github", "provider", "credential"])
-    write("positives/slack.txt", f"SLACK_BOT_TOKEN={slack}\n", ["slack", "provider", "credential"])
-    write("positives/generic.env", f"API_SECRET={generic}\n", ["generic", "assignment", "credential"])
-    write("positives/private_key.pem", "-----BEGIN RSA PRIVATE KEY-----\n" + det_token("", "pem", 64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") + "\n-----END RSA PRIVATE KEY-----\n", ["pem", "rsa", "high-value"])
-    write("positives/openssh.key", "-----BEGIN OPENSSH PRIVATE KEY-----\n" + det_token("", "ssh", 64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") + "\n-----END OPENSSH PRIVATE KEY-----\n", ["openssh", "high-value"])
+    write("positives/aws.env", f"AWS_ACCESS_KEY_ID={aws_key}\n", ["aws", "provider", "credential"], [{"line": 1, "label": "aws_access_key_id"}])
+    write("positives/github.txt", f"token={gh_pat}\n", ["github", "provider", "credential"], [{"line": 1, "label": "github_token"}])
+    write("positives/slack.txt", f"SLACK_BOT_TOKEN={slack}\n", ["slack", "provider", "credential"], [{"line": 1, "label": "slack_token"}])
+    write("positives/generic.env", f"API_SECRET={generic}\n", ["generic", "assignment", "credential"], [{"line": 1, "label": "generic_secret"}])
+    write("positives/private_key.pem", "-----BEGIN RSA PRIVATE KEY-----\n" + det_token("", "pem", 64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") + "\n-----END RSA PRIVATE KEY-----\n", ["pem", "rsa", "high-value"], [{"line": 1, "label": "private_key_block"}])
+    write("positives/openssh.key", "-----BEGIN OPENSSH PRIVATE KEY-----\n" + det_token("", "ssh", 64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") + "\n-----END OPENSSH PRIVATE KEY-----\n", ["openssh", "high-value"], [{"line": 1, "label": "private_key_block"}])
 
     # Hard negatives / placeholders / hashes / docs
     write("negatives/placeholders.env", "API_KEY=changeme\nPASSWORD=REPLACE_ME\nTOKEN=your-token-here\n", ["placeholder", "negative"])
@@ -78,7 +82,10 @@ def main() -> int:
     write("negatives/multiline_noise.txt", "password_label=ok\nnote=not_a_secret\n" + ("lorem ipsum dolor sit amet\n" * 20), ["noise", "negative"])
 
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"wrote {len(manifest['files'])} files to {out}")
+    with (out / "ground_truth.jsonl").open("w", encoding="utf-8") as f:
+        for rec in ground_truth:
+            f.write(json.dumps(rec, sort_keys=True) + "\n")
+    print(f"wrote {len(manifest['files'])} files and {len(ground_truth)} ground-truth spans to {out}")
     return 0
 
 
