@@ -35,3 +35,16 @@ This is **not yet** the full STRM-649 acceptance target:
 - Integrate a span-labelled corpus (e.g. CredDetX) with recorded revision/hash/licensing.
 - Compute span-level metrics, per-category recall, hard-negative FP rates, confidence intervals/repeated runs where justified.
 - Preserve raw per-finding outputs and full provenance/environment metadata.
+
+## Comparative runs (when tools are available)
+
+`compare_scanners.py` runs MineSweep and (if installed) Gitleaks on the same corpus and preserves raw outputs + command/version metadata:
+
+```bash
+./benchmark/compare_scanners.py \
+  --corpus ./benchmark/corpus/synthetic-v1 \
+  --manifest ./benchmark/corpus/synthetic-v1/manifest.json \
+  --out ./benchmark/results/compare
+```
+
+For full STRM-649 compliance, pin tool versions/configs, use a span-labelled dataset (e.g. CredDetX with recorded revision/hash/licensing), compute span-level P/R/F1 and per-category metrics, and include reviewed real-repository/injected-canary evaluation separately.
