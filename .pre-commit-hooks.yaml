@@ -1,0 +1,19 @@
+- id: minesweep
+  name: MineSweep secret scan
+  description: Scan staged files for secrets and credentials with MineSweep.
+  entry: minesweep --staged --fail-on high .
+  language: system
+  pass_filenames: false
+  require_serial: true
+  always_run: true
+  stages: [pre-commit]
+
+- id: minesweep-strict
+  name: MineSweep secret scan (strict)
+  description: Strict MineSweep scan for CI-style policy (disables inline suppressions).
+  entry: minesweep --staged --fail-on high --no-inline-suppressions .
+  language: system
+  pass_filenames: false
+  require_serial: true
+  always_run: true
+  stages: [pre-commit]
