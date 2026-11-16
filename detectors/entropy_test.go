@@ -203,3 +203,37 @@ func TestEntropyDetectorSourceLine(t *testing.T) {
 	}
 	t.Fatal("finding not found")
 }
+
+func TestEntropyDetectorKeywordIsCandidateLocal(t *testing.T) {
+	d := NewEntropyDetector()
+
+	// Two high-entropy candidates on one line: keyword belongs to the first
+	// assignment only. The second candidate's confidence must not be boosted by
+	// unrelated line-wide keyword context.
+	first := "aB3dE5gH7jK9mN1pQ3sT5vW8yA2cE4fG6hI0kL2mN4"
+	second := "zY8xW6vU4tS2rQ0pO9nM7lK5jI3hG1fE2dC4bA6qR8"
+	line := "api_key=" + first + " value=" + second + "\n"
+	file := &filesystem.File{Path: "test.txt", Content: []byte(line)}
+	results := d.Detect(file)
+
+	find := func(v string) (float64, bool) {
+		for _, f := range results {
+			if f.Value == v {
+				return f.Confidence, true
+			}
+		}
+		return 0, false
+	}
+
+	confFirst, okFirst := find(first)
+	confSecond, okSecond := find(second)
+	if !okFirst || !okSecond {
+		t.Fatalf("expected both candidates, got first=%v second=%v results=%+v", okFirst, okSecond, results)
+	}
+	if confFirst <= confSecond {
+		t.Errorf("expected local keyword to boost first candidate only: first=%.2f second=%.2f", confFirst, confSecond)
+	}
+	if confSecond >= confFirst {
+		t.Errorf("unrelated keyword on line influenced second candidate: first=%.2f second=%.2f", confFirst, confSecond)
+	}
+}
