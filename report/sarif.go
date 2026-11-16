@@ -64,7 +64,7 @@ type SARIFDriver struct {
 type SARIFRule struct {
 	ID                   string       `json:"id"`
 	Name                 string       `json:"name"`
-	Description          SARIFMessage `json:"description"`
+	ShortDescription     SARIFMessage `json:"shortDescription"`
 	HelpURI              string       `json:"helpUri,omitempty"`
 	DefaultConfiguration SARIFConfig  `json:"defaultConfiguration"`
 }
@@ -113,9 +113,9 @@ func WriteSARIF(w io.Writer, report *findings.RiskReport, toolVersion string) er
 		if _, exists := rules[f.RuleID]; !exists {
 			rules[f.RuleID] = len(ruleList)
 			ruleList = append(ruleList, SARIFRule{
-				ID:          f.RuleID,
-				Name:        f.Type,
-				Description: SARIFMessage{Text: SanitizeTerminalInline(f.Reason)},
+				ID:               f.RuleID,
+				Name:             f.Type,
+				ShortDescription: SARIFMessage{Text: SanitizeTerminalInline(f.Reason)},
 				DefaultConfiguration: SARIFConfig{
 					Level: severityToSARIFLevel(f.Severity),
 				},

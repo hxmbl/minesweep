@@ -41,7 +41,7 @@ func TestSARIFCleanReportEmitsEmptyArrays(t *testing.T) {
 
 func TestSARIFRuleIndexPresent(t *testing.T) {
 	report := findings.GenerateRiskReport([]findings.Finding{
-		{Type: "T", RuleID: "rule-b", Severity: findings.SeverityHigh},
+		{Type: "T", RuleID: "rule-b", Reason: "test finding", Severity: findings.SeverityHigh},
 	}, nil)
 
 	var buf bytes.Buffer
@@ -54,7 +54,9 @@ func TestSARIFRuleIndexPresent(t *testing.T) {
 			Tool struct {
 				Driver struct {
 					Rules []struct {
-						ID string `json:"id"`
+						ID               string          `json:"id"`
+						ShortDescription SARIFMessage    `json:"shortDescription"`
+						Description      json.RawMessage `json:"description"`
 					} `json:"rules"`
 				} `json:"driver"`
 			} `json:"tool"`
@@ -71,5 +73,12 @@ func TestSARIFRuleIndexPresent(t *testing.T) {
 	res := parsed.Runs[0].Results[0]
 	if res.RuleID != "rule-b" || res.RuleIndex != 0 {
 		t.Errorf("ruleIndex not wired correctly: %+v", res)
+	}
+	rule := parsed.Runs[0].Tool.Driver.Rules[0]
+	if rule.ShortDescription.Text == "" {
+		t.Error("SARIF rule must include shortDescription")
+	}
+	if len(rule.Description) != 0 {
+		t.Error("SARIF rule must not include the unsupported description property")
 	}
 }

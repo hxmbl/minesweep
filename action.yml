@@ -9,17 +9,48 @@ inputs:
   args:
     description: Scan flags and target, passed to minesweep as-is.
     required: false
-    default: --fail-on high .
+    default: --fail-on high --no-inline-suppressions .
   sarif:
     description: >-
       Write SARIF to this path (relative to the workspace) instead of the
       terminal report. The exit code still decides the step.
     required: false
     default: ""
+  image:
+    description: >-
+      Advanced override: container image to run (for example
+      ghcr.io/hxmbl/minesweep:v2.4.3). By default, exact action refs like
+      @v2.4.3 use the matching image tag; major/moving refs use :v2.
+    required: false
+    default: ""
 
 runs:
-  using: docker
-  # The image docker.yml publishes for each release. The major tag tracks the
-  # newest v2 release, so `uses: hxmbl/minesweep@vX.Y.Z` runs a current v2 scanner.
-  image: docker://ghcr.io/hxmbl/minesweep:v2
-  entrypoint: /usr/local/bin/minesweep-action
+  using: composite
+  steps:
+    - name: Scan with MineSweep
+      shell: bash
+      env:
+        INPUT_ARGS: ${{ inputs.args }}
+        INPUT_SARIF: ${{ inputs.sarif }}
+        INPUT_IMAGE: ${{ inputs.image }}
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_REPO: ${{ github.action_repository }}
+      run: |
+        set -euo pipefail
+        image="$INPUT_IMAGE"
+        if [ -z "$image" ]; then
+          if [[ "${ACTION_REF:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            image="ghcr.io/hxmbl/minesweep:${ACTION_REF}"
+          else
+            image="ghcr.io/hxmbl/minesweep:v2"
+          fi
+        fi
+        echo "Using MineSweep image: $image"
+        docker run --rm \
+          -v "$GITHUB_WORKSPACE:/github/workspace" \
+          -w /github/workspace \
+          -e GITHUB_WORKSPACE=/github/workspace \
+          -e INPUT_ARGS="$INPUT_ARGS" \
+          -e INPUT_SARIF="$INPUT_SARIF" \
+          --entrypoint /usr/local/bin/minesweep-action \
+          "$image"

@@ -31,12 +31,22 @@ type GitleaksRule struct {
 	ID          string              `toml:"id"`
 	Description string              `toml:"description"`
 	Regex       string              `toml:"regex"`
+	Path        string              `toml:"path"`
 	SecretGroup int                 `toml:"secretGroup"`
 	Entropy     float64             `toml:"entropy"`
 	Keywords    []string            `toml:"keywords"`
 	Tags        []string            `toml:"tags"`
 	Allowlist   *GitleaksAllowlist  `toml:"allowlist"`  // legacy singular form
 	Allowlists  []GitleaksAllowlist `toml:"allowlists"` // modern array form
+	// Composite/required rule constructs are not represented in MineSweep's
+	// rule model. Presence is detected so imports can fail closed or warn
+	// explicitly instead of silently dropping security-relevant constraints.
+	Required []GitleaksRequiredRule `toml:"required"`
+}
+
+type GitleaksRequiredRule struct {
+	Regex string `toml:"regex"`
+	Path  string `toml:"path"`
 }
 
 type GitleaksAllowlist struct {
@@ -103,8 +113,12 @@ func LoadGitleaksRules(data []byte, sourceName string) ([]Rule, error) {
 			warnGitleaks(sourceName, fmt.Sprintf("rule #%d", i+1), "missing id; skipped")
 			continue
 		}
-		if gr.Regex == "" {
+		if gr.Regex == "" && len(gr.Required) == 0 {
 			warnGitleaks(sourceName, gr.ID, "no regex; skipped")
+			continue
+		}
+		if len(gr.Required) > 0 {
+			warnGitleaks(sourceName, gr.ID, "composite/required rules are not fully supported; rule may not enforce required conditions and was skipped to avoid silent policy drift")
 			continue
 		}
 
@@ -120,9 +134,10 @@ func LoadGitleaksRules(data []byte, sourceName string) ([]Rule, error) {
 		}
 
 		if len(gr.Keywords) > 0 {
-			// Advisory-only in gitleaks; ignored for gating here. See docs.
-			// Nothing to do — noted for parity reporting.
-			_ = gr.Keywords
+			// Advisory-only in gitleaks; MineSweep does not require keyword
+			// preconditions for imported regex rules. This is intentionally not a
+			// weakening exclusion, but it is not full parity.
+			warnGitleaks(sourceName, gr.ID, "keywords are advisory in the source config and are not enforced by MineSweep import")
 		}
 		if len(gr.Tags) == 0 {
 			gr.Tags = nil
@@ -136,6 +151,14 @@ func LoadGitleaksRules(data []byte, sourceName string) ([]Rule, error) {
 			Severity:    gitleaksSeverity(gr.ID),
 			Tags:        append(append([]string{"imported-gitleaks"}, gr.Tags...), "gitleaks"),
 			Patterns:    []Pattern{pattern},
+		}
+		if strings.TrimSpace(gr.Path) != "" {
+			re, err := regexp.Compile(gr.Path)
+			if err != nil {
+				warnGitleaks(sourceName, gr.ID, fmt.Sprintf("rule path regex %q failed to compile: %v; rule skipped", gr.Path, err))
+				continue
+			}
+			rule.PathRegex = re
 		}
 
 		blocks := buildAllowlistSet(gr.Allowlists, gr.Allowlist, sourceName, gr.ID)
@@ -210,7 +233,14 @@ func compileGitleaksAllowlist(ga *GitleaksAllowlist, source, subject string) *im
 		warnGitleaks(source, subject, fmt.Sprintf("unknown allowlist condition %q; using OR", ga.Condition))
 	}
 	switch strings.ToLower(ga.RegexTarget) {
-	case "", "secret":
+	case "", "secret", "match":
+		// "match" targets the regex match/captured value in Gitleaks; MineSweep's
+		// suppression checks run against the extracted secret value. Treat as
+		// value-targeted for compatibility while full match-semantics parity is
+		// validated by fixtures.
+		if strings.EqualFold(ga.RegexTarget, "match") {
+			warnGitleaks(source, subject, "regexTarget \"match\" imported as value-targeted suppression (behavioral parity should be validated)")
+		}
 	case "line":
 		al.targetLine = true
 	default:

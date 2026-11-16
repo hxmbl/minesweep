@@ -13,7 +13,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o minesweep ./cmd/minesweep
 
 # Final stage
-FROM alpine:3.20
+FROM alpine:3.21
 
 # git: --diff, --staged and --history read the repository.
 RUN apk add --no-cache ca-certificates git

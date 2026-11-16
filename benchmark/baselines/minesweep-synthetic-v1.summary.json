@@ -1,0 +1,48 @@
+{
+  "corpus": {
+    "negative_or_hard_negative_files": 5,
+    "positive_files": 6,
+    "seed": "minesweep-strm-649-v1",
+    "total_files": 11
+  },
+  "detection_proxy_file_level": {
+    "fn_file_paths": [],
+    "fn_files": 0,
+    "fp_file_paths": [],
+    "fp_files": 0,
+    "note": "File-level proxy only; not span-level precision/recall/F1. Use as a reproducible baseline until span-labelled comparative harness is complete.",
+    "total_findings": 13,
+    "tp_file_paths": [
+      "positives/aws.env",
+      "positives/github.txt",
+      "positives/slack.txt",
+      "positives/generic.env",
+      "positives/private_key.pem",
+      "positives/openssh.key"
+    ],
+    "tp_files": 6
+  },
+  "limitations": [
+    "Synthetic MineSweep-owned corpus only; no CredDetX integration or pinned gitleaks/TruffleHog comparison yet.",
+    "Metrics are file-level proxies, not span-level P/R/F1.",
+    "Real-repository corpus and injected-canary evaluation are not included.",
+    "Results should not be presented as proof of superiority over other scanners."
+  ],
+  "performance": {
+    "benchmark": true,
+    "bytes": 3039,
+    "bytes_per_sec": 245899.11242476673,
+    "files": 12,
+    "files_per_sec": 970.9737904235607,
+    "findings": 13,
+    "mean_memory_bytes": 670594,
+    "path": "/Users/hxmbl/Projects/minesweep/benchmark/corpus/synthetic-v1",
+    "runs": 3,
+    "times_ms": {
+      "max": 13.832109,
+      "mean": 12.358727,
+      "median": 12.060228,
+      "min": 11.183844
+    }
+  }
+}

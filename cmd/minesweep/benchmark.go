@@ -6,17 +6,21 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"syscall"
 	"time"
 
 	"minesweep/engine"
 )
 
 type benchRun struct {
-	Duration time.Duration
-	Files    int
-	Bytes    int64
-	Findings int
-	MemBytes int64
+	Duration          time.Duration
+	Files             int
+	Bytes             int64
+	Findings          int
+	TotalAllocBytes   int64
+	RetainedHeapBytes int64
+	PeakRSSBytes      int64
+	PeakRSSAvailable  bool
 }
 
 type benchSummary struct {
@@ -31,7 +35,11 @@ type benchSummary struct {
 	MeanDur time.Duration
 	MaxDur  time.Duration
 
-	MeanMem int64
+	MeanTotalAlloc   int64
+	MeanRetainedHeap int64
+	MaxRetainedHeap  int64
+	PeakRSSBytes     int64
+	PeakRSSAvailable bool
 }
 
 func runBenchmark(scanPath string, jsonOut bool, runs int) error {
@@ -61,6 +69,7 @@ func runBenchmark(scanPath string, jsonOut bool, runs int) error {
 		runtime.GC()
 		var before runtime.MemStats
 		runtime.ReadMemStats(&before)
+		rssBefore, _ := peakRSSBytes()
 
 		start := time.Now()
 		rep, err := eng.Run(scanPath)
@@ -71,20 +80,27 @@ func runBenchmark(scanPath string, jsonOut bool, runs int) error {
 
 		var after runtime.MemStats
 		runtime.ReadMemStats(&after)
+		rssAfter, rssOK := peakRSSBytes()
 
-		var memDelta int64
-		if after.Alloc >= before.Alloc {
-			memDelta = int64(after.Alloc - before.Alloc) //nolint:gosec // heap alloc delta is bounded well below MaxInt64
-		} else {
-			memDelta = -int64(before.Alloc - after.Alloc) //nolint:gosec // same bound applies to the reversed difference
+		var totalAlloc int64
+		if after.TotalAlloc >= before.TotalAlloc {
+			totalAlloc = int64(after.TotalAlloc - before.TotalAlloc) //nolint:gosec
+		}
+		retained := int64(after.HeapAlloc) //nolint:gosec
+		peakRSS := rssAfter
+		if rssOK && rssBefore > peakRSS {
+			peakRSS = rssBefore
 		}
 
 		results = append(results, benchRun{
-			Duration: elapsed,
-			Files:    rep.FilesScanned,
-			Bytes:    rep.BytesScanned,
-			Findings: len(rep.Findings),
-			MemBytes: memDelta,
+			Duration:          elapsed,
+			Files:             rep.FilesScanned,
+			Bytes:             rep.BytesScanned,
+			Findings:          len(rep.Findings),
+			TotalAllocBytes:   totalAlloc,
+			RetainedHeapBytes: retained,
+			PeakRSSBytes:      peakRSS,
+			PeakRSSAvailable:  rssOK,
 		})
 	}
 
@@ -108,10 +124,24 @@ func summarizeBench(path string, results []benchRun, files int, bytes int64, fin
 	}
 
 	durs := make([]time.Duration, 0, len(results))
-	var memSum int64
+	var totalAllocSum int64
+	var retainedSum int64
+	var maxRetained int64
+	var peakRSS int64
+	peakRSSAvail := false
 	for _, r := range results {
 		durs = append(durs, r.Duration)
-		memSum += r.MemBytes
+		totalAllocSum += r.TotalAllocBytes
+		retainedSum += r.RetainedHeapBytes
+		if r.RetainedHeapBytes > maxRetained {
+			maxRetained = r.RetainedHeapBytes
+		}
+		if r.PeakRSSAvailable {
+			peakRSSAvail = true
+			if r.PeakRSSBytes > peakRSS {
+				peakRSS = r.PeakRSSBytes
+			}
+		}
 	}
 	sorted := append([]time.Duration(nil), durs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
@@ -124,16 +154,20 @@ func summarizeBench(path string, results []benchRun, files int, bytes int64, fin
 	mean := sum / time.Duration(len(durs))
 
 	return benchSummary{
-		Path:     path,
-		Runs:     results,
-		Files:    files,
-		Bytes:    bytes,
-		Findings: findings,
-		MinDur:   minDur,
-		MedDur:   medianDuration(sorted),
-		MeanDur:  mean,
-		MaxDur:   maxDur,
-		MeanMem:  memSum / int64(len(results)),
+		Path:             path,
+		Runs:             results,
+		Files:            files,
+		Bytes:            bytes,
+		Findings:         findings,
+		MinDur:           minDur,
+		MedDur:           medianDuration(sorted),
+		MeanDur:          mean,
+		MaxDur:           maxDur,
+		MeanTotalAlloc:   totalAllocSum / int64(len(results)),
+		MeanRetainedHeap: retainedSum / int64(len(results)),
+		MaxRetainedHeap:  maxRetained,
+		PeakRSSBytes:     peakRSS,
+		PeakRSSAvailable: peakRSSAvail,
 	}
 }
 
@@ -175,7 +209,16 @@ func writeBenchText(s benchSummary) {
 		fmt.Println()
 	}
 
-	printStat("Memory (mean):", formatByteSize(s.MeanMem))
+	fmt.Println("Memory:")
+	printStat("  total alloc/run (mean):", formatByteSize(s.MeanTotalAlloc))
+	printStat("  retained heap (mean):", formatByteSize(s.MeanRetainedHeap))
+	printStat("  retained heap (max):", formatByteSize(s.MaxRetainedHeap))
+	if s.PeakRSSAvailable {
+		printStat("  peak RSS (process):", formatByteSize(s.PeakRSSBytes))
+	} else {
+		printStat("  peak RSS (process):", "unavailable")
+	}
+	printStat("  note:", "Alloc delta is not peak memory; see total alloc, retained heap, and peak RSS")
 }
 
 func writeBenchJSON(s benchSummary) error {
@@ -185,19 +228,31 @@ func writeBenchJSON(s benchSummary) error {
 		Mean   float64 `json:"mean"`
 		Max    float64 `json:"max"`
 	}
+	type memoryJSON struct {
+		TotalAllocBytesMean   int64  `json:"total_alloc_bytes_mean"`
+		RetainedHeapBytesMean int64  `json:"retained_heap_bytes_mean"`
+		RetainedHeapBytesMax  int64  `json:"retained_heap_bytes_max"`
+		PeakRSSBytes          *int64 `json:"peak_rss_bytes"`
+		Note                  string `json:"note"`
+	}
 	type benchJSON struct {
-		Benchmark      bool     `json:"benchmark"`
-		Path           string   `json:"path"`
-		Runs           int      `json:"runs"`
-		Files          int      `json:"files"`
-		Bytes          int64    `json:"bytes"`
-		Findings       int      `json:"findings"`
-		TimesMs        statJSON `json:"times_ms"`
-		FilesPerSec    float64  `json:"files_per_sec,omitempty"`
-		BytesPerSec    float64  `json:"bytes_per_sec,omitempty"`
-		MeanMemoryByte int64    `json:"mean_memory_bytes"`
+		Benchmark   bool       `json:"benchmark"`
+		Path        string     `json:"path"`
+		Runs        int        `json:"runs"`
+		Files       int        `json:"files"`
+		Bytes       int64      `json:"bytes"`
+		Findings    int        `json:"findings"`
+		TimesMs     statJSON   `json:"times_ms"`
+		FilesPerSec float64    `json:"files_per_sec,omitempty"`
+		BytesPerSec float64    `json:"bytes_per_sec,omitempty"`
+		Memory      memoryJSON `json:"memory"`
 	}
 
+	var peak *int64
+	if s.PeakRSSAvailable {
+		v := s.PeakRSSBytes
+		peak = &v
+	}
 	out := benchJSON{
 		Benchmark: true,
 		Path:      s.Path,
@@ -211,7 +266,13 @@ func writeBenchJSON(s benchSummary) error {
 			Mean:   msFloat(s.MeanDur),
 			Max:    msFloat(s.MaxDur),
 		},
-		MeanMemoryByte: s.MeanMem,
+		Memory: memoryJSON{
+			TotalAllocBytesMean:   s.MeanTotalAlloc,
+			RetainedHeapBytesMean: s.MeanRetainedHeap,
+			RetainedHeapBytesMax:  s.MaxRetainedHeap,
+			PeakRSSBytes:          peak,
+			Note:                  "Alloc delta is not peak memory; reports total allocation, retained heap, and process peak RSS when available.",
+		},
 	}
 	if s.MeanDur > 0 {
 		out.FilesPerSec = float64(s.Files) / s.MeanDur.Seconds()
@@ -270,4 +331,22 @@ func formatDurationShort(d time.Duration) string {
 
 func msFloat(d time.Duration) float64 {
 	return float64(d.Nanoseconds()) / 1e6
+}
+
+func peakRSSBytes() (int64, bool) {
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+		return 0, false
+	}
+	rss := ru.Maxrss
+	if rss <= 0 {
+		return 0, false
+	}
+	// Darwin reports bytes, Linux reports kilobytes.
+	switch runtime.GOOS {
+	case "darwin":
+		return rss, true
+	default:
+		return rss * 1024, true
+	}
 }

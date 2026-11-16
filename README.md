@@ -298,6 +298,30 @@ lint-staged and the pre-commit framework all live there. `--force` replaces one
 and saves the original as `pre-commit.pre-minesweep` first. `uninstall-hooks`
 refuses to remove anything it did not install.
 
+#### pre-commit framework
+
+MineSweep also provides a standard [pre-commit](https://pre-commit.com/) hook manifest (`.pre-commit-hooks.yaml`):
+
+```yaml
+repos:
+  - repo: https://github.com/hxmbl/minesweep
+    rev: vX.Y.Z # pin to an immutable release tag
+    hooks:
+      - id: minesweep
+```
+
+Available hooks:
+
+| ID | Entry | Notes |
+| --- | --- | --- |
+| `minesweep` | `minesweep --staged --fail-on high .` | default staged gate |
+| `minesweep-strict` | `minesweep --staged --fail-on high --no-inline-suppressions .` | strict CI-style policy; repository inline suppressions do not bypass the gate |
+
+- Hooks use `language: system` and require `minesweep` to be installed in the environment running pre-commit. Pin `rev` to a MineSweep release tag and install a matching MineSweep version for reproducible behavior.
+- `pass_filenames: false` and `always_run: true` are intentional: MineSweep runs `--staged` against the repository to avoid scanning unrelated files.
+- Exit codes follow MineSweep semantics (`0` clean/below threshold, `1` findings at/above threshold, `2` incomplete scan).
+- A basic manifest smoke test is provided at `scripts/test-precommit-hooks.sh` (runs `pre-commit` end-to-end when installed).
+
 ### Suppressing a known finding
 
 Three mechanisms, in increasing order of bluntness.

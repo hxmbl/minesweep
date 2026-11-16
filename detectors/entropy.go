@@ -2,6 +2,7 @@ package detectors
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"regexp"
 	"strings"
@@ -36,6 +37,76 @@ const (
 )
 
 var secretKeywords = regexp.MustCompile(`(?i)(key|token|secret|password|passwd|credential|auth|api[_-]?key|access[_-]?token|private[_-]?key|secret[_-]?key)`)
+
+// candidateLocalKeyword reports whether secret-like context is associated with
+// the candidate span at [start,end) on this line.
+//
+// Keyword evidence is intentionally local to the candidate: a keyword elsewhere
+// on the line (for example naming a different variable) must not boost an
+// unrelated high-entropy token. We prefer the identifier in an assignment-like
+// form that introduces this candidate (NAME = <candidate> / NAME: <candidate>),
+// falling back to a small window immediately before the candidate for cases
+// without a clean assignment separator.
+func candidateLocalKeyword(line []byte, start, end int) bool {
+	if start < 0 || start > len(line) {
+		return false
+	}
+	// Prefer assignment/identifier context: walk back over optional quotes and
+	// separators to find the identifier naming this value.
+	i := start
+	for i > 0 {
+		switch line[i-1] {
+		case ' ', '\t', '\r', '=', ':', '"', '\'', '`':
+			i--
+		default:
+			goto havePrefix
+		}
+	}
+havePrefix:
+	// Capture the identifier/name token immediately before the separator run.
+	j := i
+	for j > 0 {
+		b := line[j-1]
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-' || b == '.' {
+			j--
+		} else {
+			break
+		}
+	}
+	if j < i {
+		name := line[j:i]
+		if secretKeywords.Match(name) {
+			return true
+		}
+		// Also include a short prefix before the name in case the keyword is part
+		// of a compound like `export SECRET_TOKEN=...` or `my_secret = ...` where
+		// extra context sits immediately adjacent.
+		pre := j
+		if pre > 24 {
+			pre = j - 24
+		}
+		if secretKeywords.Match(line[pre:i]) {
+			return true
+		}
+	}
+	// Fallback: limited left window only (not the whole line). This catches
+	// forms like `token <candidate>` while avoiding line-wide attribution.
+	winStart := start - 24
+	if winStart < 0 {
+		winStart = 0
+	}
+	if secretKeywords.Match(line[winStart:start]) {
+		// Require the keyword to be adjacent context, not separated by another
+		// complete candidate-like token boundary far away. If there is a comma or
+		// another obvious value separator far back, treat as non-local.
+		sep := bytes.LastIndexAny(line[winStart:start], ",;|")
+		if sep >= 0 {
+			return secretKeywords.Match(line[winStart+sep+1 : start])
+		}
+		return true
+	}
+	return false
+}
 
 type EntropyDetector struct{}
 
@@ -155,10 +226,6 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 			continue
 		}
 
-		// The keyword regex is the expensive part; only pay for it once a
-		// candidate word exists on the line.
-		hasKeyword := secretKeywords.Match(trimmed)
-
 		for _, loc := range candidates {
 			word := trimmed[loc[0]:loc[1]]
 
@@ -177,7 +244,12 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 			// check never ran on this path at all, and a checked-in
 			// `.env.example` reported `changeme` as a 60%-confidence secret.
 			col := loc[0]
+			localKeyword := candidateLocalKeyword(trimmed, loc[0], loc[1])
 			if i := bytes.IndexByte(word, '='); i >= 0 && i < len(word)-1 {
+				// Keyword evidence belongs to the identifier on the left side of
+				// this candidate's own assignment, not to unrelated tokens on the
+				// same line.
+				localKeyword = secretKeywords.Match(word[:i]) || localKeyword
 				word = word[i+1:]
 				col = loc[0] + i + 1
 			}
@@ -191,13 +263,13 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 			}
 			// Keywordless strings in the medium band are mostly UUIDs,
 			// hashes, and diff noise — high entropy but not secrets. Only
-			// report them once they are unambiguously high, or carry a
-			// secret-ish keyword.
-			if !hasKeyword && entropy < entropyHigh {
+			// report them once they are unambiguously high, or carry
+			// candidate-local secret context.
+			if !localKeyword && entropy < entropyHigh {
 				continue
 			}
 
-			confidence := computeEntropyConfidence(entropy, len(word), hasKeyword)
+			confidence := computeEntropyConfidence(entropy, len(word), localKeyword)
 			if confidence < scoreMinConfidence {
 				continue
 			}
@@ -221,6 +293,7 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 			leading := len(raw) - len(bytes.TrimLeft(raw, " \t\r\n\v\f"))
 			fCol := leading + col
 
+			reason := fmt.Sprintf("High-entropy string detected (entropy=%.2f, length=%d, candidate_local_keyword=%t)", entropy, len(word), localKeyword)
 			fResults = append(fResults, findings.Finding{
 				Type:       "High Entropy String",
 				Severity:   findings.SeverityLow,
@@ -229,7 +302,7 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 				Line:       lineNum,
 				Column:     fCol + 1,
 				Value:      string(word),
-				Reason:     "High-entropy string detected (potential secret)",
+				Reason:     reason,
 				RuleID:     "entropy-high",
 				Tags:       []string{"entropy", "potential-secret"},
 			})
