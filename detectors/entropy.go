@@ -2,6 +2,7 @@ package detectors
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"regexp"
 	"strings"
@@ -292,6 +293,7 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 			leading := len(raw) - len(bytes.TrimLeft(raw, " \t\r\n\v\f"))
 			fCol := leading + col
 
+			reason := fmt.Sprintf("High-entropy string detected (entropy=%.2f, length=%d, candidate_local_keyword=%t)", entropy, len(word), localKeyword)
 			fResults = append(fResults, findings.Finding{
 				Type:       "High Entropy String",
 				Severity:   findings.SeverityLow,
@@ -300,7 +302,7 @@ func (d *EntropyDetector) Detect(file *filesystem.File) []findings.Finding {
 				Line:       lineNum,
 				Column:     fCol + 1,
 				Value:      string(word),
-				Reason:     "High-entropy string detected (potential secret)",
+				Reason:     reason,
 				RuleID:     "entropy-high",
 				Tags:       []string{"entropy", "potential-secret"},
 			})
