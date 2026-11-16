@@ -94,7 +94,8 @@ jobs:
 
       - name: Run and check
         run: |
-          set -uo pipefail
+          # GitHub runs this with bash -e; the checks read exit codes themselves.
+          set +e -uo pipefail
           fail() { echo "::error::$*"; exit 1; }
           W="$RUNNER_TEMP/smoke"
           mkdir -p "$W/clean" "$W/dirty"
