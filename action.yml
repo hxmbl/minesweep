@@ -1,0 +1,25 @@
+name: MineSweep
+description: Scan a repository for secrets with MineSweep.
+author: hxmbl
+branding:
+  icon: shield
+  color: gray-dark
+
+inputs:
+  args:
+    description: Scan flags and target, passed to minesweep as-is.
+    required: false
+    default: --fail-on high .
+  sarif:
+    description: >-
+      Write SARIF to this path (relative to the workspace) instead of the
+      terminal report. The exit code still decides the step.
+    required: false
+    default: ""
+
+runs:
+  using: docker
+  # The image docker.yml publishes for each release. The major tag tracks the
+  # newest v2 release, so `uses: hxmbl/minesweep@vX.Y.Z` runs a current v2 scanner.
+  image: docker://ghcr.io/hxmbl/minesweep:v2
+  entrypoint: /usr/local/bin/minesweep-action
