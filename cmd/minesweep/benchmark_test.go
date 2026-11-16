@@ -14,9 +14,9 @@ import (
 
 func TestSummarizeBenchMath(t *testing.T) {
 	results := []benchRun{
-		{Duration: 300 * time.Millisecond, MemBytes: 100},
-		{Duration: 100 * time.Millisecond, MemBytes: 200},
-		{Duration: 200 * time.Millisecond, MemBytes: 300},
+		{Duration: 300 * time.Millisecond, TotalAllocBytes: 100, RetainedHeapBytes: 50, PeakRSSBytes: 1000, PeakRSSAvailable: true},
+		{Duration: 100 * time.Millisecond, TotalAllocBytes: 200, RetainedHeapBytes: 70, PeakRSSBytes: 1200, PeakRSSAvailable: true},
+		{Duration: 200 * time.Millisecond, TotalAllocBytes: 300, RetainedHeapBytes: 90, PeakRSSBytes: 1100, PeakRSSAvailable: true},
 	}
 	s := summarizeBench("/tmp/x", results, 42, 1024, 7)
 
@@ -32,8 +32,17 @@ func TestSummarizeBenchMath(t *testing.T) {
 	if s.MeanDur != 200*time.Millisecond {
 		t.Errorf("mean = %v", s.MeanDur)
 	}
-	if s.MeanMem != 200 {
-		t.Errorf("mean mem = %d, want 200", s.MeanMem)
+	if s.MeanTotalAlloc != 200 {
+		t.Errorf("mean total alloc = %d, want 200", s.MeanTotalAlloc)
+	}
+	if s.MeanRetainedHeap != 70 {
+		t.Errorf("mean retained heap = %d, want 70", s.MeanRetainedHeap)
+	}
+	if s.MaxRetainedHeap != 90 {
+		t.Errorf("max retained heap = %d, want 90", s.MaxRetainedHeap)
+	}
+	if !s.PeakRSSAvailable || s.PeakRSSBytes != 1200 {
+		t.Errorf("peak rss = (%d,%v), want (1200,true)", s.PeakRSSBytes, s.PeakRSSAvailable)
 	}
 	if s.Files != 42 || s.Bytes != 1024 || s.Findings != 7 {
 		t.Errorf("aggregate stats not carried through: %+v", s)
@@ -82,8 +91,8 @@ func TestFormatHelpers(t *testing.T) {
 
 func TestWriteBenchJSONShape(t *testing.T) {
 	results := []benchRun{
-		{Duration: 10 * time.Millisecond, Files: 5, Bytes: 500, Findings: 1, MemBytes: 50},
-		{Duration: 20 * time.Millisecond, Files: 5, Bytes: 500, Findings: 1, MemBytes: 70},
+		{Duration: 10 * time.Millisecond, Files: 5, Bytes: 500, Findings: 1, TotalAllocBytes: 50, RetainedHeapBytes: 20, PeakRSSBytes: 1000, PeakRSSAvailable: true},
+		{Duration: 20 * time.Millisecond, Files: 5, Bytes: 500, Findings: 1, TotalAllocBytes: 70, RetainedHeapBytes: 30, PeakRSSBytes: 1200, PeakRSSAvailable: true},
 	}
 	s := summarizeBench("/tmp/proj", results, 5, 500, 1)
 
@@ -107,19 +116,25 @@ func TestWriteBenchJSONShape(t *testing.T) {
 	r.Close()
 
 	var parsed struct {
-		Benchmark bool `json:"benchmark"`
-		Path      string
-		Runs      int
-		Files     int
-		Bytes     int64
-		Findings  int
+		Benchmark bool   `json:"benchmark"`
+		Path      string `json:"path"`
+		Runs      int    `json:"runs"`
+		Files     int    `json:"files"`
+		Bytes     int64  `json:"bytes"`
+		Findings  int    `json:"findings"`
 		TimesMs   struct {
-			Min    float64
-			Median float64
-			Mean   float64
-			Max    float64
+			Min    float64 `json:"min"`
+			Median float64 `json:"median"`
+			Mean   float64 `json:"mean"`
+			Max    float64 `json:"max"`
 		} `json:"times_ms"`
-		MeanMemoryByte int64
+		Memory struct {
+			TotalAllocBytesMean   int64  `json:"total_alloc_bytes_mean"`
+			RetainedHeapBytesMean int64  `json:"retained_heap_bytes_mean"`
+			RetainedHeapBytesMax  int64  `json:"retained_heap_bytes_max"`
+			PeakRSSBytes          *int64 `json:"peak_rss_bytes"`
+			Note                  string `json:"note"`
+		} `json:"memory"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
 		t.Fatalf("invalid JSON output: %v\n%s", err, buf.String())
@@ -129,6 +144,15 @@ func TestWriteBenchJSONShape(t *testing.T) {
 	}
 	if parsed.TimesMs.Min <= 0 || parsed.TimesMs.Max < parsed.TimesMs.Min {
 		t.Errorf("implausible times: %+v", parsed.TimesMs)
+	}
+	if parsed.Memory.TotalAllocBytesMean != 60 || parsed.Memory.RetainedHeapBytesMean != 25 || parsed.Memory.RetainedHeapBytesMax != 30 {
+		t.Errorf("unexpected memory stats: %+v", parsed.Memory)
+	}
+	if parsed.Memory.PeakRSSBytes == nil || *parsed.Memory.PeakRSSBytes != 1200 {
+		t.Errorf("unexpected peak rss: %+v", parsed.Memory.PeakRSSBytes)
+	}
+	if parsed.Memory.Note == "" {
+		t.Error("expected memory note")
 	}
 }
 
@@ -170,7 +194,7 @@ func TestBenchTextOutputContainsKeyStats(t *testing.T) {
 	buf.ReadFrom(rp)
 
 	out := buf.String()
-	for _, want := range []string{"MineSweep Benchmark", "/some/path", "Files:", "Scan times:", "Throughput"} {
+	for _, want := range []string{"MineSweep Benchmark", "/some/path", "Files:", "Scan times:", "Throughput", "total alloc/run", "retained heap", "peak RSS"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
