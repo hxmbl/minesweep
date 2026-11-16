@@ -13,14 +13,14 @@ import (
 )
 
 type benchRun struct {
-	Duration           time.Duration
-	Files              int
-	Bytes              int64
-	Findings           int
-	TotalAllocBytes    int64
-	RetainedHeapBytes  int64
-	PeakRSSBytes       int64
-	PeakRSSAvailable   bool
+	Duration          time.Duration
+	Files             int
+	Bytes             int64
+	Findings          int
+	TotalAllocBytes   int64
+	RetainedHeapBytes int64
+	PeakRSSBytes      int64
+	PeakRSSAvailable  bool
 }
 
 type benchSummary struct {
@@ -229,9 +229,9 @@ func writeBenchJSON(s benchSummary) error {
 		Max    float64 `json:"max"`
 	}
 	type memoryJSON struct {
-		TotalAllocBytesMean  int64  `json:"total_alloc_bytes_mean"`
-		RetainedHeapBytesMean int64 `json:"retained_heap_bytes_mean"`
-		RetainedHeapBytesMax  int64 `json:"retained_heap_bytes_max"`
+		TotalAllocBytesMean   int64  `json:"total_alloc_bytes_mean"`
+		RetainedHeapBytesMean int64  `json:"retained_heap_bytes_mean"`
+		RetainedHeapBytesMax  int64  `json:"retained_heap_bytes_max"`
 		PeakRSSBytes          *int64 `json:"peak_rss_bytes"`
 		Note                  string `json:"note"`
 	}
