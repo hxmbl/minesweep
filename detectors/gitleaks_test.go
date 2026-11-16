@@ -314,3 +314,36 @@ stopwords = ["zzzrealstop"]
 		t.Error("case C must be suppressed: AND table fully satisfied")
 	}
 }
+
+func TestRuleLevelPathRegexFiltersFiles(t *testing.T) {
+	rules, err := LoadGitleaksRules([]byte(`
+[[rules]]
+id = "scoped-secret"
+description = "Scoped secret"
+regex = '''secret_[a-z0-9]{8,}'''
+path = '''(^|/)config/'''
+`), "path.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if rules[0].PathRegex == nil {
+		t.Fatal("expected rule path regex to be compiled")
+	}
+	det := &RegexDetector{rules: rules}
+	for i := range det.rules[0].Patterns {
+		if err := det.rules[0].Patterns[i].compile(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inScope := &filesystem.File{Path: "config/app.txt", Content: []byte("token = secret_abcdefgh\n"), Size: 24, Mode: 0644}
+	outScope := &filesystem.File{Path: "src/app.txt", Content: []byte("token = secret_abcdefgh\n"), Size: 24, Mode: 0644}
+	if got := det.Detect(inScope); len(got) == 0 {
+		t.Fatal("expected finding in path-matched file")
+	}
+	if got := det.Detect(outScope); len(got) != 0 {
+		t.Fatalf("expected no finding outside rule path scope, got %+v", got)
+	}
+}

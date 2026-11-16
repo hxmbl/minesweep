@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Generate a deterministic synthetic corpus for MineSweep benchmark experiments.
+
+This corpus is MineSweep-owned and intended for reproducible detection-quality
+comparisons. Token-shaped values are generated deterministically from a seed.
+No real credentials are included.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+
+RNG_SEED = "minesweep-strm-649-v1"
+
+
+def det_bytes(label: str, n: int) -> bytes:
+    out = bytearray()
+    i = 0
+    while len(out) < n:
+        h = hashlib.sha256(f"{RNG_SEED}:{label}:{i}".encode()).digest()
+        out.extend(h)
+        i += 1
+    return bytes(out[:n])
+
+
+def det_token(prefix: str, label: str, n: int, alphabet: str) -> str:
+    raw = det_bytes(f"tok:{label}", n)
+    return prefix + "".join(alphabet[b % len(alphabet)] for b in raw)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", required=True, help="Output directory")
+    args = ap.parse_args()
+    out = Path(args.out)
+    if out.exists():
+        # deterministic regeneration
+        for p in sorted(out.rglob("*"), reverse=True):
+            if p.is_file() or p.is_symlink():
+                p.unlink()
+            elif p.is_dir():
+                try:
+                    p.rmdir()
+                except OSError:
+                    pass
+    (out / "positives").mkdir(parents=True, exist_ok=True)
+    (out / "negatives").mkdir(parents=True, exist_ok=True)
+    (out / "docs").mkdir(parents=True, exist_ok=True)
+
+    manifest = {"seed": RNG_SEED, "files": []}
+
+    def write(rel: str, content: str, labels):
+        p = out / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        manifest["files"].append({"path": rel, "labels": labels, "bytes": len(content.encode("utf-8"))})
+
+    aws_key = "AKIA" + det_token("", "aws-akia", 16, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+    gh_pat = "ghp_" + det_token("", "ghp", 36, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+    slack = "xoxb-" + det_token("", "slack1", 10, "0123456789") + "-" + det_token("", "slack2", 12, "0123456789") + "-" + det_token("", "slack3", 24, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+    generic = det_token("", "generic", 40, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+
+    write("positives/aws.env", f"AWS_ACCESS_KEY_ID={aws_key}\n", ["aws", "provider", "credential"])
+    write("positives/github.txt", f"token={gh_pat}\n", ["github", "provider", "credential"])
+    write("positives/slack.txt", f"SLACK_BOT_TOKEN={slack}\n", ["slack", "provider", "credential"])
+    write("positives/generic.env", f"API_SECRET={generic}\n", ["generic", "assignment", "credential"])
+    write("positives/private_key.pem", "-----BEGIN RSA PRIVATE KEY-----\n" + det_token("", "pem", 64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") + "\n-----END RSA PRIVATE KEY-----\n", ["pem", "rsa", "high-value"])
+    write("positives/openssh.key", "-----BEGIN OPENSSH PRIVATE KEY-----\n" + det_token("", "ssh", 64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") + "\n-----END OPENSSH PRIVATE KEY-----\n", ["openssh", "high-value"])
+
+    # Hard negatives / placeholders / hashes / docs
+    write("negatives/placeholders.env", "API_KEY=changeme\nPASSWORD=REPLACE_ME\nTOKEN=your-token-here\n", ["placeholder", "negative"])
+    write("negatives/hash.txt", "sha256:" + hashlib.sha256(b"fixture").hexdigest() + "\n", ["hash", "negative"])
+    write("negatives/uuid.txt", "id=123e4567-e89b-12d3-a456-426614174000\n", ["uuid-like", "negative"])
+    write("docs/example.md", "```env\nAWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n```\nUse placeholders like `your-api-key-here`.\n", ["documentation", "example", "negative"])
+    write("negatives/multiline_noise.txt", "password_label=ok\nnote=not_a_secret\n" + ("lorem ipsum dolor sit amet\n" * 20), ["noise", "negative"])
+
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"wrote {len(manifest['files'])} files to {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

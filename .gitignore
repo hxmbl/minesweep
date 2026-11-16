@@ -5,3 +5,7 @@
 .DS_Store
 audit.txt
 dist/
+
+# Benchmark generated artifacts
+benchmark/corpus/
+benchmark/results/

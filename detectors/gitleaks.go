@@ -233,7 +233,14 @@ func compileGitleaksAllowlist(ga *GitleaksAllowlist, source, subject string) *im
 		warnGitleaks(source, subject, fmt.Sprintf("unknown allowlist condition %q; using OR", ga.Condition))
 	}
 	switch strings.ToLower(ga.RegexTarget) {
-	case "", "secret":
+	case "", "secret", "match":
+		// "match" targets the regex match/captured value in Gitleaks; MineSweep's
+		// suppression checks run against the extracted secret value. Treat as
+		// value-targeted for compatibility while full match-semantics parity is
+		// validated by fixtures.
+		if strings.EqualFold(ga.RegexTarget, "match") {
+			warnGitleaks(source, subject, "regexTarget \"match\" imported as value-targeted suppression (behavioral parity should be validated)")
+		}
 	case "line":
 		al.targetLine = true
 	default:
