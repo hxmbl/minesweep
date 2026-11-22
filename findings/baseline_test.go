@@ -4,6 +4,7 @@ import (
 	fx "minesweep/internal/fixtures"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -22,8 +23,8 @@ func TestFindingHash(t *testing.T) {
 	if h1 != h2 {
 		t.Errorf("expected same hash for same finding, got %s and %s", h1, h2)
 	}
-	if len(h1) != 64 {
-		t.Errorf("expected SHA-256 hash (64 hex chars), got %d chars", len(h1))
+	if !strings.HasPrefix(h1, "b3:") || len(strings.TrimPrefix(h1, "b3:")) != 64 {
+		t.Errorf("expected BLAKE3 fingerprint (b3: plus 64 hex chars), got %q", h1)
 	}
 }
 
@@ -115,6 +116,15 @@ func TestFilterNewFindings(t *testing.T) {
 	}
 	if newFindings[0].Value != "new_key" {
 		t.Errorf("expected new_key, got %s", newFindings[0].Value)
+	}
+}
+
+func TestFilterNewFindingsLegacySHA256Baseline(t *testing.T) {
+	finding := Finding{Type: "AWS", File: ".env", Line: 5, Value: "old_key", RuleID: "aws-key"}
+	baseline := &Baseline{Version: "1", Findings: map[string]string{legacyFindingHash(finding): ".env:5"}}
+
+	if got := FilterNewFindings([]Finding{finding}, baseline); len(got) != 0 {
+		t.Fatalf("legacy SHA-256 baseline entry did not filter finding: %+v", got)
 	}
 }
 

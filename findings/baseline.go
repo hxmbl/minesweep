@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/zeebo/blake3"
 )
 
 // historyDisplaySuffix matches the "@sha12" suffix history mode appends to
@@ -64,6 +66,10 @@ func SaveBaseline(path string, b *Baseline) error {
 }
 
 func FindingHash(f Finding) string {
+	return "b3:" + findingHash(f, blake3.Sum256)
+}
+
+func findingHash(f Finding, hash func([]byte) [32]byte) string {
 	entry := BaselineEntry{
 		File:   normalizeBaselineFile(f.File),
 		Line:   f.Line,
@@ -74,9 +80,11 @@ func FindingHash(f Finding) string {
 	if err != nil {
 		return ""
 	}
-	hash := sha256.Sum256(data)
-	return fmt.Sprintf("%x", hash)
+	sum := hash(data)
+	return fmt.Sprintf("%x", sum)
 }
+
+func legacyFindingHash(f Finding) string { return findingHash(f, sha256.Sum256) }
 
 func FilterNewFindings(findings []Finding, baseline *Baseline) []Finding {
 	if baseline == nil {
@@ -85,8 +93,10 @@ func FilterNewFindings(findings []Finding, baseline *Baseline) []Finding {
 
 	var newFindings []Finding
 	for _, f := range findings {
-		hash := FindingHash(f)
-		if _, exists := baseline.Findings[hash]; !exists {
+		if _, exists := baseline.Findings[FindingHash(f)]; !exists {
+			if _, exists = baseline.Findings[legacyFindingHash(f)]; exists {
+				continue
+			}
 			newFindings = append(newFindings, f)
 		}
 	}
