@@ -70,9 +70,11 @@ func (b *Baseline) UnmarshalJSON(data []byte) error {
 				entry.File = parts[0]
 			}
 			if len(parts) > 1 {
-				// Best effort; ignore parse errors.
+				// Best effort; leave Line at zero when the number is unparseable.
 				n := 0
-				fmt.Sscanf(parts[1], "%d", &n)
+				if _, err := fmt.Sscanf(parts[1], "%d", &n); err != nil {
+					n = 0
+				}
 				entry.Line = n
 			}
 			b.Findings[k] = entry
