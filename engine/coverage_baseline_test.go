@@ -203,7 +203,7 @@ func baselineCount(t *testing.T, path string) int {
 		t.Fatal(err)
 	}
 	var b struct {
-		Findings map[string]string `json:"findings"`
+		Findings map[string]json.RawMessage `json:"findings"`
 	}
 	if err := json.Unmarshal(data, &b); err != nil {
 		t.Fatal(err)

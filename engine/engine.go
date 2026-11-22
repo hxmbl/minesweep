@@ -1334,6 +1334,10 @@ func relativizeFindings(root string, fs []findings.Finding) []findings.Finding {
 	return fs
 }
 
+func isRustFile(path string) bool {
+	return strings.EqualFold(filepath.Ext(path), ".rs")
+}
+
 // detect runs every detector over one file, then filters, then attaches
 // evidence to the survivors.
 //
@@ -1416,11 +1420,17 @@ func (e *Engine) detect(file *filesystem.File, budget int) []findings.Finding {
 		filtered = append(filtered, f)
 	}
 
-	if !e.config.DisableInlineSuppression && len(filtered) > 0 {
-		// The LineIndex is used directly rather than splitting the content
-		// into a []string: that split copied the whole file and allocated a
-		// string header per line, for every file that had any finding.
+	// Drop findings that live inside Rust #[cfg(test)] modules when test
+	// files are being skipped, so inline tests do not read as production code.
+	if !e.config.IncludeTestFiles && isRustFile(file.Path) {
 		if li := file.Lines(); li != nil {
+			filtered = findings.FilterRustTestModuleFindings(filtered, li)
+		}
+	}
+
+	if len(filtered) > 0 {
+		li := file.Lines()
+		if !e.config.DisableInlineSuppression && li != nil {
 			kept := findings.FilterInlineSuppressionsLines(filtered, li)
 			// A finding removed by an inline suppression is a coverage gap
 			// like any other: it was detected and then deliberately not
