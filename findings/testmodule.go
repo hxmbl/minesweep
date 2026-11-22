@@ -188,9 +188,10 @@ func braceDelta(line string) int {
 			}
 			continue
 		}
-		if ch == '{' {
+		switch ch {
+		case '{':
 			delta++
-		} else if ch == '}' {
+		case '}':
 			delta--
 		}
 	}
