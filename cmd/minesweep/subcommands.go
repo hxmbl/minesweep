@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"minesweep/detectors"
+	"minesweep/engine"
 	"minesweep/findings"
 	"minesweep/report"
 )
@@ -263,6 +265,75 @@ func runImportIgnores(in, out string) error {
 	fmt.Printf("Converted %d entries -> %s\n\n", len(list.Suppression), out)
 	fmt.Println("Use it with:")
 	fmt.Printf("  minesweep --suppress %s .\n", out)
+	return nil
+}
+
+func newPruneBaselineCommand() *cobra.Command {
+	var baseline string
+	cmd := &cobra.Command{
+		Use:   "prune-baseline [path]",
+		Short: "Prune baseline entries that no longer match a current finding",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			scanPath := "."
+			if len(args) > 0 {
+				scanPath = args[0]
+			}
+			if baseline == "" {
+				baseline = scanBaselinePath()
+			}
+			return runPruneBaseline(baseline, scanPath)
+		},
+	}
+	cmd.Flags().StringVarP(&baseline, "baseline", "b", "", "Baseline file to prune")
+	return cmd
+}
+
+func scanBaselinePath() string {
+	if cfg.BaselineFile != "" {
+		return cfg.BaselineFile
+	}
+	return ".minesweep-baseline.json"
+}
+
+func runPruneBaseline(baselinePath, scanPath string) error {
+	scanAbs, err := filepath.Abs(scanPath)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+	cfg2 := cfg
+	cfg2.BaselineFile = ""
+	cfg2.UpdateBaseline = false
+	eng, err := engine.New(cfg2)
+	if err != nil {
+		return fmt.Errorf("init engine: %w", err)
+	}
+	reportData, err := eng.Run(scanAbs)
+	if err != nil {
+		return fmt.Errorf("scan: %w", err)
+	}
+	// Pruning from a truncated scan is as unsafe as baselining from one:
+	// entries still in use would be dropped because the scan never saw them.
+	if reportData.Incomplete {
+		return fmt.Errorf("refusing to prune the baseline: this scan is incomplete (%s); "+
+			"re-run without the limits that truncated it", strings.Join(reportData.IncompleteReasons, "; "))
+	}
+	b, err := findings.LoadBaseline(baselinePath)
+	if err != nil {
+		return fmt.Errorf("load baseline: %w", err)
+	}
+	removed := findings.PruneBaseline(b, reportData.Findings)
+	if err := findings.SaveBaseline(baselinePath, b); err != nil {
+		return fmt.Errorf("save baseline: %w", err)
+	}
+	fmt.Printf("Pruned %d baseline entries from %s\n", len(removed), baselinePath)
+	for _, e := range removed {
+		reason := findings.PruneReason(e, reportData.Findings)
+		if e.Reason != "" {
+			reason += ", triage reason was: " + e.Reason
+		}
+		fmt.Printf("  removed %s:%d (%s): %s\n", e.File, e.Line, e.RuleID, reason)
+	}
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package findings
 
 import (
+	"encoding/json"
 	fx "minesweep/internal/fixtures"
 	"os"
 	"path/filepath"
@@ -52,15 +53,15 @@ func TestSaveLoadBaseline(t *testing.T) {
 
 	b := &Baseline{
 		Version:  "1",
-		Findings: make(map[string]string),
+		Findings: make(map[string]BaselineEntry),
 	}
 	f1 := Finding{Type: "AWS", File: ".env", Line: 5, Value: "key1", RuleID: "aws-key"}
 	f2 := Finding{Type: "GCP", File: "config.yml", Line: 10, Value: "key2", RuleID: "gcp-key"}
 
 	h1 := FindingHash(f1)
 	h2 := FindingHash(f2)
-	b.Findings[h1] = ".env:5"
-	b.Findings[h2] = "config.yml:10"
+	b.Findings[h1] = BaselineEntry{File: ".env", Line: 5}
+	b.Findings[h2] = BaselineEntry{File: "config.yml", Line: 10}
 
 	if err := SaveBaseline(path, b); err != nil {
 		t.Fatalf("SaveBaseline: %v", err)
@@ -99,7 +100,7 @@ func TestLoadBaselineMissingFile(t *testing.T) {
 func TestFilterNewFindings(t *testing.T) {
 	existing := &Baseline{
 		Version:  "1",
-		Findings: make(map[string]string),
+		Findings: make(map[string]BaselineEntry),
 	}
 
 	all := []Finding{
@@ -107,7 +108,7 @@ func TestFilterNewFindings(t *testing.T) {
 		{Type: "GCP", File: "config.yml", Line: 10, Value: "new_key", RuleID: "gcp-key"},
 	}
 
-	existing.Findings[FindingHash(all[0])] = ".env:5"
+	existing.Findings[FindingHash(all[0])] = BaselineEntry{File: ".env", Line: 5}
 
 	newFindings := FilterNewFindings(all, existing)
 
@@ -121,7 +122,7 @@ func TestFilterNewFindings(t *testing.T) {
 
 func TestFilterNewFindingsLegacySHA256Baseline(t *testing.T) {
 	finding := Finding{Type: "AWS", File: ".env", Line: 5, Value: "old_key", RuleID: "aws-key"}
-	baseline := &Baseline{Version: "1", Findings: map[string]string{legacyFindingHash(finding): ".env:5"}}
+	baseline := &Baseline{Version: "1", Findings: map[string]BaselineEntry{legacyFindingHash(finding): {File: ".env", Line: 5}}}
 
 	if got := FilterNewFindings([]Finding{finding}, baseline); len(got) != 0 {
 		t.Fatalf("legacy SHA-256 baseline entry did not filter finding: %+v", got)
@@ -144,11 +145,11 @@ func TestFilterNewFindingsEmptyBaseline(t *testing.T) {
 func TestUpdateBaseline(t *testing.T) {
 	b := &Baseline{
 		Version:  "1",
-		Findings: make(map[string]string),
+		Findings: make(map[string]BaselineEntry),
 	}
 
 	f1 := Finding{Type: "AWS", File: ".env", Line: 5, Value: "old_key", RuleID: "aws-key"}
-	b.Findings[FindingHash(f1)] = ".env:5"
+	b.Findings[FindingHash(f1)] = BaselineEntry{File: ".env", Line: 5}
 
 	newFindings := []Finding{
 		{Type: "GCP", File: "config.yml", Line: 10, Value: "new_key", RuleID: "gcp-key"},
@@ -164,10 +165,10 @@ func TestUpdateBaseline(t *testing.T) {
 func TestGetBaselineStats(t *testing.T) {
 	b := &Baseline{
 		Version: "1",
-		Findings: map[string]string{
-			"hash1": ".env:5",
-			"hash2": "config.yml:10",
-			"hash3": ".env:20",
+		Findings: map[string]BaselineEntry{
+			"hash1": {File: ".env", Line: 5},
+			"hash2": {File: "config.yml", Line: 10},
+			"hash3": {File: ".env", Line: 20},
 		},
 	}
 
@@ -187,5 +188,151 @@ func TestGetBaselineStatsNil(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Errorf("expected 0 files, got %d", len(files))
+	}
+}
+
+func TestUpdateBaselineNeverWritesRawSecrets(t *testing.T) {
+	secret := fx.AWSAccessKeyID()
+	f := Finding{Type: "AWS", File: ".env", Line: 5, Value: secret, RuleID: "aws-access-key-id"}
+	b := &Baseline{Version: "1", Findings: make(map[string]BaselineEntry)}
+	UpdateBaseline(b, []Finding{f})
+
+	entry := b.Findings[FindingHash(f)]
+	if entry.ValueToken == "" {
+		t.Fatal("value-bearing finding was baselined without recording its value token")
+	}
+
+	path := filepath.Join(t.TempDir(), "baseline.json")
+	if err := SaveBaseline(path, b); err != nil {
+		t.Fatalf("SaveBaseline: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved baseline: %v", err)
+	}
+	if strings.Contains(string(data), secret) {
+		t.Fatalf("baseline file contains the raw secret: %s", data)
+	}
+
+	changed := f
+	changed.Value = secret + "-different"
+	if FindingHash(changed) == FindingHash(f) {
+		t.Fatal("fingerprint does not bind the secret value")
+	}
+}
+
+func TestBaselineProvenanceSurvivesRegeneration(t *testing.T) {
+	f := Finding{Type: "AWS", File: ".env", Line: 5, Value: "key1", RuleID: "aws-key"}
+	hash := FindingHash(f)
+	b := &Baseline{
+		Version: "1",
+		Findings: map[string]BaselineEntry{
+			hash: {File: ".env", Line: 5, RuleID: "aws-key", Reason: "accepted by Alice", Author: "alice", Date: "2026-11-22"},
+		},
+	}
+	UpdateBaseline(b, []Finding{f})
+
+	got := b.Findings[hash]
+	if got.Reason != "accepted by Alice" || got.Author != "alice" || got.Date != "2026-11-22" {
+		t.Fatalf("provenance lost on regeneration: %+v", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "baseline.json")
+	if err := SaveBaseline(path, b); err != nil {
+		t.Fatalf("SaveBaseline: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved baseline: %v", err)
+	}
+	for _, want := range []string{"accepted by Alice", "alice", "2026-11-22"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("saved baseline missing %q: %s", want, data)
+		}
+	}
+}
+
+func TestBaselineWarningsForValueLessEntriesOnly(t *testing.T) {
+	valueLess := Finding{Type: "binary", File: "blob.bin", Line: 1, RuleID: "binary-rule"}
+	b := &Baseline{
+		Version: "1",
+		Findings: map[string]BaselineEntry{
+			FindingHash(valueLess): {File: "blob.bin", Line: 1, RuleID: "binary-rule"},
+		},
+	}
+	if got := BaselineWarnings(b); len(got) != 1 || !strings.Contains(got[0], "binary-rule") {
+		t.Fatalf("expected one value-less warning, got %v", got)
+	}
+
+	withValue := Finding{Type: "AWS", File: ".env", Line: 5, Value: "key1", RuleID: "aws-key"}
+	UpdateBaseline(b, []Finding{withValue})
+	if got := BaselineWarnings(b); len(got) != 1 {
+		t.Fatalf("value-bearing entry must not warn, got %v", got)
+	}
+
+	// Old baselines recorded no value token but bound the value into a
+	// SHA-256 fingerprint; loading one must not warn about every entry.
+	var legacy Baseline
+	if err := json.Unmarshal([]byte(`{"version":"1","findings":{"deadbeef":".env:5"}}`), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy baseline: %v", err)
+	}
+	if got := BaselineWarnings(&legacy); len(got) != 0 {
+		t.Fatalf("legacy baseline should not warn, got %v", got)
+	}
+}
+
+func TestValueLessBaselineEntrySuppressesChangedValue(t *testing.T) {
+	f := Finding{Type: "binary", File: "blob.bin", Line: 1, Value: "old", RuleID: "binary-rule"}
+	b := &Baseline{
+		Version: "1",
+		Findings: map[string]BaselineEntry{
+			FindingHash(f): {File: "blob.bin", Line: 1, RuleID: "binary-rule"},
+		},
+	}
+	changed := f
+	changed.Value = "brand new content"
+	if got := FilterNewFindings([]Finding{changed}, b); len(got) != 0 {
+		t.Fatalf("value-less entry should suppress the rule at that path, got %+v", got)
+	}
+	otherLine := changed
+	otherLine.Line = 2
+	if got := FilterNewFindings([]Finding{otherLine}, b); len(got) != 1 {
+		t.Fatalf("value-less entry must not suppress other lines, got %+v", got)
+	}
+}
+
+func TestPruneBaselineRemovesOnlyStaleEntries(t *testing.T) {
+	keep := Finding{Type: "AWS", File: ".env", Line: 5, Value: "key1", RuleID: "aws-key"}
+	stale := Finding{Type: "AWS", File: "gone.env", Line: 9, Value: "key2", RuleID: "aws-key"}
+	b := &Baseline{
+		Version: "1",
+		Findings: map[string]BaselineEntry{
+			FindingHash(keep):  {File: ".env", Line: 5, RuleID: "aws-key", Reason: "still relevant"},
+			FindingHash(stale): {File: "gone.env", Line: 9, RuleID: "aws-key", Reason: "was a test"},
+		},
+	}
+	removed := PruneBaseline(b, []Finding{keep})
+	if len(removed) != 1 || removed[0].File != "gone.env" {
+		t.Fatalf("expected one stale removal, got %+v", removed)
+	}
+	if len(b.Findings) != 1 {
+		t.Fatalf("expected one entry left, got %d", len(b.Findings))
+	}
+	if got := b.Findings[FindingHash(keep)].Reason; got != "still relevant" {
+		t.Fatalf("matching entry was altered: %q", got)
+	}
+	if got := PruneReason(removed[0], []Finding{keep}); got != "file no longer has findings" {
+		t.Fatalf("unexpected prune reason: %q", got)
+	}
+
+	moved := keep
+	moved.Line = 8
+	if got := PruneReason(BaselineEntry{File: ".env", Line: 5, RuleID: "aws-key"}, []Finding{moved}); got != "line moved" {
+		t.Fatalf("unexpected line-drift reason: %q", got)
+	}
+	changed := keep
+	changed.Value = "different"
+	if got := PruneReason(BaselineEntry{File: ".env", Line: 5, RuleID: "aws-key"}, []Finding{changed}); got != "value changed" {
+		t.Fatalf("unexpected value-change reason: %q", got)
 	}
 }

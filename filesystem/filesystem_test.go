@@ -1105,3 +1105,31 @@ func TestWalkStatsBuckets(t *testing.T) {
 		t.Errorf("TotalSkipped=%d, want 2", st.TotalSkipped())
 	}
 }
+
+func TestIsTestFileTestDirectories(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "tests dir", path: "tests/fixtures/app.env", want: true},
+		{name: "test dir", path: "test/helpers/setup.go", want: true},
+		{name: "__tests__ dir", path: "src/__tests__/app.test.ts", want: true},
+		{name: "spec dir", path: "spec/models/user_spec.rb", want: true},
+		{name: "specs dir", path: "specs/integration/api.go", want: true},
+		{name: "testing dir", path: "pkg/testing/helper.go", want: true},
+		{name: "testsrc dir", path: "module/testsrc/Main.java", want: true},
+		{name: "case insensitive", path: "src/Tests/fixture.json", want: true},
+		{name: "nested test dir", path: "app/src/tests/unit/config.yaml", want: true},
+		{name: "non-test dir", path: "src/config/app.env", want: false},
+		{name: "testdata not a test dir", path: "testdata/fixture.json", want: false},
+		{name: "dir named test at end", path: "src/test", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isTestFile(tt.path); got != tt.want {
+				t.Errorf("isTestFile(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}

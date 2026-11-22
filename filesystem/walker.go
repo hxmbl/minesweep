@@ -837,6 +837,16 @@ var testSourceExts = map[string]bool{
 	".scala": true, ".dart": true, ".ex": true, ".exs": true,
 }
 
+// isTestDir reports whether a single path segment is a conventional test
+// directory.
+func isTestDir(seg string) bool {
+	switch strings.ToLower(strings.TrimSpace(seg)) {
+	case "test", "tests", "testing", "__tests__", "spec", "specs", "testsrc":
+		return true
+	}
+	return false
+}
+
 // isTestFile reports whether path is a test file.
 //
 // The `_test`/`_spec` forms apply to any extension, matching the conventions of
@@ -844,25 +854,23 @@ var testSourceExts = map[string]bool{
 // known test-source extensions: filepath.Ext returns the suffix from the last
 // dot, so `foo.test` and `foo.spec` did not match at all (dead code), while
 // `prod.test.tfvars` and `secrets.test.json` did.
+//
+// Conventional test directory layouts (tests/, test/, __tests__/, spec/, ...)
+// are also recognised, so findings under them are treated as test code.
 func isTestFile(path string) bool {
-	base := filepath.Base(path)
+	path = filepath.ToSlash(path)
+	segments := strings.Split(path, "/")
+	for i, seg := range segments {
+		if i < len(segments)-1 && isTestDir(seg) {
+			return true
+		}
+	}
+	base := segments[len(segments)-1]
 	ext := filepath.Ext(base)
 	name := strings.TrimSuffix(base, ext)
 	if strings.HasSuffix(name, "_test") || strings.HasSuffix(name, "_spec") {
 		return true
 	}
-	// The `test_`/`spec_` prefix forms are also recognised, because
-	// --include-tests documents that test files are skipped by default and
-	// `test_daemon.go` was plainly not being skipped. Django names its tests
-	// `test_*.py`; a large part of the Go ecosystem uses `test_*.go`. Both are
-	// as conventional as `*_test.go`, and a test-file skip rule that misses
-	// them is worse than not having one, because the coverage report then
-	// claims test files were scanned when the convention in use says otherwise.
-	//
-	// The prefix form is restricted to known test-source extensions for the same
-	// reason the `.test`/`.spec` form is: `test.json`, `test.tfvars` and
-	// `test.properties` are ordinary fixtures, and silently dropping those would
-	// hide credentials in them.
 	lower := strings.ToLower(name)
 	if strings.HasPrefix(lower, "test_") || strings.HasPrefix(lower, "spec_") {
 		return testSourceExts[strings.ToLower(ext)]
@@ -963,7 +971,7 @@ func (fs *filterSet) reasonExcludingSkipDir(rel string) (SkipReason, bool) {
 			return SkipReasonExt, true
 		}
 	}
-	if !fs.includeT && isTestFile(base) {
+	if !fs.includeT && isTestFile(rel) {
 		return SkipReasonTest, true
 	}
 	return "", false

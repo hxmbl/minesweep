@@ -58,6 +58,7 @@ var (
 	trustList     bool
 	watchMode     bool
 	watchInterval time.Duration
+	pruneBaseline bool
 )
 
 const rootLongDesc = `MineSweep scans files for secrets, credentials, and sensitive data,
@@ -119,6 +120,11 @@ func main() {
 					return fmt.Errorf("--rules %q: %w", cfg.RulesDir, statErr)
 				}
 			}
+			// Subcommands with an optional path (prune-baseline) can arrive
+			// with no args; config discovery still needs a directory.
+			if len(args) == 0 {
+				args = []string{"."}
+			}
 			return loadConfig(cmd, args[0])
 		},
 		RunE: runScan,
@@ -156,6 +162,7 @@ func main() {
 	root.Flags().BoolVarP(&cfg.StagedOnly, "staged", "s", false, "Only scan git staged files")
 	root.Flags().StringVarP(&cfg.BaselineFile, "baseline", "b", "", "Baseline file to compare against (only report new findings)")
 	root.Flags().BoolVarP(&cfg.UpdateBaseline, "update-baseline", "", false, "Update baseline file with current findings")
+	root.Flags().BoolVar(&pruneBaseline, "prune-baseline", false, "Prune baseline entries that no longer match a current finding")
 	root.Flags().IntVarP(&cfg.Workers, "workers", "w", 0, "Number of concurrent workers (default: NumCPU)")
 	root.Flags().StringVar(&configPath, "config", "", "Path to config file (default: search for .minesweep.yml)")
 	root.Flags().StringVarP(&cfg.SuppressFile, "suppress", "", "", "Suppression file to ignore specific findings")
@@ -226,6 +233,7 @@ func main() {
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newExplainCommand())
 	root.AddCommand(newImportIgnoresCommand())
+	root.AddCommand(newPruneBaselineCommand())
 
 	if err := root.Execute(); err != nil {
 		var exitErr *exitCodeError
@@ -646,6 +654,9 @@ func loadConfig(cmd *cobra.Command, scanPath string) error {
 }
 
 func runScan(cmd *cobra.Command, args []string) error {
+	if pruneBaseline {
+		return runPruneBaseline(scanBaselinePath(), args[0])
+	}
 	path := args[0]
 	scanPath, err := filepath.Abs(path)
 	if err != nil {

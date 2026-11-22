@@ -375,6 +375,19 @@ minesweep --update-baseline --baseline .minesweep-baseline.json .
 minesweep --baseline .minesweep-baseline.json .
 ```
 
+Baselines accumulate dead entries as code drifts. `prune-baseline` drops entries
+that no longer match a current finding and reports each removal with its reason
+(file gone, line moved, rule changed, or value changed). Entries may carry a
+`reason`, `author` and `date`; these survive regeneration and appear in prune
+output. A value-less entry suppresses its rule at that location for any content,
+so MineSweep warns about it on load. Raw secret values are never written to a
+baseline file: the fingerprint binds the value, and only a one-way value token
+is stored.
+
+```bash
+minesweep prune-baseline --baseline .minesweep-baseline.json .
+```
+
 Whichever you use, the count appears in the report (`findings_suppressed`), so a
 gap in coverage is never invisible.
 
@@ -685,8 +698,12 @@ at the point where it is printed:
   bytes, cut on a rune boundary, because "a line" is not bounded by anything: a
   30 MB input produced a 60 MB report. The finding's own value is replaced by a
   stable `sha256:` token everywhere it appears — the value, the source line and
-  the context — so equal values produce equal tokens, which is what baselines
-  depend on.
+  the context — so equal values produce equal redaction tokens. These tokens
+  are for safe, consistent report output; they are not used as baseline
+  fingerprints. Baseline fingerprints are a separate, versioned format:
+  current fingerprints use `b3:` followed by a BLAKE3 digest over the finding's
+  file, line, rule and value. The version prefix lets MineSweep distinguish
+  fingerprint formats as they evolve.
 
 That last guarantee is the one a reader leans on hardest, so it is worth being
 precise about how it is obtained. Two things had to be true, and both now are:
