@@ -227,6 +227,10 @@ minesweep --diff --diff-base main .   # only files changed in the PR
 minesweep --annotations .             # inline PR annotations
 ```
 
+`--diff-base` tries a local ref first, then `origin/<base>`. If neither
+resolves, MineSweep warns and scans the whole tree against the empty tree rather
+than silently widening the diff.
+
 ### Git history
 
 Most real leaks live in old commits, not the working tree. `--history` scans every unique blob and attributes each finding to the commit that introduced it:

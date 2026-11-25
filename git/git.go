@@ -43,8 +43,33 @@ func TopLevel(path string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// resolveDiffBaseRef finds a commit for baseBranch, trying the local ref first
+// and then the corresponding remote-tracking ref. GitHub Actions checkouts
+// usually have origin/main but no local main; without the second candidate
+// every PR silently fell back to a full-repo scan.
+func resolveDiffBaseRef(top, base string) string {
+	candidates := []string{base}
+	if !strings.HasPrefix(base, "origin/") && !strings.HasPrefix(base, "refs/") {
+		candidates = append(candidates, "origin/"+base)
+	}
+	for _, ref := range candidates {
+		sanitized, err := SanitizeBranchName(ref)
+		if err != nil {
+			continue
+		}
+		probe := exec.Command("git", "rev-parse", "--verify", "--quiet", sanitized+"^{commit}") //nolint:gosec // branch name sanitized by SanitizeBranchName
+		probe.Dir = top
+		if probe.Run() == nil {
+			return sanitized
+		}
+	}
+	return ""
+}
+
 // GetDiffFiles returns the list of files changed between baseBranch and HEAD,
-// relative to the repository top-level directory.
+// relative to the repository top-level directory. A local ref is preferred,
+// then origin/<base>. If neither resolves, the caller is warned and the whole
+// tree is scanned against the empty tree rather than silently changing scope.
 func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 	if baseBranch == "" {
 		baseBranch = "main"
@@ -66,12 +91,10 @@ func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 	// `git diff <branch>...HEAD` exits 0 with EMPTY output when the base
 	// branch does not exist, silently scanning nothing; that default must be
 	// distinguishable from a real empty diff.
-	probe := exec.Command("git", "rev-parse", "--verify", "--quiet", sanitizedBranch+"^{commit}") //nolint:gosec // branch name sanitized by SanitizeBranchName
-	probe.Dir = top
-	baseExists := probe.Run() == nil
+	baseRef := resolveDiffBaseRef(top, sanitizedBranch)
 
 	var out []byte
-	if baseExists {
+	if baseRef != "" {
 		// --diff-filter=ACMR, matching the staged path. A deletion (D) is a
 		// legitimate change with nothing left to scan, and including it made
 		// every PR that deleted a file fail: the path was in the list, the
@@ -80,15 +103,17 @@ func GetDiffFiles(root string, baseBranch string) ([]string, error) {
 		// is included because rename detection is on by default, and the entry
 		// git emits is the new path, which exists.
 		cmd := nameListCommand(top, "diff", "--name-only", "-z",
-			"--diff-filter=ACMR", sanitizedBranch+"...HEAD") //nolint:gosec // branch name sanitized by SanitizeBranchName
+			"--diff-filter=ACMR", baseRef+"...HEAD") //nolint:gosec // branch name sanitized by SanitizeBranchName
 		out, err = cmd.Output()
 		if err != nil {
-			return nil, fmt.Errorf("git diff --name-only %q: %w", sanitizedBranch, err)
+			return nil, fmt.Errorf("git diff --name-only %q: %w", baseRef, err)
 		}
 	} else {
-		// No base branch exists (single-commit checkout, unborn main):
-		// diff from the empty tree so the whole HEAD is scanned as
-		// "changed". The empty-tree object hash is a git constant.
+		// No base branch exists locally or on origin (single-commit checkout,
+		// unborn main): diff from the empty tree so the whole HEAD is scanned
+		// as "changed". This is a real change of scope, so say so; the
+		// empty-tree object hash is a git constant.
+		fmt.Fprintf(os.Stderr, "minesweep: warning: diff base %q could not be resolved locally or on a remote; falling back to a full-repo scan against the empty tree\n", baseBranch)
 		const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 		cmd := nameListCommand(top, "diff", "--name-only", "-z", emptyTree, "HEAD")
 		out, err = cmd.Output()
