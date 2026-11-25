@@ -62,11 +62,19 @@ type SARIFDriver struct {
 }
 
 type SARIFRule struct {
-	ID                   string       `json:"id"`
-	Name                 string       `json:"name"`
-	ShortDescription     SARIFMessage `json:"shortDescription"`
-	HelpURI              string       `json:"helpUri,omitempty"`
-	DefaultConfiguration SARIFConfig  `json:"defaultConfiguration"`
+	ID                   string              `json:"id"`
+	Name                 string              `json:"name"`
+	ShortDescription     SARIFMessage        `json:"shortDescription"`
+	HelpURI              string              `json:"helpUri,omitempty"`
+	DefaultConfiguration SARIFConfig         `json:"defaultConfiguration"`
+	Properties           SARIFRuleProperties `json:"properties"`
+}
+
+// SARIFRuleProperties carries the numeric score GitHub Code Scanning uses to
+// label an alert Critical, High, Medium or Low. Result level alone collapses
+// critical and high into "error".
+type SARIFRuleProperties struct {
+	SecuritySeverity string `json:"security-severity"`
 }
 
 type SARIFConfig struct {
@@ -107,11 +115,15 @@ func WriteSARIF(w io.Writer, report *findings.RiskReport, toolVersion string) er
 	// The SARIF schema requires arrays (or absent keys); "null" is invalid
 	// and gets rejected by consumers such as GitHub code scanning.
 	rules := make(map[string]int)
+	ruleSeverities := make(map[string]findings.Severity)
 	ruleList := []SARIFRule{}
 
 	for _, f := range report.Findings {
-		if _, exists := rules[f.RuleID]; !exists {
-			rules[f.RuleID] = len(ruleList)
+		idx, exists := rules[f.RuleID]
+		if !exists {
+			idx = len(ruleList)
+			rules[f.RuleID] = idx
+			ruleSeverities[f.RuleID] = f.Severity
 			ruleList = append(ruleList, SARIFRule{
 				ID:               f.RuleID,
 				Name:             f.Type,
@@ -119,7 +131,19 @@ func WriteSARIF(w io.Writer, report *findings.RiskReport, toolVersion string) er
 				DefaultConfiguration: SARIFConfig{
 					Level: severityToSARIFLevel(f.Severity),
 				},
+				Properties: SARIFRuleProperties{
+					SecuritySeverity: severityToSecuritySeverity(f.Severity),
+				},
 			})
+			continue
+		}
+		// A rule can produce findings at several severities (for example a
+		// confidence-band policy). Code Scanning reads one score per rule, so
+		// keep the highest rather than whichever finding happened to sort first.
+		if f.Severity > ruleSeverities[f.RuleID] {
+			ruleSeverities[f.RuleID] = f.Severity
+			ruleList[idx].DefaultConfiguration.Level = severityToSARIFLevel(f.Severity)
+			ruleList[idx].Properties.SecuritySeverity = severityToSecuritySeverity(f.Severity)
 		}
 	}
 
@@ -216,5 +240,23 @@ func severityToSARIFLevel(sev findings.Severity) string {
 		return "warning"
 	default:
 		return "note"
+	}
+}
+
+// severityToSecuritySeverity maps MineSweep's levels onto GitHub Code
+// Scanning's numeric scale. The band boundaries are the ones Code Scanning
+// uses to display Critical (>=9), High (>=7), Medium (>=4) and Low (<4).
+func severityToSecuritySeverity(sev findings.Severity) string {
+	switch sev {
+	case findings.SeverityCritical:
+		return "9.0"
+	case findings.SeverityHigh:
+		return "7.5"
+	case findings.SeverityMedium:
+		return "5.0"
+	case findings.SeverityLow:
+		return "2.0"
+	default:
+		return "1.0"
 	}
 }

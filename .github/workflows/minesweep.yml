@@ -73,6 +73,7 @@ jobs:
           fi
 
       - name: Upload SARIF to GitHub Code Scanning
+        id: upload_sarif
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
@@ -82,3 +83,9 @@ jobs:
         # invocations[].executionSuccessful=false and properties.scanComplete
         # for that case, so the artifact is self-describing.
         continue-on-error: true
+
+      - name: Check SARIF upload
+        if: always() && steps.upload_sarif.outcome == 'failure'
+        run: |
+          echo "::error::SARIF upload failed; findings did not reach Code Scanning"
+          exit 1
