@@ -750,6 +750,10 @@ Benchmark runs always exit `0` — they are not a pass/fail gate.
 in the uploaded artifact — the exit code carries the truth, but code-scanning
 consumers read the file. A truncated scan also carries an error-level
 `toolExecutionNotifications` entry per reason, and `executionSuccessful: false`.
+Rules carry `properties.security-severity`, so code scanning can rank alerts by
+MineSweep's own Critical/High/Medium/Low severity instead of only the SARIF level.
+Baselined findings stay out of `results` and are reported as `findingsSuppressed`;
+they are triaged findings, not new alerts.
 
 ### `--watch`
 

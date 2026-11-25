@@ -139,6 +139,53 @@ func TestWriteSARIFSeverityMapping(t *testing.T) {
 	}
 }
 
+func TestWriteSARIFRuleSecuritySeverity(t *testing.T) {
+	report := findings.GenerateRiskReport([]findings.Finding{
+		{Type: "Critical", RuleID: "critical-rule", Severity: findings.SeverityCritical},
+		{Type: "High", RuleID: "high-rule", Severity: findings.SeverityHigh},
+		{Type: "Medium", RuleID: "medium-rule", Severity: findings.SeverityMedium},
+		{Type: "Low", RuleID: "low-rule", Severity: findings.SeverityLow},
+		{Type: "Info", RuleID: "info-rule", Severity: findings.SeverityInfo},
+		// The same rule can fire at more than one severity; the rule score
+		// must not understate the highest finding.
+		{Type: "Mixed", RuleID: "mixed-rule", Severity: findings.SeverityHigh},
+		{Type: "Mixed", RuleID: "mixed-rule", Severity: findings.SeverityCritical},
+	}, nil)
+
+	var buf bytes.Buffer
+	if err := WriteSARIF(&buf, &report, "0.1.0"); err != nil {
+		t.Fatalf("WriteSARIF: %v", err)
+	}
+	var doc SARIFOutput
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("invalid SARIF JSON: %v", err)
+	}
+
+	got := make(map[string]string)
+	for _, rule := range doc.Runs[0].Tool.Driver.Rules {
+		got[rule.ID] = rule.Properties.SecuritySeverity
+	}
+	want := map[string]string{
+		"critical-rule": "9.0",
+		"high-rule":     "7.5",
+		"medium-rule":   "5.0",
+		"low-rule":      "2.0",
+		"info-rule":     "1.0",
+		"mixed-rule":    "9.0",
+	}
+	for id, severity := range want {
+		if got[id] != severity {
+			t.Errorf("rule %s security-severity = %q, want %q", id, got[id], severity)
+		}
+	}
+	if got["critical-rule"] == got["high-rule"] {
+		t.Error("critical and high must not get the same Code Scanning severity")
+	}
+	if !strings.Contains(buf.String(), `"security-severity": "9.0"`) {
+		t.Errorf("security-severity missing from SARIF JSON: %s", buf.String())
+	}
+}
+
 func TestWriteSARIFValidJSON(t *testing.T) {
 	report := findings.GenerateRiskReport([]findings.Finding{
 		{
