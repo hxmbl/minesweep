@@ -301,6 +301,107 @@ func TestValueLessBaselineEntrySuppressesChangedValue(t *testing.T) {
 	}
 }
 
+func TestFilterNewFindingsSurvivesLineShift(t *testing.T) {
+	original := Finding{
+		Type:     "Password Variable",
+		File:     "crates/core/src/harness.rs",
+		Line:     484,
+		Value:    "self.password",
+		RuleID:   "env-password",
+		Severity: SeverityHigh,
+	}
+	b := &Baseline{Version: "1", Findings: make(map[string]BaselineEntry)}
+	UpdateBaseline(b, []Finding{original})
+
+	moved := original
+	moved.Line = 495 // unrelated edits above the finding
+	if got := FilterNewFindings([]Finding{moved}, b); len(got) != 0 {
+		t.Fatalf("shifted baselined finding resurfaced: %+v", got)
+	}
+	if got := FilterNewFindings([]Finding{original}, b); len(got) != 0 {
+		t.Fatalf("exact baselined finding resurfaced: %+v", got)
+	}
+
+	changedValue := moved
+	changedValue.Value = "some_other_reference"
+	if got := FilterNewFindings([]Finding{changedValue}, b); len(got) != 1 {
+		t.Fatalf("finding with a different value at a shifted line should be new, got %+v", got)
+	}
+	changedRule := moved
+	changedRule.RuleID = "env-token"
+	if got := FilterNewFindings([]Finding{changedRule}, b); len(got) != 1 {
+		t.Fatalf("finding with a different rule at a shifted line should be new, got %+v", got)
+	}
+}
+
+func TestFilterNewFindingsSurvivesLineShiftLegacyBaseline(t *testing.T) {
+	original := Finding{File: "a.env", Line: 10, Value: "old_key", RuleID: "aws-key"}
+	b := &Baseline{
+		Version: "1",
+		Findings: map[string]BaselineEntry{
+			legacyFindingHash(original): {File: original.File, Line: original.Line},
+		},
+	}
+
+	moved := original
+	moved.Line = 4 // lines can move up as well as down
+	if got := FilterNewFindings([]Finding{moved}, b); len(got) != 0 {
+		t.Fatalf("legacy baseline entry did not survive line shift: %+v", got)
+	}
+}
+
+func TestFilterNewFindingsShiftedMatchCountsOccurrences(t *testing.T) {
+	original := Finding{File: "a.env", Line: 10, Value: "same_key", RuleID: "aws-key"}
+	b := &Baseline{Version: "1", Findings: make(map[string]BaselineEntry)}
+	UpdateBaseline(b, []Finding{original})
+
+	first := original
+	first.Line = 20
+	second := original
+	second.Line = 30
+	got := FilterNewFindings([]Finding{first, second}, b)
+	if len(got) != 1 || got[0].Line != 30 {
+		t.Fatalf("one baselined occurrence should cover one shifted finding, got %+v", got)
+	}
+}
+
+func TestFilterNewFindingsValueLessEntrySurvivesLineShift(t *testing.T) {
+	original := Finding{File: "blob.bin", Line: 1, RuleID: "binary-rule"}
+	b := &Baseline{
+		Version: "1",
+		Findings: map[string]BaselineEntry{
+			FindingHash(original): {File: original.File, Line: original.Line, RuleID: original.RuleID},
+		},
+	}
+
+	moved := original
+	moved.Line = 12
+	if got := FilterNewFindings([]Finding{moved}, b); len(got) != 0 {
+		t.Fatalf("value-less baseline entry did not survive line shift: %+v", got)
+	}
+
+	withValue := moved
+	withValue.Value = "freshly introduced content"
+	if got := FilterNewFindings([]Finding{withValue}, b); len(got) != 1 {
+		t.Fatalf("a new value at a shifted line must not be suppressed, got %+v", got)
+	}
+}
+
+func TestPruneBaselineKeepsShiftedEntry(t *testing.T) {
+	keep := Finding{File: "a.env", Line: 5, Value: "key1", RuleID: "aws-key"}
+	b := &Baseline{Version: "1", Findings: make(map[string]BaselineEntry)}
+	UpdateBaseline(b, []Finding{keep})
+
+	moved := keep
+	moved.Line = 500
+	if removed := PruneBaseline(b, []Finding{moved}); len(removed) != 0 {
+		t.Fatalf("shifted finding should not prune its baseline entry: %+v", removed)
+	}
+	if len(b.Findings) != 1 {
+		t.Fatalf("expected baseline entry to remain, got %d entries", len(b.Findings))
+	}
+}
+
 func TestPruneBaselineRemovesOnlyStaleEntries(t *testing.T) {
 	keep := Finding{Type: "AWS", File: ".env", Line: 5, Value: "key1", RuleID: "aws-key"}
 	stale := Finding{Type: "AWS", File: "gone.env", Line: 9, Value: "key2", RuleID: "aws-key"}

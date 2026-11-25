@@ -379,10 +379,12 @@ Baselines accumulate dead entries as code drifts. `prune-baseline` drops entries
 that no longer match a current finding and reports each removal with its reason
 (file gone, line moved, rule changed, or value changed). Entries may carry a
 `reason`, `author` and `date`; these survive regeneration and appear in prune
-output. A value-less entry suppresses its rule at that location for any content,
-so MineSweep warns about it on load. Raw secret values are never written to a
-baseline file: the fingerprint binds the value, and only a one-way value token
-is stored.
+output. Matching tolerates line drift: an unrelated edit above a triaged finding
+does not make it new again, while a second occurrence of the same value is still
+reported. A value-less entry suppresses its rule at that location for any
+content, so MineSweep warns about it on load. Raw secret values are never written
+to a baseline file: the fingerprint binds the value, and only a one-way value
+token is stored.
 
 ```bash
 minesweep prune-baseline --baseline .minesweep-baseline.json .
