@@ -1,6 +1,7 @@
 package git
 
 import (
+	"io"
 	fx "minesweep/internal/fixtures"
 	"os"
 	"os/exec"
@@ -130,6 +131,87 @@ func TestGetDiffFilesSubdir(t *testing.T) {
 	if !found {
 		t.Fatalf("expected pkg/a.txt in diff files relative to toplevel, got %v", files)
 	}
+}
+
+func TestGetDiffFilesResolvesRemoteBase(t *testing.T) {
+	// GitHub Actions checkouts have origin/main but no local main. The diff
+	// must be scoped to the PR, not silently widened to the whole tree.
+	dir := t.TempDir()
+	if err := runGitCmd(dir, "init", "-b", "main"); err != nil {
+		t.Skip("git not available:", err)
+	}
+	runGitCmd(dir, "config", "user.email", "test@test.com")
+	runGitCmd(dir, "config", "user.name", "Test")
+
+	writeTestFile(t, filepath.Join(dir, "unchanged.txt"), "base")
+	writeTestFile(t, filepath.Join(dir, "changed.txt"), "base")
+	runGitCmd(dir, "add", ".")
+	runGitCmd(dir, "commit", "-m", "initial")
+	runGitCmd(dir, "checkout", "-q", "-b", "feature")
+	writeTestFile(t, filepath.Join(dir, "changed.txt"), "changed")
+	runGitCmd(dir, "add", ".")
+	runGitCmd(dir, "commit", "-m", "change")
+
+	runGitCmd(dir, "update-ref", "refs/remotes/origin/main", "HEAD~1")
+	runGitCmd(dir, "branch", "-D", "main")
+
+	files, err := GetDiffFiles(dir, "main")
+	if err != nil {
+		t.Fatalf("GetDiffFiles with only origin/main: %v", err)
+	}
+	if len(files) != 1 || files[0] != "changed.txt" {
+		t.Fatalf("expected only changed.txt from origin/main diff, got %v", files)
+	}
+}
+
+func TestGetDiffFilesWarnsOnUnresolvedBase(t *testing.T) {
+	dir := t.TempDir()
+	if err := runGitCmd(dir, "init", "-b", "main"); err != nil {
+		t.Skip("git not available:", err)
+	}
+	runGitCmd(dir, "config", "user.email", "test@test.com")
+	runGitCmd(dir, "config", "user.name", "Test")
+	writeTestFile(t, filepath.Join(dir, "a.txt"), "base")
+	runGitCmd(dir, "add", ".")
+	runGitCmd(dir, "commit", "-m", "initial")
+
+	var files []string
+	var scanErr error
+	warning := captureStderr(t, func() {
+		files, scanErr = GetDiffFiles(dir, "missing-base")
+	})
+	if scanErr != nil {
+		t.Fatalf("GetDiffFiles: %v", scanErr)
+	}
+	if len(files) != 1 || files[0] != "a.txt" {
+		t.Fatalf("expected full-tree fallback to list a.txt, got %v", files)
+	}
+	if !strings.Contains(warning, "missing-base") || !strings.Contains(warning, "full-repo scan") {
+		t.Fatalf("expected a loud fallback warning, got %q", warning)
+	}
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	original := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = original
+		r.Close()
+	}()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }
 
 func TestTopLevel(t *testing.T) {
