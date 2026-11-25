@@ -176,37 +176,100 @@ func findingHash(f Finding, hash func([]byte) [32]byte) string {
 
 func legacyFindingHash(f Finding) string { return findingHash(f, sha256.Sum256) }
 
+// baselineEntryExactMatch reports whether f is the finding recorded by hash
+// without tolerating any line drift.
+func baselineEntryExactMatch(f Finding, hash string, entry BaselineEntry) bool {
+	if FindingHash(f) == hash || legacyFindingHash(f) == hash {
+		return true
+	}
+	// A value-less entry suppresses its rule at that location regardless of
+	// the secret now found there. It is warned about on load, but the
+	// suppression is real and must stay consistent with prune().
+	return valueLess(hash, entry) &&
+		entry.File == normalizeBaselineFile(f.File) &&
+		entry.Line == f.Line &&
+		entry.RuleID == f.RuleID
+}
+
+// baselineEntryShiftedMatch reports whether f is the finding recorded by hash
+// but at a different line.
+//
+// The fingerprint binds file, rule and value as well as line, so replacing only
+// the line with the one stored in the entry is enough to recognise a triaged
+// finding after edits above it moved it. This works for BLAKE3 and legacy
+// SHA-256 keys without changing the on-disk baseline format.
+func baselineEntryShiftedMatch(f Finding, hash string, entry BaselineEntry) bool {
+	if entry.Line == f.Line || entry.Line <= 0 {
+		return false
+	}
+	candidate := f
+	candidate.File = normalizeBaselineFile(entry.File)
+	candidate.Line = entry.Line
+	return FindingHash(candidate) == hash || legacyFindingHash(candidate) == hash
+}
+
+// baselineMatches returns which findings are suppressed by the baseline and
+// which baseline entries matched at least one finding.
+//
+// Exact matches are location-based and may suppress every finding at that
+// location (value-less entries), so they are not consumed. Shifted matches are
+// one-to-one: one baselined occurrence accounts for one current occurrence,
+// otherwise a second copy of the same value elsewhere in the file would be
+// silently accepted too.
+func baselineMatches(findings []Finding, baseline *Baseline) ([]bool, map[string]bool) {
+	suppressed := make([]bool, len(findings))
+	matched := make(map[string]bool)
+	if baseline == nil {
+		return suppressed, matched
+	}
+
+	hashes := make([]string, 0, len(baseline.Findings))
+	for hash := range baseline.Findings {
+		hashes = append(hashes, hash)
+	}
+	sort.Strings(hashes)
+
+	for i, f := range findings {
+		for _, hash := range hashes {
+			if baselineEntryExactMatch(f, hash, baseline.Findings[hash]) {
+				suppressed[i] = true
+				matched[hash] = true
+				break
+			}
+		}
+	}
+
+	claimed := make(map[string]bool, len(hashes))
+	for i, f := range findings {
+		if suppressed[i] {
+			continue
+		}
+		for _, hash := range hashes {
+			if claimed[hash] {
+				continue
+			}
+			if baselineEntryShiftedMatch(f, hash, baseline.Findings[hash]) {
+				suppressed[i] = true
+				matched[hash] = true
+				claimed[hash] = true
+				break
+			}
+		}
+	}
+	return suppressed, matched
+}
+
 func FilterNewFindings(findings []Finding, baseline *Baseline) []Finding {
 	if baseline == nil {
 		return findings
 	}
+	suppressed, _ := baselineMatches(findings, baseline)
 
 	var newFindings []Finding
-	for _, f := range findings {
-		hash := FindingHash(f)
-		if _, exists := baseline.Findings[hash]; exists {
-			continue
+	for i, f := range findings {
+		if !suppressed[i] {
+			newFindings = append(newFindings, f)
 		}
-		if _, exists := baseline.Findings[legacyFindingHash(f)]; exists {
-			continue
-		}
-		// A value-less entry suppresses its rule at that location regardless
-		// of the secret now found there. It is warned about on load, but the
-		// suppression is real and must stay consistent with prune().
-		suppressed := false
-		for hash, entry := range baseline.Findings {
-			if valueLess(hash, entry) &&
-				entry.File == normalizeBaselineFile(f.File) &&
-				entry.Line == f.Line &&
-				entry.RuleID == f.RuleID {
-				suppressed = true
-				break
-			}
-		}
-		if suppressed {
-			continue
-		}
-		newFindings = append(newFindings, f)
 	}
 	return newFindings
 }
@@ -289,23 +352,11 @@ func PruneBaseline(baseline *Baseline, findings []Finding) []BaselineEntry {
 		return nil
 	}
 
+	_, matched := baselineMatches(findings, baseline)
+
 	var removed []BaselineEntry
 	for hash, entry := range baseline.Findings {
-		matched := false
-		for _, f := range findings {
-			if FindingHash(f) == hash || legacyFindingHash(f) == hash {
-				matched = true
-				break
-			}
-			if valueLess(hash, entry) &&
-				entry.File == normalizeBaselineFile(f.File) &&
-				entry.Line == f.Line &&
-				entry.RuleID == f.RuleID {
-				matched = true
-				break
-			}
-		}
-		if !matched {
+		if !matched[hash] {
 			removed = append(removed, entry)
 			delete(baseline.Findings, hash)
 		}
