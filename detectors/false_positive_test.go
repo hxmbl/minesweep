@@ -89,3 +89,70 @@ func TestRealSecretOnALineWithADefinitionIsStillFound(t *testing.T) {
 		t.Error("a real key next to a function definition must still be reported")
 	}
 }
+
+// STRM-723: an arbitrary UUID is not an Azure tenant ID. Only a tenant/directory
+// key gives the UUID a credential role.
+func TestArbitraryUUIDIsNotAzureTenantID(t *testing.T) {
+	body := "request_id = \"3f6b8a2e-9c4d-4e1a-b7c8-2d5a6f1e3c4d\"\n" +
+		"trace = 9b2f4c8e-1a3d-4f5b-8c6d-7e8a9b0c1d2e\n"
+
+	for _, f := range scanText(t, "app.py", body) {
+		if f.RuleID == "azure-tenant-id" {
+			t.Fatalf("arbitrary UUID flagged as azure-tenant-id: %+v", f)
+		}
+	}
+}
+
+func TestTenantKeyedUUIDIsAzureTenantID(t *testing.T) {
+	body := "tenant_id = \"3f6b8a2e-9c4d-4e1a-b7c8-2d5a6f1e3c4d\"\n"
+
+	found := false
+	for _, f := range scanText(t, "app.py", body) {
+		if f.RuleID == "azure-tenant-id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("tenant_id-keyed UUID must still be flagged as azure-tenant-id")
+	}
+}
+
+// STRM-723: an ordinary `project` assignment is not a GCP project ID.
+func TestOrdinaryProjectAssignmentIsNotGCPProjectID(t *testing.T) {
+	body := "project = \"ItsDangerous\"\n" // pallets/itsdangerous docs/conf.py
+
+	for _, f := range scanText(t, "conf.py", body) {
+		if f.RuleID == "gcp-project-id" {
+			t.Fatalf("ordinary project assignment flagged as gcp-project-id: %+v", f)
+		}
+	}
+}
+
+func TestGCPProjectAssignmentIsGCPProjectID(t *testing.T) {
+	body := "project = \"my-gcp-project-1\"\n"
+
+	found := false
+	for _, f := range scanText(t, "app.py", body) {
+		if f.RuleID == "gcp-project-id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("project-keyed lowercase value must still be flagged as gcp-project-id")
+	}
+}
+
+// STRM-668/STRM-723: ordinary Rust identifiers/fields containing "project" are
+// not GCP project IDs — the keyword must be bounded and the value lowercase.
+func TestOrdinaryRustProjectIdentifiersAreNotGCPProjectID(t *testing.T) {
+	body := "let by_project = some_value;\n" +
+		"let channel_project = other_value;\n" +
+		"pub struct Foo { pub project: Project }\n" +
+		"let project_id = ProjectId::new();\n"
+
+	for _, f := range scanText(t, "lib.rs", body) {
+		if f.RuleID == "gcp-project-id" {
+			t.Fatalf("ordinary Rust identifier flagged as gcp-project-id: %+v", f)
+		}
+	}
+}

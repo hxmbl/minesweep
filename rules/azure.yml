@@ -48,8 +48,9 @@ rules:
     severity: low
     tags: [azure, cloud]
     patterns:
-      - regex: '\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b'
+      - regex: '(?i)(?:tenant[_-]?id|tenantid|directory[_-]?id|azure[_-]?tenant|tenant)[ \t]*[:=][ \t]*["\x27]?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["\x27]?'
         confidence: 0.30
+        capture_group: 1
     file_filter:
       exclude:
         - "*.md"

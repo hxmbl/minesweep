@@ -36,6 +36,9 @@ rules:
     severity: low
     tags: [gcp, cloud]
     patterns:
-      - regex: '(?i)(?:project|gcp_project|google_project)[ \t]*[:=][ \t]*["\x27]?([a-z][a-z0-9\-]{4,28}[a-z0-9])["\x27]?'
+      # `\b` bounds the keyword so ordinary identifiers containing "project"
+      # (`by_project`, `channel_project`) don't match; case-insensitivity applies
+      # to the keyword only — a GCP project ID is lowercase. (STRM-723 / STRM-668.)
+      - regex: '\b(?i:(?:gcp_project|google_project|project))\b[ \t]*[:=][ \t]*["\x27]?([a-z][a-z0-9\-]{4,28}[a-z0-9])["\x27]?'
         confidence: 0.60
         capture_group: 1
