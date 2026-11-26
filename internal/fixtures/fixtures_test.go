@@ -34,6 +34,7 @@ func TestFixturesMatchTheShapeTheirDetectorRequires(t *testing.T) {
 		{"AWSSecretKey", AWSSecretKey(), `^[A-Za-z0-9/+=]{40}$`},
 		{"SlackToken", SlackToken(), `^xox[baprs]-[0-9A-Za-z\-_]+$`},
 		{"StripeSecretKey", StripeSecretKey(), `^sk_live_[0-9a-zA-Z]{24}$`},
+		{"StripeTestSecretKey", StripeTestSecretKey(), `^sk_test_[0-9a-zA-Z]{24}$`},
 		{"GitHubPAT", GitHubPAT(), `^ghp_[0-9A-Za-z]{36}$`},
 		{"GoogleAPIKey", GoogleAPIKey(), `^AIza[0-9A-Za-z\-_]{35}$`},
 		{"OpaqueToken", OpaqueToken(), `^[A-Za-z0-9]{20,}$`},

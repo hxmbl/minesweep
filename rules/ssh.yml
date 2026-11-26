@@ -9,15 +9,27 @@ rules:
       - regex: -----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY-----
         confidence: 0.95
 
+  # A public key is meant to be shared: it is the private half that is the
+  # secret. This rule used to report public-key lines at HIGH, which meant a
+  # checked-in `id_rsa.pub` fixture (a normal thing to have in a repo) read as a
+  # leaked credential and could block a commit. The finding is kept, because a
+  # pasted authorized_keys line still tells you a key is trusted somewhere, but
+  # at LOW it is context rather than an incident. `*.pub` files are excluded
+  # outright — the extension is the author asserting the file holds the public
+  # half — while `authorized_keys` files and inline copies still match.
+  # Private-key detection is unaffected: ssh-private-key stays critical.
   - id: ssh-authorized-keys
     type: regex
     name: SSH Authorized Keys
-    description: SSH authorized_keys file content
-    severity: high
-    tags: [ssh, credentials]
+    description: SSH authorized_keys entry (public key, not a secret)
+    severity: low
+    tags: [ssh, public-key]
     patterns:
       - regex: (ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-nistp\d{3})\s+AAAA[0-9A-Za-z+/]+[=]{0,3}(\s|$)
         confidence: 0.90
+    file_filter:
+      exclude:
+        - "*.pub"
 
   - id: pgp-private-key
     type: regex
