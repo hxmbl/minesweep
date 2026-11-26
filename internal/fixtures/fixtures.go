@@ -53,6 +53,13 @@ func StripeSecretKey() string {
 	return strings.Join([]string{"sk_", "live_", "4eC39Hq", "LyjWDarj", "tT1zdp7dc"}, "")
 }
 
+// StripeTestSecretKey is the test-mode counterpart. It is Stripe's own
+// documented example key, which is why it must stay assembled from fragments:
+// it is a real-shaped string that GitHub's push protection recognises.
+func StripeTestSecretKey() string {
+	return strings.Join([]string{"sk_", "test_", "4eC39Hq", "LyjWDarj", "tT1zdp7dc"}, "")
+}
+
 // GitHubPAT is a well-formed but fictional GitHub personal access token: the
 // ghp_ prefix and 36 alphanumerics.
 func GitHubPAT() string {
