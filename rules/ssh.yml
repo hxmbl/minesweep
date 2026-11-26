@@ -2,11 +2,14 @@ rules:
   - id: ssh-private-key
     type: regex
     name: SSH Private Key
-    description: SSH private key (RSA, DSA, ECDSA, Ed25519, OpenSSH)
+    description: SSH private key in any PEM wrapper (PKCS#1/PKCS#8/OpenSSH, encrypted or not)
     severity: critical
     tags: [ssh, credentials, private-key]
     patterns:
-      - regex: -----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY-----
+      # Any number of uppercase words between BEGIN and PRIVATE KEY covers
+      # PKCS#8 (`BEGIN PRIVATE KEY`), `ENCRYPTED PRIVATE KEY`, and the legacy
+      # RSA/DSA/EC/OpenSSH wrappers without enumerating every algorithm.
+      - regex: -----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----
         confidence: 0.95
 
   # A public key is meant to be shared: it is the private half that is the
@@ -25,7 +28,11 @@ rules:
     severity: low
     tags: [ssh, public-key]
     patterns:
-      - regex: (ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-nistp\d{3})\s+AAAA[0-9A-Za-z+/]+[=]{0,3}(\s|$)
+      # The key-type token is open-ended: any alphanumeric identifier (with
+      # dots, underscores, @ or + for vendor/security-key types) followed by a
+      # base64 body. Old rules listed algorithms one by one and silently missed
+      # new ones; `*` alone is not a Go-regexp wildcard, `\S+` / this class is.
+      - regex: \b[A-Za-z0-9][A-Za-z0-9._@+/-]*\s+AAAA[0-9A-Za-z+/]+[=]{0,3}(\s|$)
         confidence: 0.90
     file_filter:
       exclude:

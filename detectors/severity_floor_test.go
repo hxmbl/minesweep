@@ -101,3 +101,57 @@ func TestStripeLiveKeyIsStillCritical(t *testing.T) {
 		t.Fatalf("live key should be CRITICAL, got %v", f.Severity)
 	}
 }
+
+// The key-type token is deliberately open-ended now: an algorithm we have not
+// enumerated yet must still be recognised, while *.pub files stay excluded.
+func TestSSHUnknownKeyTypeIsStillDetected(t *testing.T) {
+	body := "ssh-future-ed25519@vendor AAAA" + strings.Repeat("B", 40) + " host\n"
+	got := scanText(t, "authorized_keys", body)
+	f := findType(t, got, "SSH Authorized Keys")
+	if f == nil || f.Severity != findings.SeverityLow {
+		t.Fatalf("unknown public-key type should be detected at LOW, got %v", got)
+	}
+}
+
+func TestPrivateKeyPEMWrappersAreAllCritical(t *testing.T) {
+	for _, header := range []string{
+		"-----BEGIN PRIVATE KEY-----",           // PKCS#8
+		"-----BEGIN ENCRYPTED PRIVATE KEY-----", // encrypted PKCS#8
+		"-----BEGIN RSA PRIVATE KEY-----",       // PKCS#1
+		"-----BEGIN EC PRIVATE KEY-----",        // EC
+		"-----BEGIN OPENSSH PRIVATE KEY-----",   // OpenSSH
+	} {
+		t.Run(header, func(t *testing.T) {
+			body := header + "\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n"
+			f := findType(t, scanText(t, "key.pem", body), "SSH Private Key")
+			if f == nil || f.Severity != findings.SeverityCritical {
+				t.Fatalf("%s should be CRITICAL, got %v", header, f)
+			}
+		})
+	}
+}
+
+func TestStripeRestrictedAndWebhookDecoysAreNotReported(t *testing.T) {
+	body := "rk_live_" + strings.Repeat("0", 24) + "\nwhsec_" + strings.Repeat("0", 32) + "\n"
+	got := scanText(t, "notes.txt", body)
+	for _, typ := range []string{"Stripe Restricted Key", "Stripe Webhook Secret"} {
+		if f := findType(t, got, typ); f != nil {
+			t.Fatalf("zero-entropy decoy must not be reported as %s: %v", typ, f)
+		}
+	}
+}
+
+func TestStripeRestrictedAndWebhookStillDetected(t *testing.T) {
+	// Assembled from fragments so the test file does not itself contain
+	// secret-shaped strings that pushes reject.
+	seed := strings.Join([]string{"4eC39Hq", "LyjWDarj", "tT1zdp7dc"}, "")
+	body := strings.Join([]string{"rk_", "live_", seed}, "") + "\n"
+	body += strings.Join([]string{"whsec_", seed, "Ab12Cd34"}, "") + "\n"
+	got := scanText(t, "notes.txt", body)
+	if f := findType(t, got, "Stripe Restricted Key"); f == nil {
+		t.Fatalf("a real restricted key must still be detected, got %v", got)
+	}
+	if f := findType(t, got, "Stripe Webhook Secret"); f == nil {
+		t.Fatalf("a real webhook secret must still be detected, got %v", got)
+	}
+}

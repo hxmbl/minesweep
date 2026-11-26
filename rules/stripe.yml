@@ -50,10 +50,15 @@ rules:
     severity: high
     tags: [stripe, payments, credentials]
     patterns:
+      # Restricted keys are live credentials too, so the same shape-only decoy
+      # rule applies as for sk_live_. Test-mode restricted keys stay lowish but
+      # keep a floor so a repeated-character fixture does not read as a key.
       - regex: '\b(rk_live_[0-9a-zA-Z]{24,})\b'
         confidence: 0.85
+        min_entropy: 3.0
       - regex: '\b(rk_test_[0-9a-zA-Z]{24,})\b'
         confidence: 0.70
+        min_entropy: 2.0
 
   - id: stripe-webhook-secret
     type: regex
@@ -64,3 +69,4 @@ rules:
     patterns:
       - regex: '\b(whsec_[0-9a-zA-Z]{32,})\b'
         confidence: 0.90
+        min_entropy: 3.0
