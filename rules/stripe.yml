@@ -46,18 +46,27 @@ rules:
   - id: stripe-restricted-key
     type: regex
     name: Stripe Restricted Key
-    description: Stripe payment processor restricted API key
+    description: Stripe payment processor live restricted API key
     severity: high
     tags: [stripe, payments, credentials]
     patterns:
       # Restricted keys are live credentials too, so the same shape-only decoy
-      # rule applies as for sk_live_. Test-mode restricted keys stay lowish but
-      # keep a floor so a repeated-character fixture does not read as a key.
+      # rule applies as for sk_live_.
       - regex: '\b(rk_live_[0-9a-zA-Z]{24,})\b'
         confidence: 0.85
         min_entropy: 3.0
+
+  - id: stripe-restricted-test-key
+    type: regex
+    name: Stripe Restricted Test Key
+    description: Stripe test-mode restricted API key (not a production credential)
+    severity: low
+    tags: [stripe, payments, test-key]
+    patterns:
+      # Test mode gets its own LOW rule, matching sk_test_, instead of sharing
+      # the HIGH severity of the live restricted-key rule.
       - regex: '\b(rk_test_[0-9a-zA-Z]{24,})\b'
-        confidence: 0.70
+        confidence: 0.50
         min_entropy: 2.0
 
   - id: stripe-webhook-secret

@@ -155,3 +155,16 @@ func TestStripeRestrictedAndWebhookStillDetected(t *testing.T) {
 		t.Fatalf("a real webhook secret must still be detected, got %v", got)
 	}
 }
+
+func TestStripeRestrictedTestKeyIsLowNotHigh(t *testing.T) {
+	seed := strings.Join([]string{"4eC39Hq", "LyjWDarj", "tT1zdp7dc"}, "")
+	body := strings.Join([]string{"rk_", "test_", seed}, "") + "\n"
+	got := scanText(t, "notes.txt", body)
+	if f := findType(t, got, "Stripe Restricted Key"); f != nil {
+		t.Fatalf("rk_test_ must not be reported as a live restricted key: %v", f)
+	}
+	f := findType(t, got, "Stripe Restricted Test Key")
+	if f == nil || f.Severity != findings.SeverityLow {
+		t.Fatalf("rk_test_ should be LOW, got %v", got)
+	}
+}
